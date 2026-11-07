@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>LocalAgent</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23C96442'/%3E%3Cpath d='M16 6l2.2 7.8L26 16l-7.8 2.2L16 26l-2.2-7.8L6 16l7.8-2.2z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="app" class="app">
+  <aside id="sidebar" class="sidebar">
+    <div class="sb-head">
+      <div class="brand"><span class="brand-glyph" id="brandGlyph"></span><span class="brand-name">LocalAgent</span></div>
+      <button class="icon-btn" id="btnCollapse" title="收起侧栏 (Ctrl+B)"></button>
+    </div>
+    <button class="new-chat" id="btnNew"><span id="newIcon"></span><span>新对话</span></button>
+    <div class="sb-list" id="sessionList"></div>
+    <div class="sb-foot">
+      <button class="foot-btn" id="btnSkills"><span class="fi"></span><span>技能</span></button>
+      <button class="foot-btn" id="btnMemory"><span class="fi"></span><span>记忆</span></button>
+      <button class="foot-btn" id="btnSettings"><span class="fi"></span><span>设置</span></button>
+    </div>
+  </aside>
+  <div id="scrim" class="scrim"></div>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn only-narrow" id="btnMenu" title="菜单"></button>
+      <button class="icon-btn only-collapsed" id="btnExpand" title="展开侧栏 (Ctrl+B)"></button>
+      <div class="title-wrap"><input id="titleInput" class="title-input" value="" placeholder="新对话" spellcheck="false" maxlength="120"></div>
+      <div class="top-actions">
+        <button class="chip" id="chipWs" title="选择工作区"><span class="ci" id="wsIcon"></span><span id="wsName">未选择工作区</span></button>
+        <div class="ctx-meter" id="ctxMeter" title="">
+          <svg viewBox="0 0 36 36" class="ring"><circle class="ring-bg" cx="18" cy="18" r="15"/><circle class="ring-fg" id="ringFg" cx="18" cy="18" r="15"/></svg>
+          <span class="ctx-text" id="ctxText">0%</span>
+          <button class="mini-btn" id="btnCompact" title="把较早的对话压缩成摘要">压缩</button>
+        </div>
+        <button class="chip engine" id="chipEngine" title="模型与引擎"><span class="dot" id="engDot"></span><span id="engText">未加载</span></button>
+        <button class="icon-btn" id="btnDrawer" title="工作区面板"></button>
+      </div>
+    </header>
+
+    <div class="content">
+      <section class="chat" id="chat">
+        <div class="scroll" id="scroll"><div class="col" id="col"></div></div>
+        <button class="to-bottom" id="toBottom" hidden></button>
+        <div class="composer-wrap">
+          <div class="col">
+            <div class="composer" id="composer">
+              <div class="chips" id="attachChips"></div>
+              <div class="slash-pop" id="slashPop" hidden></div>
+              <textarea id="input" rows="1" placeholder="给 LocalAgent 布置任务…（Enter 发送，Shift+Enter 换行，输入 / 选择技能）" spellcheck="false"></textarea>
+              <div class="comp-row">
+                <div class="comp-left">
+                  <button class="icon-btn" id="btnAttach" title="添加图片或文件"></button>
+                  <input type="file" id="fileInput" multiple hidden>
+                  <div class="seg-wrap"><button class="pill" id="modePill" title="权限模式"></button></div>
+                  <button class="pill" id="thinkPill" title="思考模式"></button>
+                  <span class="taint-chip" id="taintChip" hidden></span>
+                </div>
+                <div class="comp-right">
+                  <span class="hint" id="sendHint"></span>
+                  <button class="send" id="btnSend" title="发送"></button>
+                </div>
+              </div>
+            </div>
+            <div class="foot-note">本地模型可能出错；涉及文件修改与命令时请留意审批卡片。</div>
+          </div>
+        </div>
+      </section>
+      <aside class="drawer" id="drawer" hidden></aside>
+    </div>
+  </main>
+</div>
+<div id="modalRoot"></div>
+<div id="toastRoot" class="toasts"></div>
+<div id="dropMask" class="drop-mask" hidden>松开以添加文件</div>
+<script src="/js/util.js"></script>
+<script src="/js/md.js"></script>
+<script src="/js/api.js"></script>
+<script src="/js/chat.js"></script>
+<script src="/js/composer.js"></script>
+<script src="/js/sidebar.js"></script>
+<script src="/js/settings.js"></script>
+<script src="/js/panels.js"></script>
+<script src="/js/main.js"></script>
+</body>
+</html>
