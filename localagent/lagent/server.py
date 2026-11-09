@@ -283,6 +283,9 @@ def make_app(st: State) -> Starlette:
             if s.active_run:
                 st.agent.cancel(s.active_run)
             st.store.delete(s.id)
+            from .tools import jobs as _jobs
+            _jobs.stop_session(s.id)           # 会话没了，它启动的后台任务也一并终止
+            st.agent.seen_files.pop(s.id, None)
             return J({"ok": True})
         if req.method == "PATCH":
             d = await jbody(req)

@@ -29,6 +29,8 @@ class Tool:
     title: Callable[[dict], str] | None = None
     preview: Callable[..., Awaitable[dict | None]] | None = None   # async (ctx, args) -> {"kind","text"}
     path_args: tuple[str, ...] = ()
+    # 执行/审批之前的同步预检：返回错误文本则直接拒绝（不打扰用户审批一个注定失败的操作）
+    precheck: Callable[..., str | None] | None = None
 
     def schema(self) -> dict:
         return {"type": "function", "function": {"name": self.name, "description": self.description,

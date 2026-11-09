@@ -43,6 +43,9 @@ DEFAULTS: dict[str, Any] = {
     "agent": {
         "max_steps": 40, "permission_mode": "ask", "system_prompt_extra": "",
         "auto_title": True, "memory_auto_recall": True, "memory_recall_k": 6,
+        "require_read_before_edit": True,     # 改/覆盖已有文本文件前，本会话必须读过它且之后没被别人改动
+        "parallel_readonly": True,            # 同一步里连续的只读工具调用并发执行
+        "project_instructions": True,         # 自动加载工作区里的 AGENTS.md / CLAUDE.md
     },
     "security": {
         "allow_network_commands": False, "command_sandbox": "auto", "command_timeout_s": 120,

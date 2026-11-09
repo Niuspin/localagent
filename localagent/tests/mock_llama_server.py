@@ -98,6 +98,8 @@ def script(messages):
         return ("tool", "write_file", {"path": "notes/hello.txt", "content": "你好，世界\n第二行\n"})
     if "编辑文件" in u:
         return ("tool", "edit_file", {"path": "notes/hello.txt", "old_string": "第二行", "new_string": "改过的第二行"})
+    if "并行读取" in u:      # 一步里同时发出两个只读调用
+        return ("tools", [("read_file", {"path": "notes/hello.txt"}), ("list_dir", {"path": "."})], None)
     if "读取上传" in u:
         return ("tool", "read_file", {"path": "uploads/doc.txt"})
     if "读取" in u:
@@ -202,6 +204,11 @@ class H(BaseHTTPRequestHandler):
                 for i in range(0, len(a), 5):
                     chunk({"content": a[i:i + 5]}); comp += 2; time.sleep(0.002)
                 fin = "stop"
+            elif kind == "tools":
+                for i, (nm, ar) in enumerate(a):
+                    chunk({"tool_calls": [{"index": i, "id": f"call_mock{i + 1}", "type": "function",
+                                           "function": {"name": nm, "arguments": json.dumps(ar, ensure_ascii=False)}}]})
+                comp, fin = 40, "tool_calls"
             else:
                 args = json.dumps(b, ensure_ascii=False)
                 half = len(args) // 2

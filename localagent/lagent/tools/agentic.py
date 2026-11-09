@@ -1,9 +1,30 @@
 """与 agent 自身能力相关的工具：记忆（保存/检索/遗忘）、技能（加载/读文件/创建）。"""
 from __future__ import annotations
 
+from .. import toolset
 from .base import P, Tool, ToolResult, obj, register
 from .ctx import ToolCtx
 from .files import err
+
+
+# ------------------------------------------------------------------ 工具分级加载
+async def load_tools(ctx: ToolCtx, a: dict) -> ToolResult:
+    want = toolset.normalize(a.get("groups"))
+    if not want:
+        return err("groups 无效。可选: " + "；".join(f"{g}（{d}）" for g, d in toolset.GROUP_DESC.items()) + "；或 all")
+    new = want - ctx.session.tool_groups
+    ctx.session.tool_groups |= want
+    names = [t for g in sorted(want) for t in toolset.EXT_GROUPS[g]]
+    if not new:
+        return ToolResult("这些工具已经可用: " + ", ".join(names))
+    return ToolResult("已加载工具: " + ", ".join(names) + "。从下一步起可以直接调用。")
+
+
+register(Tool("load_tools", "加载低频工具组。groups 可选: office（Word/Excel/PPT/PDF 创建与修改）、fileops（删除/移动/复制/新建目录）、"
+                            "extras（技能文件、创建技能、删除记忆）、all。",
+              obj({"groups": {"type": "array", "items": {"type": "string", "enum": [*toolset.EXT_GROUPS, "all"]},
+                              "description": "要加载的工具组"}}, ["groups"]),
+              load_tools, "meta", title=lambda a: "加载工具: " + ",".join(map(str, a.get("groups") or []))))
 
 
 # ------------------------------------------------------------------ 记忆
@@ -66,6 +87,7 @@ async def use_skill(ctx: ToolCtx, a: dict) -> ToolResult:
         names = ", ".join(s["name"] for s in ctx.skills.enabled()) or "（无）"
         return err(f"{e.args[0]}。可用技能: {names}")
     ctx.session.loaded_skills.add(a["name"])
+    ctx.session.tool_groups |= {"office", "fileops"}      # 技能的做法常要读写办公文件、整理文件
     return ToolResult(text, meta=meta)
 
 

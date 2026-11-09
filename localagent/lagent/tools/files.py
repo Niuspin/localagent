@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,36 @@ def commit_bytes(ctx: ToolCtx, p: Path, data: bytes, op: str, summary: str) -> d
     return {"path": ctx.guard.rel(p), "undo_id": jid, "created": not existed}
 
 
+# ------------------------------------------------------------------ 先读再改
+def mark_seen(ctx: ToolCtx, p: Path, data: bytes) -> None:
+    """记录“本会话里模型见过/写过这份内容”。内容之后若被用户或命令改动，哈希会对不上。"""
+    ctx.session.seen[ctx.guard.rel(p)] = sha256_bytes(data)
+
+
+def _stale_reason(ctx: ToolCtx, p: Path) -> str | None:
+    if not ctx.cfg.get("agent", "require_read_before_edit", default=True) or not p.is_file():
+        return None
+    h = ctx.session.seen.get(ctx.guard.rel(p))
+    if h is None:
+        return f"请先用 read_file 读取 {ctx.guard.rel(p)} 再修改它（本会话还没有读过这个文件，直接改很容易写错）。"
+    try:
+        if sha256_file(p) != h:
+            return f"{ctx.guard.rel(p)} 在你上次读取/写入之后被改动过（可能是用户或某条命令改的）。请重新 read_file 再修改。"
+    except OSError:
+        return None
+    return None
+
+
+def _edit_precheck(ctx: ToolCtx, a: dict) -> str | None:
+    try:
+        p = ctx.guard.resolve(a.get("path", ""), write=True)
+    except Exception:  # noqa: BLE001  路径问题交给后面的统一安全检查去报告
+        return None
+    if p.suffix.lower() in OFFICE_EXT:
+        return None
+    return _stale_reason(ctx, p)
+
+
 def _ensure_parent(ctx: ToolCtx, p: Path) -> list[Path]:
     """为新文件创建缺失的父目录，并为每个新建目录写 mkdir 日志（可撤销）。"""
     made: list[Path] = []
@@ -119,6 +150,7 @@ async def read_file(ctx: ToolCtx, a: dict) -> ToolResult:
     if looks_binary(raw):
         return err(f"二进制文件（{size} 字节，类型 {ext or '未知'}），无法按文本读取")
     text, enc, _nl = decode_bytes(raw)
+    mark_seen(ctx, p, raw)
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
@@ -192,7 +224,9 @@ async def write_file(ctx: ToolCtx, a: dict) -> ToolResult:
         old, enc, nl = decode_bytes(raw)
     else:
         _ensure_parent(ctx, p)
-    meta = commit_bytes(ctx, p, encode_text(content, enc, nl), "write", f"{'覆盖' if old is not None else '创建'} {ctx.guard.rel(p)}")
+    data = encode_text(content, enc, nl)
+    meta = commit_bytes(ctx, p, data, "write", f"{'覆盖' if old is not None else '创建'} {ctx.guard.rel(p)}")
+    mark_seen(ctx, p, data)
     n = content.count("\n") + (0 if content.endswith("\n") or not content else 1)
     return ToolResult(f"已{'覆盖' if old is not None else '创建'} {meta['path']}（{n} 行，{len(content)} 字符）", meta=meta)
 
@@ -215,7 +249,50 @@ async def write_preview(ctx: ToolCtx, a: dict) -> dict | None:
 register(Tool(
     "write_file", "创建新文本文件，或用 content 完整覆盖已有文件。修改已有文件的局部内容请优先用 edit_file。会自动创建缺失的目录。",
     obj({"path": P("string", "相对工作区的路径"), "content": P("string", "完整文件内容")}, ["path", "content"]),
-    write_file, "write", title=lambda a: f"写入 {a.get('path', '')}", preview=write_preview, path_args=("path",)))
+    write_file, "write", title=lambda a: f"写入 {a.get('path', '')}", preview=write_preview, path_args=("path",),
+    precheck=_edit_precheck))
+
+
+def _lead(s: str) -> str:
+    return s[: len(s) - len(s.lstrip(" \t"))]
+
+
+def _reindent_edit(text: str, old: str, new: str) -> str | None:
+    """容错：old_string 的缩进（空格/Tab/层级）与文件不一致，但去掉首尾空白后逐行一致，且只有唯一一处匹配时，
+    按文件里的真实缩进替换，并把 new_string 的缩进整体平移对齐。本地小模型最常见的就是缩进抄错。"""
+    t_lines, o_lines, n_lines = text.split("\n"), old.split("\n"), new.split("\n")
+    trimmed = False
+    while o_lines and not o_lines[0].strip():
+        o_lines.pop(0)
+        trimmed = True
+    while o_lines and not o_lines[-1].strip():
+        o_lines.pop()
+        trimmed = True
+    if not o_lines:
+        return None
+    key = [x.strip() for x in o_lines]
+    hits = [i for i in range(len(t_lines) - len(key) + 1) if all(t_lines[i + j].strip() == key[j] for j in range(len(key)))]
+    if len(hits) != 1:
+        return None
+    if trimmed:
+        while n_lines and not n_lines[0].strip():
+            n_lines.pop(0)
+        while n_lines and not n_lines[-1].strip():
+            n_lines.pop()
+    i = hits[0]
+    win_ind, old_ind = _lead(t_lines[i]), _lead(o_lines[0])
+    if win_ind != old_ind:
+        shifted = []
+        for ln in n_lines:
+            if not ln.strip():
+                shifted.append(ln)
+            elif ln.startswith(old_ind):
+                shifted.append(win_ind + ln[len(old_ind):])
+            else:
+                return None          # new_string 的缩进体系和 old_string 对不上，无法安全推断，交还给模型重读
+        n_lines = shifted
+    t_lines[i:i + len(key)] = n_lines
+    return "\n".join(t_lines)
 
 
 def _apply_edit(text: str, old: str, new: str, replace_all: bool) -> tuple[str | None, str]:
@@ -231,6 +308,11 @@ def _apply_edit(text: str, old: str, new: str, replace_all: bool) -> tuple[str |
                 if all(t_lines[i + j].rstrip() == o_lines[j].rstrip() for j in range(len(o_lines))):
                     t_lines[i:i + len(o_lines)] = new.split("\n")
                     return "\n".join(t_lines), "ok(忽略行尾空白)"
+        # 容错：忽略缩进差异（唯一匹配时按文件原缩进对齐）
+        if old.strip() and not replace_all:
+            fixed = _reindent_edit(text, old, new)
+            if fixed is not None:
+                return fixed, "ok(缩进已按文件原样对齐)"
         first = next((ln.strip() for ln in old.split("\n") if ln.strip()), "")
         near = difflib.get_close_matches(first, [ln.strip() for ln in text.split("\n")], n=3, cutoff=0.6) if first else []
         hint = ("；文件中最相似的行: " + " | ".join(repr(x[:80]) for x in near)) if near else ""
@@ -253,7 +335,9 @@ async def edit_file(ctx: ToolCtx, a: dict) -> ToolResult:
     new_text, why = _apply_edit(text, a["old_string"], a["new_string"], bool(a.get("replace_all")))
     if new_text is None:
         return err(why)
-    meta = commit_bytes(ctx, p, encode_text(new_text, enc, nl), "edit", f"编辑 {ctx.guard.rel(p)}")
+    data = encode_text(new_text, enc, nl)
+    meta = commit_bytes(ctx, p, data, "edit", f"编辑 {ctx.guard.rel(p)}")
+    mark_seen(ctx, p, data)
     return ToolResult(f"已编辑 {meta['path']}\n" + make_diff(text, new_text, meta["path"], 3000), meta=meta)
 
 
@@ -276,7 +360,8 @@ register(Tool(
     obj({"path": P("string", "文件路径"), "old_string": P("string", "要被替换的原文（逐字符，含缩进）"),
          "new_string": P("string", "替换后的文本"), "replace_all": P("boolean", "替换所有出现处，默认 false")},
         ["path", "old_string", "new_string"]),
-    edit_file, "write", title=lambda a: f"编辑 {a.get('path', '')}", preview=edit_preview, path_args=("path",)))
+    edit_file, "write", title=lambda a: f"编辑 {a.get('path', '')}", preview=edit_preview, path_args=("path",),
+    precheck=_edit_precheck))
 
 
 # ------------------------------------------------------------------ list_dir / glob / grep
@@ -291,7 +376,7 @@ def _walk(root: Path, max_depth: int):
         yield d, dns, sorted(fns)
 
 
-async def list_dir(ctx: ToolCtx, a: dict) -> ToolResult:
+def _list_dir_sync(ctx: ToolCtx, a: dict) -> ToolResult:
     p = ctx.guard.resolve(a.get("path") or ".")
     if not p.is_dir():
         return err(f"不是目录: {a.get('path')}")
@@ -316,6 +401,10 @@ async def list_dir(ctx: ToolCtx, a: dict) -> ToolResult:
     return ToolResult(f"{ctx.guard.rel(p)}/\n" + ("\n".join(lines) or "(空目录)"))
 
 
+async def list_dir(ctx: ToolCtx, a: dict) -> ToolResult:
+    return await asyncio.to_thread(_list_dir_sync, ctx, a)       # 遍历目录放进线程：不卡事件循环，也能和其他只读调用并发
+
+
 def _hsize(n: int) -> str:
     for u in ("B", "KB", "MB", "GB"):
         if n < 1024 or u == "GB":
@@ -329,7 +418,7 @@ register(Tool("list_dir", "列出目录内容（默认当前工作区根）。de
               list_dir, "read", title=lambda a: f"列出 {a.get('path') or '.'}", path_args=("path",)))
 
 
-async def glob_files(ctx: ToolCtx, a: dict) -> ToolResult:
+def _glob_sync(ctx: ToolCtx, a: dict) -> ToolResult:
     root = ctx.guard.resolve(a.get("path") or ".")
     pat = a["pattern"].replace("\\", "/")
     rx = re.compile(fnmatch.translate(pat if "/" in pat else "**/" + pat).replace(r"(?s:", "(?s:"), re.I)
@@ -343,6 +432,10 @@ async def glob_files(ctx: ToolCtx, a: dict) -> ToolResult:
                 if len(res) >= 500:
                     return ToolResult("\n".join(res) + "\n…[已达 500 条上限]")
     return ToolResult("\n".join(res) if res else "没有匹配的文件")
+
+
+async def glob_files(ctx: ToolCtx, a: dict) -> ToolResult:
+    return await asyncio.to_thread(_glob_sync, ctx, a)
 
 
 register(Tool("glob", "按通配符查找文件，如 '**/*.py'、'*.docx'、'src/**/test_*.js'。",
@@ -498,18 +591,29 @@ def _shell_argv(cmd: str) -> list[str]:
     return [shutil.which("bash") or "/bin/sh", "-c", cmd]
 
 
-async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
-    cmd = a["command"]
-    why = sec.hard_deny_reason(cmd)
-    if why:
-        return err(f"命令被安全规则拒绝（{why}）。")
-    timeout = max(1, min(int(a.get("timeout") or ctx.cfg.get("security", "command_timeout_s", default=120)), 3600))
+@dataclass
+class Prepared:
+    """一条命令真正启动所需的全部东西（沙箱包装、清洗后的环境、工作目录），前台与后台命令共用，保证安全策略一致。"""
+    argv: list[str]
+    env: dict[str, str]
+    kw: dict[str, Any]
+    cwd: Path
+    mode: str            # 设置里的 command_sandbox
+    kind: str            # 实际使用的沙箱：bwrap / sandbox-exec / none
+    allow_net: bool
+
+    @property
+    def tag(self) -> str:
+        return {"bwrap": "沙箱·bwrap", "sandbox-exec": "沙箱·seatbelt", "none": "无沙箱"}[self.kind if self.mode == "auto" else "none"]
+
+
+def prepare_exec(ctx: ToolCtx, cmd: str, cwd_arg: str | None = None) -> Prepared:
     allow_net = bool(ctx.cfg.get("security", "allow_network_commands", default=False))
     cwd = ctx.guard.ws
-    if a.get("cwd"):
-        cwd = ctx.guard.resolve(a["cwd"])
+    if cwd_arg:
+        cwd = ctx.guard.resolve(cwd_arg)
         if not cwd.is_dir():
-            return err("cwd 不是目录")
+            raise ValueError("cwd 不是目录")
     home = ctx.journal.dir / "cmdhome"
     home.mkdir(parents=True, exist_ok=True)
     mode = ctx.cfg.get("security", "command_sandbox", default="auto")
@@ -523,10 +627,41 @@ async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
         kw["creationflags"] = 0x08000000 | 0x00000200  # NO_WINDOW | NEW_PROCESS_GROUP
     else:
         kw["start_new_session"] = True
+    return Prepared(argv, env, kw, cwd, mode, kind, allow_net)
+
+
+def kill_tree(proc: Any) -> None:
+    """杀掉进程及其子进程（Windows 用 taskkill /T，其他系统杀进程组）。"""
+    try:
+        if sec.IS_WIN:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:  # noqa: BLE001
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
+    cmd = a["command"]
+    why = sec.hard_deny_reason(cmd)
+    if why:
+        return err(f"命令被安全规则拒绝（{why}）。")
+    if a.get("background"):
+        from . import jobs
+        return await jobs.start_job(ctx, cmd, a.get("cwd"))
+    timeout = max(1, min(int(a.get("timeout") or ctx.cfg.get("security", "command_timeout_s", default=120)), 3600))
+    try:
+        pr = prepare_exec(ctx, cmd, a.get("cwd"))
+    except ValueError as e:
+        return err(str(e))
+    allow_net, mode, kind = pr.allow_net, pr.mode, pr.kind
     t0 = time.time()
     try:
-        proc = await asyncio.create_subprocess_exec(*argv, cwd=str(cwd), env=env, stdin=asyncio.subprocess.DEVNULL,
-                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **kw)
+        proc = await asyncio.create_subprocess_exec(*pr.argv, cwd=str(pr.cwd), env=pr.env, stdin=asyncio.subprocess.DEVNULL,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **pr.kw)
     except OSError as e:
         return err(f"无法启动命令: {e}")
     buf = bytearray()
@@ -542,16 +677,7 @@ async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
                 buf.extend(chunk[: cap - len(buf)])
 
     def kill() -> None:
-        try:
-            if sec.IS_WIN:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
-            else:
-                os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:  # noqa: BLE001
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
+        kill_tree(proc)
 
     task = asyncio.create_task(pump())
     timed_out = cancelled = False
@@ -602,14 +728,16 @@ async def command_preview(ctx: ToolCtx, a: dict) -> dict | None:
     net = ctx.cfg.get("security", "allow_network_commands", default=False)
     mode = ctx.cfg.get("security", "command_sandbox", default="auto")
     sb = f"沙箱: {info['kind']}（{'可联网' if net else '断网'}）" if info["available"] and mode == "auto" else "⚠ 无沙箱：命令将以你的用户权限直接运行"
-    return {"kind": "command", "text": f"{a.get('command', '')}\n\n工作目录: {a.get('cwd') or '.'}\n{sb}"}
+    bg = "\n方式: 后台运行（不等待结束，可用 job_output 查看、job_stop 终止）" if a.get("background") else ""
+    return {"kind": "command", "text": f"{a.get('command', '')}\n\n工作目录: {a.get('cwd') or '.'}{bg}\n{sb}"}
 
 
 register(Tool(
     "run_command", "在工作区内执行 shell 命令（Windows 用 PowerShell，其他系统用 bash）。用于运行测试、构建、git、脚本等。"
-                   "有超时与输出截断；不会继承你的环境变量/密钥。读文件、改文件请用专用工具而不是 cat/sed。",
+                   "有超时与输出截断；不会继承你的环境变量/密钥。读文件、改文件请用专用工具而不是 cat/sed。"
+                   "长时间运行的进程（监视测试、开发服务器、大型构建）设 background=true：立即返回任务 id，之后用 job_output 看输出。",
     obj({"command": P("string", "要执行的命令"), "cwd": P("string", "工作目录（相对工作区），默认工作区根"),
-         "timeout": P("integer", "超时秒数")}, ["command"]),
+         "timeout": P("integer", "超时秒数（前台命令）"), "background": P("boolean", "后台运行，立即返回任务 id")}, ["command"]),
     run_command, "exec", title=lambda a: "$ " + (a.get("command", "")[:80]), preview=command_preview, path_args=("cwd",)))
 
 

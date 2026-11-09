@@ -34,13 +34,15 @@ lagent/          后端代码      web/  前端静态文件      docs/API.md  �
 |---|---|
 | **文件读写** | 在工作区内读取/创建/编辑/移动/复制/删除文件；编辑保留原文件编码与换行；每次修改前出 diff 供确认；所有变更记录在日志里，**一键撤销**；删除先进回收站 |
 | **多格式** | 文本/代码直接读写；`.docx .xlsx .pptx .pdf` 可读，Word/Excel/PowerPoint/PDF 可创建，docx/xlsx/pptx 可原地修改；图片可读（多模态模型能看到内容） |
-| **命令** | `run_command`：超时、输出截断、清洗环境变量、可选系统沙箱；危险命令直接拒绝，只读命令白名单免确认 |
+| **命令** | `run_command`：超时、输出截断、清洗环境变量、可选系统沙箱；危险命令直接拒绝，只读命令白名单免确认。`background=true` 可后台运行（开发服务器、监视测试），用 `job_output` / `job_stop` 查看与终止；后台命令走同一套沙箱、黑名单与审批 |
 | **联网搜索** | DuckDuckGo、Bing、百度、Yahoo（免密钥，解析网页）；Brave、Google CSE、Tavily、Serper（API）；SearXNG（自建）。可多引擎并行并用 RRF 融合，支持 HTTP 代理 |
 | **网页抓取** | `web_fetch` 提取正文；防 SSRF（拒绝内网/回环/元数据地址，DNS 固定防重绑定，重定向逐跳检查） |
-| **记忆库** | SQLite 外置长期记忆（含中文分词打分）；提问前自动召回；`memory_save/search/forget` 工具；界面里可增删改、置顶、导入导出 |
+| **记忆库** | SQLite 外置长期记忆（FTS5 全文索引 + 中文分词打分，数千条也是亚毫秒级；SQLite 不带 FTS5 时自动回退）；提问前自动召回；`memory_save/search/forget` 工具；界面里可增删改、置顶、导入导出 |
 | **技能** | 兼容 `SKILL.md` 目录格式（frontmatter + 正文，可带脚本/资料）；模型先看到名称+简介，需要时再读全文；输入 `/` 手动指定；支持 zip/文件夹安装。自带 4 个：深度调研、报告撰写、数据分析、整理文件夹 |
 | **上下文自调** | 见下 |
 | **多模态** | 图片粘贴/拖入，自动缩放；mmproj 自动配对，并按显存决定是否放 GPU |
+| **项目指令** | 自动读取工作区根目录的 `AGENTS.md`（没有则 `CLAUDE.md`）写进系统提示：构建/测试命令、代码风格写一次，每个会话都生效。只读普通文件、最多 12000 字符；含“忽略先前指令”“下载即执行”“隐藏字符”等可疑内容时不加载并提示；加载时有提示并记入审计日志；`agent.project_instructions=false` 可关闭 |
+| **先读再改** | 改/覆盖已有文本文件前，本会话必须读过它，且读过之后没被别人改动（否则不弹审批，直接让模型重读）。`edit_file` 还能容忍缩进抄错（唯一匹配时按文件原缩进对齐）。`agent.require_read_before_edit=false` 可关闭 |
 | **任务清单 / 提问** | 多步任务用 `todo_write` 展示进度；信息不足时 `ask_user` 弹出选项卡 |
 
 ### MoE 与性能
@@ -49,6 +51,12 @@ lagent/          后端代码      web/  前端静态文件      docs/API.md  �
 - 启动参数按 `--help` **运行时探测**（如不支持 `--n-cpu-moe` 则回退到 `-ot` 正则），不同版本的 llama.cpp 都能用。
 - 单槽位（`-np 1`）以最大化前缀缓存命中：系统提示保持稳定，记忆与技能内容放进最新一条用户消息，自动标题用规则生成（不额外调用模型，避免挤掉 KV 缓存）。
 - 设置里可预估显存/内存占用并查看实际启动命令。
+
+### 为本地小模型减负
+
+- **工具分级**：每轮只带约 15 个常用工具（定义约 2.3K token，比全量少四成）；Office 文档、删除/移动/复制、技能与记忆管理、后台任务这些低频工具按需加载——用户消息里出现相关词、模型调用 `load_tools`、或直接调用它们时自动加入。已加载的组在会话内只增不减，保证系统提示与工具列表稳定，不破坏 llama.cpp 的前缀缓存。
+- **只读并发**：同一步里连续的只读调用（`read_file` / `grep` / `web_search` / `web_fetch` …）并发执行，写入、删除、命令仍严格串行并逐个审批。`agent.parallel_readonly=false` 可关闭。
+- 这些开关都在 `config.json` 的 `agent` 段里。
 
 ### 上下文自调
 
@@ -100,7 +108,7 @@ skills/my-skill/
 
 ```
 pip install -r requirements-dev.txt
-python -m pytest tests/ -q          # 87 项：单元 + 端到端（用假 llama-server）
+python -m pytest tests/ -q          # 119 项：单元 + 端到端（用假 llama-server）
 python tests/ui_smoke.py [截图目录]   # 可选：Chromium 驱动完整界面（需 playwright install chromium）
 ```
 

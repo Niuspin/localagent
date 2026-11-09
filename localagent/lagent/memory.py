@@ -52,6 +52,44 @@ class Memory:
                 trusted INTEGER NOT NULL DEFAULT 1, pinned INTEGER NOT NULL DEFAULT 0,
                 created REAL NOT NULL, updated REAL NOT NULL, uses INTEGER NOT NULL DEFAULT 0, last_used REAL NOT NULL DEFAULT 0)""")
             self.db.commit()
+            self.fts = self._init_fts()
+
+    # ------------------------------------------------------------ 全文索引（FTS5，可缺省）
+    # 存的是 tokens() 的结果（拉丁词 + 中日韩 bigram，空格分隔），所以中文双字词也能命中；
+    # 它只负责“快速圈出候选”，最终排序仍由 _score 决定。SQLite 不带 FTS5 时 self.fts=False，自动走全表路径。
+    def _init_fts(self) -> bool:
+        try:
+            self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(id UNINDEXED, toks, tokenize=\"unicode61 tokenchars '_'\")")
+            n_idx = self.db.execute("SELECT COUNT(*) FROM mem_fts").fetchone()[0]
+            n_all = self.db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            if n_idx != n_all:                       # 首次升级、或手工改过数据库：整体重建
+                self.db.execute("DELETE FROM mem_fts")
+                for r in self.db.execute("SELECT id,text,tags FROM memories").fetchall():
+                    self._fts_put(r["id"], r["text"], json.loads(r["tags"]))
+            self.db.commit()
+            return True
+        except sqlite3.Error:
+            return False
+
+    def _fts_put(self, mid: str, text: str, tags: list[str]) -> None:
+        """写入/刷新一条的索引（调用方负责确认 self.fts 为真）。"""
+        self.db.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
+        self.db.execute("INSERT INTO mem_fts(id,toks) VALUES(?,?)", (mid, " ".join(tokens(text + " " + " ".join(tags)))))
+
+    def _fts_drop(self, mid: str) -> None:
+        if self.fts:
+            self.db.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
+
+    def _candidates(self, qt: set[str], limit: int = 300) -> list[str] | None:
+        """返回按 bm25 排序的候选 id；索引不可用或查询无有效词时返回 None（调用方回退全表）。"""
+        if not self.fts or not qt:
+            return None
+        q = " OR ".join('"' + t.replace('"', '""') + '"' for t in sorted(qt)[:64])
+        try:
+            with self._lock:
+                return [r[0] for r in self.db.execute("SELECT id FROM mem_fts WHERE mem_fts MATCH ? ORDER BY bm25(mem_fts) LIMIT ?", (q, limit))]
+        except sqlite3.Error:
+            return None
 
     # ------------------------------------------------------------ 内部
     @staticmethod
@@ -93,6 +131,8 @@ class Memory:
             self.db.execute("INSERT INTO memories(id,text,kind,tags,scope,workspace,source,trusted,pinned,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                             (mid, text, kind, json.dumps(self._clean_tags(tags), ensure_ascii=False), scope,
                              workspace if scope == "workspace" else "", source, int(trusted), int(pinned), now, now))
+            if self.fts:
+                self._fts_put(mid, text, self._clean_tags(tags))
             self.db.commit()
             return self.get(mid)  # type: ignore[return-value]
 
@@ -124,12 +164,16 @@ class Memory:
             if sets:
                 sets.append("updated=?"), vals.append(time.time())
                 self.db.execute(f"UPDATE memories SET {','.join(sets)} WHERE id=?", (*vals, mid))
+                if self.fts and ("text" in f or "tags" in f):
+                    row = self.db.execute("SELECT text,tags FROM memories WHERE id=?", (mid,)).fetchone()
+                    self._fts_put(mid, row["text"], json.loads(row["tags"]))
                 self.db.commit()
             return self.get(mid)  # type: ignore[return-value]
 
     def delete(self, mid: str) -> bool:
         with self._lock:
             c = self.db.execute("DELETE FROM memories WHERE id=?", (mid,)).rowcount
+            self._fts_drop(mid)
             self.db.commit()
             return bool(c)
 
@@ -191,9 +235,13 @@ class Memory:
         return s
 
     def search(self, q: str, k: int = 6, workspace: str = "", kind: str = "") -> list[dict]:
-        """只返回可信记忆；全局 + 当前工作区。"""
-        rows, _ = self.list(kind=kind, limit=5000)
+        """只返回可信记忆；全局 + 当前工作区。先用 FTS5 圈出候选再打分；无索引时回退全表。"""
         qt = set(tokens(q))
+        cand = self._candidates(qt)
+        if cand is not None:
+            rows = self._trusted_by_ids(cand, kind)
+        else:
+            rows, _ = self.list(kind=kind, limit=5000)
         sc = []
         for m in rows:
             if m["scope"] == "workspace" and m["workspace"] != workspace:
@@ -204,10 +252,23 @@ class Memory:
         sc.sort(key=lambda x: -x[0])
         return [m for _s, m in sc[:k]]
 
+    def _trusted_by_ids(self, ids: list[str], kind: str = "") -> list[dict]:
+        if not ids:
+            return []
+        with self._lock:
+            ph = ",".join("?" * len(ids))
+            sql = f"SELECT * FROM memories WHERE trusted=1 AND id IN ({ph})" + (" AND kind=?" if kind else "")
+            return [self._row(r) for r in self.db.execute(sql, (*ids, *([kind] if kind else [])))]
+
+    def _pinned(self, workspace: str, limit: int = 8) -> list[dict]:
+        with self._lock:
+            rs = self.db.execute("SELECT * FROM memories WHERE trusted=1 AND pinned=1 AND (scope='global' OR workspace=?) "
+                                 "ORDER BY updated DESC LIMIT ?", (workspace, limit)).fetchall()
+            return [self._row(r) for r in rs]
+
     def recall_block(self, query: str, workspace: str, k: int = 6, max_chars: int = 1800) -> tuple[str, list[str]]:
         """生成注入系统提示的记忆块 + 命中的 id。置顶记忆总是包含。"""
-        rows, _ = self.list(limit=5000)
-        pinned = [m for m in rows if m["pinned"] and (m["scope"] == "global" or m["workspace"] == workspace)][:8]
+        pinned = self._pinned(workspace)
         hits = self.search(query, k, workspace) if k > 0 else []
         seen, picked = set(), []
         for m in pinned + hits:
