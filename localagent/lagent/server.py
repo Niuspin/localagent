@@ -26,6 +26,7 @@ from .config import BIN_DIR, CODE_DIR, DATA_DIR, MODELS_DIR, ROOT, SKILLS_DIR, W
 from .engine import Engine, EngineError
 from .journal import Journal, atomic_write
 from .loop import Agent
+from .mcp import McpManager
 from .memory import Memory
 from .sessions import SessionStore
 from .skills import Skills
@@ -62,8 +63,9 @@ class State:
         self.skills = Skills(root / "skills", CODE_DIR / "lagent" / "builtin_skills", data / "skills_state.json")
         protected = [root / "config.json", root / "skills", root / "models", root / "bin", CODE_DIR / "lagent", CODE_DIR / "web", root / "run.py"]
         hidden = [data]
+        self.mcp = McpManager(data, self.audit)
         self.agent = Agent(cfg=self.cfg, engine=self.engine, store=self.store, journal=self.journal, audit=self.audit, memory=self.memory,
-                           skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast)
+                           skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp)
         self.root = root
         self.autostart = False
 
@@ -593,6 +595,35 @@ def make_app(st: State) -> Starlette:
         st.audit.append(event="skill_enable", name=req.path_params["name"], enabled=bool(d.get("enabled")))
         return J(st.skills.get(req.path_params["name"], with_body=False))
 
+    # ------------------------------------------------------------ 扩展（MCP 服务器）
+    @route("/api/mcp", ["GET"])
+    async def mcp_list(req: Request) -> Response:
+        return J(st.mcp.list_view())
+
+    @route("/api/mcp/{name}", ["PUT", "DELETE"])
+    async def mcp_item(req: Request) -> Response:
+        name = req.path_params["name"]
+        if req.method == "DELETE":
+            if not await st.mcp.remove(name):
+                raise KeyError("服务器不存在")
+            return J({"ok": True})
+        return J(await st.mcp.update(name, await jbody(req)))
+
+    @route("/api/mcp/{name}/start", ["POST"])
+    async def mcp_start(req: Request) -> Response:
+        name = req.path_params["name"]
+        if st.mcp.store.get(name) is None:
+            raise KeyError("服务器不存在")
+        return J(await st.mcp.start_user(name))
+
+    @route("/api/mcp/{name}/stop", ["POST"])
+    async def mcp_stop(req: Request) -> Response:
+        name = req.path_params["name"]
+        if st.mcp.store.get(name) is None:
+            raise KeyError("服务器不存在")
+        await st.mcp.stop(name)
+        return J(st.mcp.view(name))
+
     # ------------------------------------------------------------ 记忆
     @route("/api/memory", ["GET", "POST"])
     async def memory(req: Request) -> Response:
@@ -661,11 +692,14 @@ def make_app(st: State) -> Starlette:
         await asyncio.to_thread(st.journal.purge, int(st.cfg.get("security", "trash_retention_days", default=14)))
         if st.autostart:
             asyncio.create_task(_safe(st.engine.start()))
+        st.mcp.start_reaper()
         try:
             yield
         finally:
+            await st.mcp.stop_all()
             await st.engine.stop()
 
     app = Starlette(routes=R, lifespan=lifespan)
     atexit.register(st.engine.shutdown_sync)
+    atexit.register(st.mcp.shutdown_sync)
     return Guard(app, st)  # type: ignore[return-value]

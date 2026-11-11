@@ -118,7 +118,7 @@
 | `notice` | `{level:"info\|warn", text}` |
 | `taint` | `{tainted:true, reason}` |
 | `assistant_done` | `{finish_reason}` |
-| `run_end` | `{status:"done\|cancelled\|error\|max_steps", error?}` |
+| `run_end` | `{status:"done\|cancelled\|error\|max_steps", error?, stats?:{tool_calls, name_fixed, args_fixed, json_repaired, json_failed, unknown_tool, arg_errors, precheck_blocked, repeat_calls, text_fallback, forced_retries, thinking_cut}}`（只含非零计数）|
 
 渲染要点：`thinking_delta` 追加到当前 thinking 块（默认折叠，流式时展开）；`text_delta` 追加到当前 text 块；每个 `tool_start` 新建 tool 块；`approval_request` 在对应 tool 块下方显示审批卡片（`preview.kind=diff` 用红绿 diff 渲染；`command` 用等宽框；显示 `reason`、`tainted` 警示）；`tool_result` 更新 tool 块状态；`context_event` 用小号居中提示行显示。
 
@@ -142,6 +142,13 @@
 - `GET /api/memory?q=&kind=&scope=&pending=0|1` → `{items:[{id,text,kind:"fact|preference|project|episode",tags:["…"],scope:"global|workspace",source:"user|agent",trusted,pinned,created,updated,uses}], total}`
 - `POST /api/memory` `{text,kind?,tags?,pinned?,scope?}`；`PATCH /api/memory/{id}`；`DELETE /api/memory/{id}`；`POST /api/memory/{id}/approve`（把 agent 在受污染上下文中写入的待审记忆标记为可信）
 - `GET /api/memory/export` → JSON 文件；`POST /api/memory/import`（JSON body `{items:[…]}`）
+
+## 扩展（MCP 服务器，仅本机 stdio）
+- `GET /api/mcp` → `{servers:[Server], sandbox:{available,kind,note}}`
+- `Server`：`{name, command, command_line, enabled, sandbox:"auto|off", network, workspace, readonly_paths, trust_results, timeout_s, idle_s, env_keys, env_masked:{KEY:"••••••"}, status:"running|idle|error|disabled", error, tools:[{name,tool,description}], warnings, sandbox_effective, contained, stderr, server_info}`。环境变量的值**从不返回**。
+- `PUT /api/mcp/{name}` 创建或部分更新（名称 `^[a-z0-9][a-z0-9_-]{0,31}$`）；字段同上，`command` 可为字符串或数组；`env` 是完整替换，值为 `null` 表示沿用原值。校验失败 400。影响启动的字段变化会停止正在运行的进程。
+- `DELETE /api/mcp/{name}`（同时删除私有目录）；`POST /api/mcp/{name}/start`（启动并读取、缓存工具清单，返回 Server）；`POST /api/mcp/{name}/stop`。
+- 工具以 `mcp__<server>__<tool>` 命名，kind=`mcp`，属于工具组 `mcp:<server>`；`tool_start.risk` 恒为 `high`。
 
 ## 其他
 - `POST /api/search/test` `{query, provider?}` → `{results:[{title,url,snippet,engine}], errors:{provider:"msg"}}`

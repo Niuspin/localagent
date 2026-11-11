@@ -23,7 +23,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 IS_WIN = os.name == "nt"
 _CASE_FOLD = sys.platform in ("win32", "darwin")
@@ -281,8 +281,10 @@ def clean_env(home: str, tmp: str | None = None) -> dict[str, str]:
     return env
 
 
-def wrap_in_sandbox(argv: list[str], workspace: Path, allow_net: bool, home: Path) -> tuple[list[str], str]:
-    """把 argv 包进 OS 沙箱；返回 (新 argv, kind)。不可用时返回 (argv, 'none')。"""
+def wrap_in_sandbox(argv: list[str], workspace: Path, allow_net: bool, home: Path, *, extra_rw: Sequence[Path | str] = (),
+                    extra_ro: Sequence[Path | str] = (), sandbox_home: str | None = None) -> tuple[list[str], str]:
+    """把 argv 包进 OS 沙箱；返回 (新 argv, kind)。不可用时返回 (argv, 'none')。
+    workspace 可写且是工作目录；extra_rw/extra_ro 是额外可写/只读目录（MCP 服务器按需放宽用）；sandbox_home 指定沙箱内的 HOME（默认 /tmp 的临时目录）。"""
     if _probe_bwrap():
         a = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
         if not allow_net:
@@ -297,9 +299,14 @@ def wrap_in_sandbox(argv: list[str], workspace: Path, allow_net: bool, home: Pat
                   "/etc/alternatives", "/etc/ld.so.cache", "/etc/localtime", "/etc/nsswitch.conf", "/etc/mime.types"):
             if os.path.exists(f):
                 a += ["--ro-bind", f, f]
-        a += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/home",
-              "--bind", str(workspace), str(workspace), "--chdir", str(workspace),
-              "--setenv", "HOME", "/tmp", "--"]
+        a += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/home"]
+        for d in extra_ro:                                  # 只读目录先挂，可写目录后挂（嵌套时可写的覆盖只读的）
+            if os.path.exists(str(d)):
+                a += ["--ro-bind", str(d), str(d)]
+        for d in [workspace, *extra_rw]:
+            if os.path.exists(str(d)):
+                a += ["--bind", str(d), str(d)]
+        a += ["--chdir", str(workspace), "--setenv", "HOME", sandbox_home or "/tmp", "--"]
         return a + argv, "bwrap"
     if sys.platform == "darwin" and shutil.which("sandbox-exec"):
         h = os.path.expanduser("~")
@@ -307,10 +314,30 @@ def wrap_in_sandbox(argv: list[str], workspace: Path, allow_net: bool, home: Pat
         prof = ("(version 1)(deny default)(allow process-exec)(allow process-fork)(allow signal (target self))"
                 "(allow sysctl-read)(allow mach-lookup)(allow ipc-posix-shm)(allow file-read*)"
                 f"(deny file-read* {deny})"
-                f'(allow file-write* (subpath "{workspace}") (subpath "/private/tmp") (subpath "/private/var/folders") (subpath "{home}")'
+                f'(allow file-write* (subpath "{workspace}") ' + " ".join(f'(subpath "{d}")' for d in extra_rw) +
+                f' (subpath "/private/tmp") (subpath "/private/var/folders") (subpath "{home}")'
                 ' (literal "/dev/null") (literal "/dev/tty"))' + ("(allow network*)" if allow_net else "(deny network*)"))
         return ["sandbox-exec", "-p", prof] + argv, "sandbox-exec"
     return argv, "none"
+
+
+# =============================================================== 可疑内容扫描（技能 / 项目指令 / MCP 工具描述共用）
+INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"ignore (all |any )?(previous|prior|above) (instructions|rules)|忽略(之前|以上|上述)的?(所有)?(指令|规则|提示)", re.I), "含“忽略先前指令”类措辞（疑似提示注入）"),
+    (re.compile(r"(curl|wget)[^\n|]*\|\s*(ba|z)?sh|powershell[^\n]*-enc|base64\s+(-d|--decode)", re.I), "含下载即执行/编码执行"),
+    (re.compile(r"[​‌⁠‪-‮⁦-⁩\U000e0000-\U000e007f]"), "含不可见/双向控制字符（可能隐藏指令）"),
+]
+RISK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\.ssh|id_rsa|\.aws/credentials|\.env\b|api[_-]?key|/etc/passwd", re.I), "涉及凭据/密钥路径"),
+    (re.compile(r"\b(rm\s+-rf|mkfs|shutdown|format\s+c:)", re.I), "含破坏性命令"),
+    (re.compile(r"https?://[^\s)]+\?[^\s)]*(token|key|secret|data)=", re.I), "含疑似外传数据的 URL"),
+]
+
+
+def suspicious(text: str, *, risk: bool = False) -> list[str]:
+    """返回命中的原因列表。默认只查“提示注入类”（项目指令、MCP 描述用）；risk=True 额外查凭据/破坏性命令（技能用）。"""
+    pats = INJECTION_PATTERNS + (RISK_PATTERNS if risk else [])
+    return [why for rx, why in pats if rx.search(text or "")]
 
 
 # =============================================================== 权限策略
@@ -323,15 +350,15 @@ class Decision:
 
 
 class Policy:
-    """kind: read | meta | memory_read | memory_write | net_search | net_fetch | write | delete | exec | skill"""
+    """kind: read | meta | memory_read | memory_write | net_search | net_fetch | write | delete | exec | skill | mcp"""
 
     @staticmethod
     def decide(*, kind: str, name: str, mode: str, tainted: bool, allow_keys: set[str], sensitive: str | None = None,
                command: str | None = None, sandboxed: bool = False, domain_ok: bool = True) -> Decision:
         key = f"exec:{normalize_cmd(command)}" if (kind == "exec" and command) else name
-        risk = {"write": "medium", "delete": "high", "exec": "high", "skill": "high", "net_fetch": "medium"}.get(kind, "low")
-        if mode == "plan" and kind in ("write", "delete", "exec", "skill"):
-            return Decision("deny", "当前为「规划（只读）」模式：不能修改文件或执行命令。请切换权限模式后重试。", risk, key)
+        risk = {"write": "medium", "delete": "high", "exec": "high", "skill": "high", "mcp": "high", "net_fetch": "medium"}.get(kind, "low")
+        if mode == "plan" and kind in ("write", "delete", "exec", "skill", "mcp"):
+            return Decision("deny", "当前为「规划（只读）」模式：不能修改文件、执行命令或调用外部工具。请切换权限模式后重试。", risk, key)
         if kind in ("read", "meta", "memory_read"):
             if sensitive:
                 return Decision("ask", f"读取敏感文件: {sensitive}", "medium", key)
@@ -342,6 +369,17 @@ class Policy:
             if tainted and not domain_ok:
                 return Decision("ask", "上下文含不可信内容，且该域名未出现在你的消息或搜索结果中——可能是提示注入试图外泄数据，请确认。", "high", key)
             return Decision("allow", "", "medium", key)
+        if kind == "mcp":      # 外部 MCP 工具：默认逐次确认；其结果会污染会话（除非该服务器被设为“信任结果”），所以“本会话允许”只对可信服务器有意义
+            if key in allow_keys and not tainted:
+                return Decision("allow", "", "high", key)
+            if mode == "auto" and not tainted and sandboxed:
+                return Decision("allow", "", "high", key)
+            why = "调用外部工具（MCP 服务器）"
+            if tainted:
+                why += "（上下文含不可信内容，已强制确认）"
+            elif mode == "auto" and not sandboxed:
+                why += "（该服务器没有沙箱，全自动模式下也需确认）"
+            return Decision("ask", why, "high", key)
         # ---- 写 / 删 / 执行 / 技能
         if sensitive:
             return Decision("ask", f"涉及敏感文件: {sensitive}", "high", key)

@@ -11,22 +11,13 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .security import sanitize_untrusted
+from .security import sanitize_untrusted, suspicious
 
 NAMES = ("AGENTS.md", "CLAUDE.md")
 MAX_CHARS = 12000
-
-_SUSPECT = [
-    (re.compile(r"ignore (all |any )?(previous|prior|above) (instructions|rules)|忽略(之前|以上|上述)的?(所有)?(指令|规则|提示)", re.I),
-     "含“忽略先前指令”类措辞（疑似提示注入）"),
-    (re.compile(r"(curl|wget)[^\n|]*\|\s*(ba|z)?sh|powershell[^\n]*-enc|base64\s+(-d|--decode)", re.I), "含下载即执行/编码执行"),
-    (re.compile(r"[​‌⁠‪-‮⁦-⁩\U000e0000-\U000e007f]"), "含不可见/双向控制字符（可能隐藏指令）"),
-]
-
 
 @dataclass
 class ProjectDoc:
@@ -67,7 +58,7 @@ def load(ws: str | Path | None) -> ProjectDoc | None:
         if not text.strip():
             doc = None
         else:
-            warn = next((why for rx, why in _SUSPECT if rx.search(text)), "")
+            warn = next(iter(suspicious(text)), "")
             clean = sanitize_untrusted(text).strip()
             if len(clean) > MAX_CHARS:
                 clean = clean[:MAX_CHARS] + "\n…[已截断]"

@@ -56,7 +56,20 @@ lagent/          后端代码      web/  前端静态文件      docs/API.md  �
 
 - **工具分级**：每轮只带约 15 个常用工具（定义约 2.3K token，比全量少四成）；Office 文档、删除/移动/复制、技能与记忆管理、后台任务这些低频工具按需加载——用户消息里出现相关词、模型调用 `load_tools`、或直接调用它们时自动加入。已加载的组在会话内只增不减，保证系统提示与工具列表稳定，不破坏 llama.cpp 的前缀缓存。
 - **只读并发**：同一步里连续的只读调用（`read_file` / `grep` / `web_search` / `web_fetch` …）并发执行，写入、删除、命令仍严格串行并逐个审批。`agent.parallel_readonly=false` 可关闭。
+- **工具调用容错**：小模型常把工具名写成 `Read_File`、参数写成 `filePath`；这些会被自动纠正（歧义时宁可报错也不乱猜，绝不把 `memory_s` 猜成 `memory_save` 这类有副作用的工具），JSON 损坏会修复，未知工具会列出当前可用工具。整条回复明显是一次“没写对格式的工具调用”时，会用 `tool_choice: required` 强制重试一次（不污染历史；服务器不支持则自动退回）。
+- **摩擦指标**：每次运行结束的 `run_end.stats` 与审计日志 `run_stats` 记录 `name_fixed / args_fixed / json_repaired / unknown_tool / arg_errors / repeat_calls / forced_retries` 等计数，用来比较不同模型、不同提示词的“省心程度”。
+- **记忆提速**：规范化文本建索引，写入去重 O(1)（3000 条写入 16.1s → 1.2s）；FTS5 候选召回让大库检索约 0.2ms。
 - 这些开关都在 `config.json` 的 `agent` 段里。
+
+### 扩展：MCP 服务器（仅本机 stdio）
+
+设置 → 扩展里添加服务器（名称 + 启动命令）。设计原则是**界面只有一行一个服务器，安全由后端兜底**：
+
+- **默认进沙箱**：只能写自己的私有目录 `data/mcp/<名称>/`（也是它的 HOME），看不到你的主目录与密钥，默认断网；环境变量走清洗，不继承你的 API Key。沙箱不可用时**拒绝启动**，而不是悄悄裸跑。
+- **按服务器放宽**：`sandbox`（auto/off）、`network`、`workspace`（把当前工作区挂进去）、`readonly_paths`（额外只读目录，不能是主目录整体或数据目录）、`trust_results`、`timeout_s`、`idle_s`，每个服务器单独设置。
+- **按不可信处理**：工具描述会清洗并做注入审查（命中则丢弃该工具）；返回内容用 `<untrusted>` 包裹并污染会话（除非该服务器设为信任）。调用默认逐次确认；自动模式仅在“沙箱生效且不联网”时免确认；规划模式不可用。
+- **省上下文**：工具作为 `mcp:<名称>` 组按需加载（用户消息里提到服务器名或 `load_tools`），首次连接后缓存工具清单；空闲自动回收进程。
+- 配置在 `data/mcp.json`（权限 0600，Agent 不可见），环境变量的值不会回显到界面或接口。
 
 ### 上下文自调
 
@@ -108,14 +121,22 @@ skills/my-skill/
 
 ```
 pip install -r requirements-dev.txt
-python -m pytest tests/ -q          # 119 项：单元 + 端到端（用假 llama-server）
+python -m pytest tests/ -q          # 单元 + 端到端（假 llama-server、mock MCP 服务器）
 python tests/ui_smoke.py [截图目录]   # 可选：Chromium 驱动完整界面（需 playwright install chromium）
+python tests/eval/run_eval.py --repeat 3   # 真实模型评测：通过率 + 摩擦指标（没有模型时自动跳过）
 ```
+
+GitHub Actions（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 上跑上面前两项。
 
 ## 已知限制（如实说明）
 
 - 开发环境里**没有真实的 llama.cpp 与 GPU**：引擎路径用与 llama-server 行为对齐的假服务器测试。参数探测、`--fit`、MoE 拆分、mmproj 等在真实环境首次运行请观察“设置→日志”，必要时用“额外参数”微调。
 - **Windows / macOS** 的进程管理（Job Object）、沙箱（sandbox-exec）与路径规则按文档实现，但未在真机验证。
 - 免密钥搜索引擎的 HTML 解析仅用样本页面测试过，见上文。
+- **MCP 沙箱**：开发环境没有 bubblewrap，沙箱参数（只读/可写挂载、断网、HOME）只做了结构验证，“不可用即拒绝启动”已实测；请在装有 bubblewrap 的机器上实际跑一次。只支持本机 stdio 服务器（无 HTTP/OAuth），不支持服务器发起的采样/请求。
 - 单用户、单槽位设计；同一时刻一个会话在跑。不做多用户权限。
 - 本地小模型的工具调用可靠性不如云端大模型：已做 JSON 修复、`<tool_call>` 文本回退、重复调用检测，但复杂任务仍请留意审批卡片与结果。
+
+## 许可证
+
+[MIT](../LICENSE) © 2026 Niuspin

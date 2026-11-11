@@ -107,3 +107,45 @@ def test_two_calls_also_work_with_parallel_switched_off(ready, home):
     evs = ready.chat(new_session(ready), "请并行读取")
     assert end_status(evs) == "done" and len(ev(evs, "tool_result")) == 2
     _cfg(ready, parallel_readonly=True)
+
+
+# ------------------------------------------------------------------ 工具调用容错（真实循环）
+def test_wrong_tool_name_and_arg_names_are_repaired(ready, home):
+    _cfg(ready)
+    (home / "ws" / "notes").mkdir(exist_ok=True)
+    (home / "ws" / "notes" / "hello.txt").write_text("你好\n", "utf-8")
+    sid = new_session(ready)
+    evs = ready.chat(sid, "请纠错调用")
+    assert end_status(evs) == "done"
+    assert ev(evs, "tool_start")[0]["name"] == "read_file" and ev(evs, "tool_result")[0]["status"] == "ok"
+    stats = ev(evs, "run_end")[-1]["stats"]
+    assert stats["name_fixed"] == 1 and stats["args_fixed"] == 1
+    # 历史里记录的是实际执行的名字，不是模型写错的那个
+    disk = __import__("json").loads(next((home / "data").rglob(f"{sid}.json")).read_text("utf-8"))
+    names = [tc["function"]["name"] for m in disk["history"] for tc in m.get("tool_calls") or []]
+    assert names == ["read_file"]
+    audit = ready.get("/api/audit?n=30")[1]["entries"]
+    assert any(e.get("event") == "run_stats" and e.get("name_fixed") == 1 for e in audit)
+
+
+def test_broken_call_text_triggers_one_forced_retry(ready, home):
+    _cfg(ready)
+    sid = new_session(ready)
+    evs = ready.chat(sid, "请坏格式调用")
+    assert end_status(evs) == "done"
+    assert any("重新发出" in d["text"] for d in ev(evs, "notice"))
+    assert ev(evs, "tool_start")[0]["name"] == "list_dir" and ev(evs, "tool_result")[0]["status"] == "ok"
+    assert ev(evs, "run_end")[-1]["stats"]["forced_retries"] == 1
+    forced = [r for r in mock_log(home) if r.get("tool_choice") == "required"]
+    assert len(forced) == 1 and forced[0]["roles"][-1] == "user"          # 坏掉的调用文本没有进历史
+    normal = [r for r in mock_log(home)[-6:] if r.get("tool_choice") == "auto"]
+    assert normal                                                          # 之后恢复自动模式
+
+
+def test_unknown_tool_error_lists_available_tools(ready):
+    _cfg(ready)
+    evs = ready.chat(new_session(ready), "请未知工具")
+    r = ev(evs, "tool_result")[0]
+    assert r["status"] == "error" and r["content"] == "未知工具 frobnicate"
+    from conftest import mock_log as _ml  # noqa: F401
+    assert ev(evs, "run_end")[-1]["stats"]["unknown_tool"] == 1

@@ -405,3 +405,12 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
   .sb-item .acts { display: flex; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001s !important; transition-duration: .001s !important; } }
+
+/* 扩展（MCP）标签 */
+.mcp-row { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; margin: 8px 0; background: var(--bg-elev); }
+.mcp-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mcp-detail { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.mcp-opts { display: flex; gap: 16px; flex-wrap: wrap; }
+.mcp-err { margin-top: 6px; padding: 6px 10px; border-radius: 8px; background: var(--danger-soft); color: var(--danger); font-size: .85em; white-space: pre-wrap; word-break: break-word; }
+.mcp-add { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+.mcp-add .inp.wide { flex: 1; min-width: 0; width: auto; }

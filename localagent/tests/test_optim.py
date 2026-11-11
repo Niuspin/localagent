@@ -352,3 +352,100 @@ def test_memory_search_scales(tmp_path):
         assert m.search("深色模式", 5)[0]["text"].startswith("唯一的目标")
     slow = (time.time() - t0) / 3
     assert fast < 0.05 and fast < slow                   # 走索引明显更快（实测约 0.2ms vs 30ms）
+
+
+# ------------------------------------------------------------------ 记忆：去重走索引 / 老库迁移 / 批量导入
+def test_memory_dedup_uses_normalized_text(tmp_path):
+    m = _mem(tmp_path)
+    a = m.add("用户喜欢  简洁的回答!")
+    b = m.add("用户喜欢简洁的回答", pinned=True)                 # 空白/标点不同 → 视为同一条，只刷新
+    assert a["id"] == b["id"] and m.count() == 1 and b["pinned"] is True
+    w = m.add("用户喜欢简洁的回答", scope="workspace", workspace="/ws/a")   # 不同作用域不算重复
+    assert w["id"] != a["id"] and m.count() == 2
+    m.update(a["id"], text="完全不同的内容")
+    c = m.add("用户喜欢简洁的回答")                            # 原文本被改走之后，可以再次新增
+    assert c["id"] != a["id"] and m.count() == 3
+    assert m.add("完全不同的内容")["id"] == a["id"]            # 改后的文本参与去重
+
+
+def test_memory_legacy_database_gets_norm_column(tmp_path):
+    import sqlite3
+    db = tmp_path / "old.db"
+    c = sqlite3.connect(db)
+    c.execute("""CREATE TABLE memories(id TEXT PRIMARY KEY, text TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'fact', tags TEXT NOT NULL DEFAULT '[]',
+        scope TEXT NOT NULL DEFAULT 'global', workspace TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'user',
+        trusted INTEGER NOT NULL DEFAULT 1, pinned INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, updated REAL NOT NULL,
+        uses INTEGER NOT NULL DEFAULT 0, last_used REAL NOT NULL DEFAULT 0)""")
+    c.execute("INSERT INTO memories(id,text,created,updated) VALUES('old1','旧库里的一条记忆',1,1)")
+    c.commit(); c.close()
+    from lagent.memory import Memory
+    m = Memory(db)
+    assert m.add("旧库里的一条记忆")["id"] == "old1" and m.count() == 1      # 回填后能识别出重复
+    assert [x["id"] for x in m.search("旧库")] == ["old1"]
+
+
+def test_memory_import_skips_bad_items_in_one_transaction(tmp_path):
+    m = _mem(tmp_path)
+    items = [{"text": "甲"}, {"text": ""}, {"nope": 1}, {"text": "乙", "source": "agent"}, {"text": "甲"}, "garbage", {"text": "x" * 3000}]
+    assert m.import_items(items) == 3                              # 甲、乙、重复的甲（只刷新）；其余被跳过
+    assert m.count() == 2
+    pend, _ = m.list(pending=True)
+    assert [x["text"] for x in pend] == ["乙"]                     # agent 来源的导入项仍是“待审核”
+
+
+# ------------------------------------------------------------------ 工具调用容错（纯函数）
+def test_resolve_name_variants_and_ambiguity():
+    from lagent import toolcall as T
+    known = list(TOOLS)
+    assert T.resolve_name("read_file", known) == ("read_file", "")
+    assert T.resolve_name("Read_File", known) == ("read_file", "canon")
+    assert T.resolve_name("functions.read_file", known) == ("read_file", "canon")
+    assert T.resolve_name("default_api:readFile", known) == ("read_file", "canon")
+    assert T.resolve_name("bash", known) == ("run_command", "alias")
+    assert T.resolve_name("ls", known) == ("list_dir", "alias")
+    assert T.resolve_name("read_fil", known) == ("read_file", "fuzzy")
+    assert T.resolve_name("frobnicate", known)[0] is None
+    assert T.resolve_name("memory_s", known)[0] is None                  # 太短/有歧义（memory_save / memory_search）：不猜
+    assert T.resolve_name("bash", ["read_file"])[0] is None              # 别名目标当前不存在：不乱指
+    assert "run_command" in T.suggest("bashh", known) or T.suggest("runcommand", known)[0] == "run_command"
+
+
+def test_normalize_args_aliases_camel_and_wrapping():
+    from lagent import toolcall as T
+    props = TOOLS["edit_file"].parameters["properties"]
+    out, fx = T.normalize_args(props, {"filePath": "a.py", "old": "x", "new": "y"})
+    assert out == {"path": "a.py", "old_string": "x", "new_string": "y"} and fx
+    out, _ = T.normalize_args(props, {"arguments": {"path": "a.py", "old_string": "x", "new_string": "y"}})
+    assert out["path"] == "a.py"                                          # 多包一层被解开
+    out, fx = T.normalize_args(props, {"path": "a.py", "file_path": "b.py", "old_string": "x", "new_string": "y"})
+    assert out["path"] == "a.py"                                          # 正规参数优先，不被同义词覆盖
+    assert T.normalize_args(TOOLS["memory_save"].parameters["properties"], {"text": "记住"})[0] == {"text": "记住"}   # text 本就是它的参数
+    assert T.normalize_args(TOOLS["write_file"].parameters["properties"], {"path": "a", "text": "hi"})[0] == {"path": "a", "content": "hi"}
+    assert T.normalize_args({}, {"x": 1}) == ({"x": 1}, [])
+    out, _ = T.normalize_args(props, {"path": "a", "junk": 1})
+    assert "junk" not in out
+
+
+def test_parse_args_reports_repair():
+    from lagent import toolcall as T
+    assert T.parse_args('{"a": 1}') == ({"a": 1}, False)
+    assert T.parse_args("") == ({}, False)
+    assert T.parse_args("{'a': 1,}") == ({"a": 1}, True)
+    assert T.parse_args("[1,2]") == (None, False) and T.parse_args("garbage")[0] is None
+
+
+def test_failed_call_detection_is_conservative():
+    from lagent import toolcall as T
+    assert T.looks_like_failed_call('<tool_call>{"name": "list_dir", "arguments": {"path": ')
+    assert T.looks_like_failed_call('{"name": "read_file", "arguments": {"path": "a"}} ')
+    assert T.looks_like_failed_call('[TOOL_CALLS][{"name":"x","arguments":{}}]')
+    assert not T.looks_like_failed_call("你好，下面是一个例子：\n```json\n{\"name\": \"x\", \"arguments\": {}}\n```")   # 正常回答里引用 JSON
+    assert not T.looks_like_failed_call("") and not T.looks_like_failed_call("完成。")
+
+
+def test_runstats_counts_and_friction():
+    from lagent import toolcall as T
+    s = T.RunStats()
+    s.bump("name_fixed"); s.bump("args_fixed", 2); s.bump("tool_calls", 5); s.bump("custom_thing")
+    assert s.nonzero() == {"tool_calls": 5, "name_fixed": 1, "args_fixed": 2, "custom_thing": 1}
+    assert s.friction == 3                                               # tool_calls 本身不算摩擦

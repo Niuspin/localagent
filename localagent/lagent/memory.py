@@ -51,8 +51,20 @@ class Memory:
                 scope TEXT NOT NULL DEFAULT 'global', workspace TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'user',
                 trusted INTEGER NOT NULL DEFAULT 1, pinned INTEGER NOT NULL DEFAULT 0,
                 created REAL NOT NULL, updated REAL NOT NULL, uses INTEGER NOT NULL DEFAULT 0, last_used REAL NOT NULL DEFAULT 0)""")
+            self.db.execute("PRAGMA synchronous=NORMAL")       # WAL 模式下仍可抵御应用崩溃；省掉每次提交的整盘 fsync
+            self._migrate()
             self.db.commit()
             self.fts = self._init_fts()
+
+    def _migrate(self) -> None:
+        """norm = 规范化文本（去重用）。老库自动补列并回填；之后 add() 的去重是一次索引查询，而不是全表扫描。"""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(memories)")}
+        if "norm" not in cols:
+            self.db.execute("ALTER TABLE memories ADD COLUMN norm TEXT NOT NULL DEFAULT ''")
+        self.db.execute("CREATE INDEX IF NOT EXISTS memories_norm ON memories(scope, workspace, norm)")
+        todo = self.db.execute("SELECT id,text FROM memories WHERE norm=''").fetchall()
+        if todo:
+            self.db.executemany("UPDATE memories SET norm=? WHERE id=?", [(self._norm(r["text"]), r["id"]) for r in todo])
 
     # ------------------------------------------------------------ 全文索引（FTS5，可缺省）
     # 存的是 tokens() 的结果（拉丁词 + 中日韩 bigram，空格分隔），所以中文双字词也能命中；
@@ -110,7 +122,7 @@ class Memory:
 
     # ------------------------------------------------------------ 写
     def add(self, text: str, *, kind: str = "fact", tags: Any = None, scope: str = "global", workspace: str = "",
-            source: str = "user", trusted: bool = True, pinned: bool = False) -> dict:
+            source: str = "user", trusted: bool = True, pinned: bool = False, _commit: bool = True) -> dict:
         text = (text or "").strip()
         if not text:
             raise ValueError("记忆内容为空")
@@ -118,22 +130,25 @@ class Memory:
             raise ValueError("单条记忆最多 2000 字符，请拆分或精简")
         kind = kind if kind in KINDS else "fact"
         scope = scope if scope in ("global", "workspace") else "global"
+        ws = workspace if scope == "workspace" else ""
         now = time.time()
         with self._lock:
             n = self._norm(text)
-            for r in self.db.execute("SELECT * FROM memories WHERE scope=? AND workspace=?", (scope, workspace if scope == "workspace" else "")):
-                if self._norm(r["text"]) == n:  # 完全重复：只刷新
-                    self.db.execute("UPDATE memories SET updated=?, trusted=MAX(trusted,?), pinned=MAX(pinned,?) WHERE id=?",
-                                    (now, int(trusted), int(pinned), r["id"]))
+            dup = self.db.execute("SELECT id FROM memories WHERE scope=? AND workspace=? AND norm=? LIMIT 1", (scope, ws, n)).fetchone() if n else None
+            if dup:                                    # 完全重复：只刷新
+                self.db.execute("UPDATE memories SET updated=?, trusted=MAX(trusted,?), pinned=MAX(pinned,?) WHERE id=?",
+                                (now, int(trusted), int(pinned), dup["id"]))
+                if _commit:
                     self.db.commit()
-                    return self.get(r["id"])  # type: ignore[return-value]
+                return self.get(dup["id"])  # type: ignore[return-value]
             mid = uuid.uuid4().hex[:12]
-            self.db.execute("INSERT INTO memories(id,text,kind,tags,scope,workspace,source,trusted,pinned,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                            (mid, text, kind, json.dumps(self._clean_tags(tags), ensure_ascii=False), scope,
-                             workspace if scope == "workspace" else "", source, int(trusted), int(pinned), now, now))
+            tag_list = self._clean_tags(tags)
+            self.db.execute("INSERT INTO memories(id,text,kind,tags,scope,workspace,source,trusted,pinned,created,updated,norm) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (mid, text, kind, json.dumps(tag_list, ensure_ascii=False), scope, ws, source, int(trusted), int(pinned), now, now, n))
             if self.fts:
-                self._fts_put(mid, text, self._clean_tags(tags))
-            self.db.commit()
+                self._fts_put(mid, text, tag_list)
+            if _commit:
+                self.db.commit()
             return self.get(mid)  # type: ignore[return-value]
 
     def update(self, mid: str, **f: Any) -> dict:
@@ -147,6 +162,7 @@ class Memory:
                 if not t or len(t) > 2000:
                     raise ValueError("记忆内容为空或超过 2000 字符")
                 sets.append("text=?"), vals.append(t)
+                sets.append("norm=?"), vals.append(self._norm(t))
             if "kind" in f and f["kind"] in KINDS:
                 sets.append("kind=?"), vals.append(f["kind"])
             if "tags" in f:
@@ -294,15 +310,22 @@ class Memory:
         return {"version": 1, "exported": time.time(), "items": rows}
 
     def import_items(self, items: list[dict]) -> int:
+        """批量导入：整批一个事务（几千条也是秒级）。任何一条非法就跳过那一条，不影响其余。"""
         n = 0
-        for it in items[:5000]:
+        with self._lock:
             try:
-                self.add(it["text"], kind=it.get("kind", "fact"), tags=it.get("tags"), scope=it.get("scope", "global"),
-                         workspace=it.get("workspace", ""), source="user", trusted=False if it.get("source") == "agent" else True,
-                         pinned=bool(it.get("pinned")))
-                n += 1
-            except (ValueError, KeyError, TypeError):
-                continue
+                for it in items[:5000]:
+                    try:
+                        self.add(it["text"], kind=it.get("kind", "fact"), tags=it.get("tags"), scope=it.get("scope", "global"),
+                                 workspace=it.get("workspace", ""), source="user", trusted=False if it.get("source") == "agent" else True,
+                                 pinned=bool(it.get("pinned")), _commit=False)
+                        n += 1
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
         return n
 
     def count(self) -> int:

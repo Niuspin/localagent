@@ -11,18 +11,18 @@ from .files import err
 async def load_tools(ctx: ToolCtx, a: dict) -> ToolResult:
     want = toolset.normalize(a.get("groups"))
     if not want:
-        return err("groups 无效。可选: " + "；".join(f"{g}（{d}）" for g, d in toolset.GROUP_DESC.items()) + "；或 all")
+        return err("groups 无效。可选: " + "；".join(f"{g}（{toolset.describe(g)}）" for g in toolset.all_groups()) + "；或 all")
     new = want - ctx.session.tool_groups
     ctx.session.tool_groups |= want
-    names = [t for g in sorted(want) for t in toolset.EXT_GROUPS[g]]
+    names = [t for g in sorted(want) for t in toolset.tools_of(g)]
     if not new:
         return ToolResult("这些工具已经可用: " + ", ".join(names))
     return ToolResult("已加载工具: " + ", ".join(names) + "。从下一步起可以直接调用。")
 
 
 register(Tool("load_tools", "加载低频工具组。groups 可选: office（Word/Excel/PPT/PDF 创建与修改）、fileops（删除/移动/复制/新建目录）、"
-                            "extras（技能文件、创建技能、删除记忆）、all。",
-              obj({"groups": {"type": "array", "items": {"type": "string", "enum": [*toolset.EXT_GROUPS, "all"]},
+                            "extras（技能文件、创建技能、删除记忆）、jobs（后台命令管理）、mcp:<名称>（已接入的外部工具）、all。",
+              obj({"groups": {"type": "array", "items": {"type": "string"},
                               "description": "要加载的工具组"}}, ["groups"]),
               load_tools, "meta", title=lambda a: "加载工具: " + ",".join(map(str, a.get("groups") or []))))
 

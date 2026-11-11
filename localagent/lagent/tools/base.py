@@ -31,6 +31,7 @@ class Tool:
     path_args: tuple[str, ...] = ()
     # 执行/审批之前的同步预检：返回错误文本则直接拒绝（不打扰用户审批一个注定失败的操作）
     precheck: Callable[..., str | None] | None = None
+    extra: dict = field(default_factory=dict)        # 桥接工具的附加信息（MCP: {"server","tool"}）
 
     def schema(self) -> dict:
         return {"type": "function", "function": {"name": self.name, "description": self.description,

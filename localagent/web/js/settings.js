@@ -4,7 +4,7 @@
   var LA = window.LA, el = LA.el, icon = LA.icon;
   var modal = null, pane = null, nav = null, tab = 'engine', timers = [], savedEl = null, bannerSlot = null, engineRedraw = null;
 
-  var TABS = [['engine', '模型与引擎'], ['gen', '生成'], ['security', '安全'], ['search', '搜索'], ['ui', '外观']];
+  var TABS = [['engine', '模型与引擎'], ['gen', '生成'], ['security', '安全'], ['search', '搜索'], ['mcp', '扩展'], ['ui', '外观']];
   var SEARCH_ENGINES = {
     duckduckgo: { name: 'DuckDuckGo', note: '无需密钥' }, bing: { name: 'Bing', note: '无需密钥' }, baidu: { name: '百度', note: '无需密钥' }, yahoo: { name: 'Yahoo', note: '无需密钥' },
     brave: { name: 'Brave Search', note: '需要 API Key', key: 'brave' }, google_cse: { name: 'Google 可编程搜索', note: '需要 API Key 与 CX', key: 'google_cse' },
@@ -88,7 +88,7 @@
     tab = t; stopTimers(); engineRedraw = null;
     LA.$$('button', nav).forEach(function (b) { b.classList.toggle('on', b.dataset.tab === t); });
     LA.clear(pane); pane.scrollTop = 0;
-    ({ engine: tabEngine, gen: tabGen, security: tabSecurity, search: tabSearch, ui: tabUi })[t]();
+    ({ engine: tabEngine, gen: tabGen, security: tabSecurity, search: tabSearch, mcp: tabMcp, ui: tabUi })[t]();
     renderBanner();
   }
   function renderBanner() {
@@ -368,6 +368,8 @@
   }
 
   /* ------------------------------------------------------------ 外观 */
+  function tabMcp() { LA.mcpTab(pane, { F: F, btn: btn, sec: sec, banner: banner }); }
+
   function tabUi() {
     pane.appendChild(sec('外观'));
     pane.appendChild(F('主题', sel('ui.theme', [['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']])));

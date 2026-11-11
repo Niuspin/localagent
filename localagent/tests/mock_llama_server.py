@@ -80,7 +80,7 @@ def count_tokens(messages):
     return int(n)
 
 
-def script(messages):
+def script(messages, body=None):
     """返回 ('text', 内容, 思考) 或 ('tool', 名称, 参数)。"""
     last = messages[-1]
     users = [m for m in messages if m["role"] == "user"]
@@ -98,6 +98,16 @@ def script(messages):
         return ("tool", "write_file", {"path": "notes/hello.txt", "content": "你好，世界\n第二行\n"})
     if "编辑文件" in u:
         return ("tool", "edit_file", {"path": "notes/hello.txt", "old_string": "第二行", "new_string": "改过的第二行"})
+    if "纠错调用" in u:      # 工具名大小写不对 + 参数名写成驼峰同义词
+        return ("tool", "Read_File", {"filePath": "notes/hello.txt"})
+    if "坏格式" in u:        # 整段回复是一次没写完的调用；被要求 tool_choice=required 时才给出正确调用
+        if (body or {}).get("tool_choice") == "required":
+            return ("tool", "list_dir", {"path": "."})
+        return ("text", '<tool_call>{"name": "list_dir", "arguments": {"path": ', None)
+    if "外部回声" in u:     # MCP：调用桥接进来的工具
+        return ("tool", "mcp__mock__echo", {"text": "ping"})
+    if "未知工具" in u:
+        return ("tool", "frobnicate", {})
     if "并行读取" in u:      # 一步里同时发出两个只读调用
         return ("tools", [("read_file", {"path": "notes/hello.txt"}), ("list_dir", {"path": "."})], None)
     if "读取上传" in u:
@@ -168,12 +178,12 @@ class H(BaseHTTPRequestHandler):
         msgs = body["messages"]
         ptoks = count_tokens(msgs) + len(json.dumps(body.get("tools", []))) // 4
         log_req({"n_msgs": len(msgs), "ptoks": ptoks, "has_tools": bool(body.get("tools")), "kwargs": body.get("chat_template_kwargs"),
-                 "stream": body.get("stream"), "roles": [m["role"] for m in msgs], "system": text_of(msgs[0])[:4000],
+                 "stream": body.get("stream"), "tool_choice": body.get("tool_choice"), "roles": [m["role"] for m in msgs], "system": text_of(msgs[0])[:4000],
                  "last": text_of(msgs[-1])[:300], "tool_names": [t["function"]["name"] for t in body.get("tools", [])],
                  "images": sum(1 for m in msgs if isinstance(m.get("content"), list) for p in m["content"] if p.get("type") == "image_url")})
         if ptoks + 16 > NCTX:
             return self._json(400, {"error": {"message": f"the request exceeds the available context size ({ptoks} > {NCTX})", "type": "exceed_context_size_error", "n_prompt_tokens": ptoks, "n_ctx": NCTX}})
-        kind, a, b = script(msgs)
+        kind, a, b = script(msgs, body)
         if not body.get("stream"):
             return self._json(200, {"choices": [{"message": {"role": "assistant", "content": a if kind == "text" else ""}, "finish_reason": "stop"}],
                                     "usage": {"prompt_tokens": ptoks, "completion_tokens": 20}})

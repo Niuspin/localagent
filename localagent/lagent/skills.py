@@ -19,21 +19,11 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from .security import sanitize_untrusted
+from .security import sanitize_untrusted, suspicious
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 MAX_ZIP = 50 * 1024 * 1024
 MAX_FILES = 500
-
-_SUSPECT = [
-    (re.compile(r"ignore (all |any )?(previous|prior|above) (instructions|rules)|忽略(之前|以上|上述)的?(所有)?(指令|规则|提示)", re.I), "含“忽略先前指令”类措辞（疑似提示注入）"),
-    (re.compile(r"(curl|wget)[^\n|]*\|\s*(ba|z)?sh|powershell[^\n]*-enc|base64\s+(-d|--decode)", re.I), "含下载即执行/编码执行"),
-    (re.compile(r"\.ssh|id_rsa|\.aws/credentials|\.env\b|api[_-]?key|/etc/passwd", re.I), "涉及凭据/密钥路径"),
-    (re.compile(r"[​‌⁠‪-‮⁦-⁩\U000e0000-\U000e007f]"), "含不可见/双向控制字符（可能隐藏指令）"),
-    (re.compile(r"\b(rm\s+-rf|mkfs|shutdown|format\s+c:)", re.I), "含破坏性命令"),
-    (re.compile(r"https?://[^\s)]+\?[^\s)]*(token|key|secret|data)=", re.I), "含疑似外传数据的 URL"),
-]
-
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     text = text.lstrip("﻿")
@@ -74,9 +64,7 @@ def scan_warnings(root: Path, body: str) -> list[str]:
             except OSError:
                 pass
     blob = "\n".join(texts)
-    for rx, why in _SUSPECT:
-        if rx.search(blob):
-            w.append(why)
+    w += suspicious(blob, risk=True)
     return w
 
 

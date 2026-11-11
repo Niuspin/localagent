@@ -1,0 +1,32 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    defaults:
+      run:
+        working-directory: localagent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: localagent/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: 单元与端到端测试（假 llama-server，不需要模型）
+        run: python -m pytest -q
+      - name: 浏览器冒烟测试（仅一个版本）
+        if: matrix.python == '3.12'
+        run: |
+          playwright install --with-deps chromium
+          mkdir -p shots && python tests/ui_smoke.py shots
+      - name: 评测脚本自检（无模型时自动跳过）
+        run: python tests/eval/run_eval.py

@@ -28,6 +28,35 @@ GROUP_DESC: dict[str, str] = {
 
 _OF: dict[str, str] = {t: g for g, ts in EXT_GROUPS.items() for t in ts}
 
+# 动态组：由 MCP 管理器在服务器工具变化时整体替换（组名 mcp:<服务器>）。不在静态表里，所以与上面的常量互不干扰。
+_DYN: dict[str, tuple[str, ...]] = {}
+_DYN_DESC: dict[str, str] = {}
+_DYN_OF: dict[str, str] = {}
+
+
+def set_dynamic(groups: dict[str, tuple[tuple[str, ...], str]]) -> None:
+    """groups: {组名: (工具名元组, 一句话说明)}。整体替换。"""
+    _DYN.clear(); _DYN_DESC.clear(); _DYN_OF.clear()
+    for g, (tools, desc) in groups.items():
+        if not tools:
+            continue
+        _DYN[g] = tuple(tools)
+        _DYN_DESC[g] = desc
+        for t in tools:
+            _DYN_OF[t] = g
+
+
+def all_groups() -> list[str]:
+    return [*EXT_GROUPS, *_DYN]
+
+
+def tools_of(group: str) -> tuple[str, ...]:
+    return EXT_GROUPS.get(group) or _DYN.get(group, ())
+
+
+def describe(group: str) -> str:
+    return GROUP_DESC.get(group) or _DYN_DESC.get(group, "")
+
 _TRIGGERS: dict[str, re.Pattern[str]] = {
     "office": re.compile(
         r"\.(?:docx?|xlsx?|xlsm|pptx?|pdf)\b|\b(?:word|excel|powerpoint|pdf|pptx?|xlsx?|docx?)\b"
@@ -42,11 +71,11 @@ _TRIGGERS: dict[str, re.Pattern[str]] = {
 
 def group_of(tool_name: str) -> str | None:
     """扩展工具所属的组；核心工具返回 None。"""
-    return _OF.get(tool_name)
+    return _OF.get(tool_name) or _DYN_OF.get(tool_name)
 
 
 def visible(tool_name: str, loaded: set[str] | frozenset[str]) -> bool:
-    g = _OF.get(tool_name)
+    g = _OF.get(tool_name) or _DYN_OF.get(tool_name)
     return g is None or g in loaded
 
 
@@ -56,6 +85,10 @@ def detect(text: str, files: list[str] | None = None, skills: list[str] | None =
     out = {g for g, rx in _TRIGGERS.items() if rx.search(blob)}
     if skills:                       # 技能的做法通常要读写办公文件、整理文件
         out |= {"office", "fileops"}
+    for g in _DYN:                   # 用户提到了某个 MCP 服务器的名字（整词匹配，≥3 个字符）
+        name = g.split(":", 1)[1]
+        if len(name) >= 3 and re.search(r"(?<![A-Za-z0-9_-])" + re.escape(name) + r"(?![A-Za-z0-9_-])", blob, re.I):
+            out.add(g)
     return out
 
 
@@ -66,10 +99,13 @@ def normalize(groups: object) -> set[str]:
     items = [str(x).strip().lower() for x in (groups or []) if str(x).strip()]
     if "all" in items:
         return set(EXT_GROUPS)
-    return {g for g in items if g in EXT_GROUPS}
+    return {g for g in items if g in EXT_GROUPS or g in _DYN}
 
 
 def hint() -> str:
     """写进系统提示的一句话（内容固定，不破坏前缀缓存）。"""
-    return ("- 工具列表只含常用工具。需要办公文档（Word/Excel/PPT/PDF）、删除/移动/复制文件、技能与记忆管理、"
+    base = ("- 工具列表只含常用工具。需要办公文档（Word/Excel/PPT/PDF）、删除/移动/复制文件、技能与记忆管理、"
             "后台任务管理时，先调用 load_tools（groups: office / fileops / extras / jobs）再继续。")
+    if _DYN:
+        base += "\n- 已接入的外部工具（MCP）：" + "；".join(f"{g}（{_DYN_DESC.get(g, '')}）" for g in _DYN) + "。需要时同样用 load_tools 加载。"
+    return base

@@ -24,7 +24,7 @@ from . import context as C
 from . import net
 from . import projectdoc
 from . import security as sec
-from . import toolset
+from . import toolcall, toolset
 from .config import Config
 from .engine import Engine, EngineError
 from .journal import Journal
@@ -52,6 +52,7 @@ class Run:
         self.approvals: dict[str, asyncio.Future] = {}
         self.questions: dict[str, asyncio.Future] = {}
         self.ended_at = 0.0
+        self.stats = toolcall.RunStats()          # 本次运行的容错/摩擦计数，结束时写审计并随 run_end 下发
         self._loop = asyncio.get_running_loop()
 
     def emit(self, event: str, data: dict) -> None:
@@ -143,9 +144,9 @@ def make_title(text: str, files_: list[str]) -> str:
 # ====================================================================== Agent
 class Agent:
     def __init__(self, *, cfg: Config, engine: Engine, store: SessionStore, journal: Journal, audit: sec.AuditLog,
-                 memory: Any, skills: Any, protected: list[Path], hidden: list[Path], notify: Any = None):
+                 memory: Any, skills: Any, protected: list[Path], hidden: list[Path], notify: Any = None, mcp: Any = None):
         self.cfg, self.engine, self.store, self.journal, self.audit = cfg, engine, store, journal, audit
-        self.memory, self.skills = memory, skills
+        self.memory, self.skills, self.mcp = memory, skills, mcp
         self.protected, self.hidden = protected, hidden
         self.runs: dict[str, Run] = {}
         self.allow_keys: dict[str, set[str]] = {}
@@ -239,11 +240,11 @@ class Agent:
     def tools_for(self, mode: str, has_ws: bool, groups: set[str] | frozenset[str] = frozenset()) -> list[Tool]:
         out = []
         for t in TOOLS.values():
-            if mode == "plan" and t.kind in ("write", "delete", "exec", "skill"):
+            if mode == "plan" and t.kind in ("write", "delete", "exec", "skill", "mcp"):
                 continue
             if not toolset.visible(t.name, groups):
                 continue
-            if not has_ws and t.group not in ("web", "memory", "skills") and t.name not in ("todo_write", "ask_user"):
+            if not has_ws and t.group not in ("web", "memory", "skills", "mcp") and t.name not in ("todo_write", "ask_user"):
                 continue
             if t.group == "memory" and self.memory is None:
                 continue
@@ -300,7 +301,10 @@ class Agent:
             sess.active_run = None
             sess.updated = time.time()
             self.store.save(sess)
-            run.emit("run_end", {"status": status, **({"error": err} if err else {})})
+            stats = run.stats.nonzero()
+            if stats:
+                self.audit.append(event="run_stats", session=sess.id, status=status, friction=run.stats.friction, **stats)
+            run.emit("run_end", {"status": status, **({"error": err} if err else {}), **({"stats": stats} if stats else {})})
             await run.finish()
 
     def _announce_project_doc(self, run: Run, sess: Session, ws: str) -> None:
@@ -395,11 +399,14 @@ class Agent:
         recent: list[str] = []
         nothink_once = False
         nothink_tried = False
+        force_tool_once = False       # 下一步用 tool_choice=required（仅在上一步整段回复是个没解析成功的调用时）
+        force_tried = False
         overflow_retry = 0
         usage_sum = {"prompt_tokens": 0, "completion_tokens": 0}
         self.engine.auto_restarts = 0
         for step in range(1, max_steps + 1):
             run.emit("step_start", {"step": step})
+            run.stats.steps = step
             mode = cfg.get("agent", "permission_mode", default="ask")
             ws = sess.workspace or cfg.get("workspace", default="")
             tools = self.tools_for(mode, bool(ws), st.tool_groups)
@@ -407,9 +414,10 @@ class Agent:
             await self.engine.ensure_ready()
             ctx.vision = self.engine.vision
             await self._fit_context(run, sess, meter, schemas, mode, ws)
-            body = self._body(sess, mode, ws, schemas, gen, nothink_once)
+            body = self._body(sess, mode, ws, schemas, gen, nothink_once, force_tool_once)
+            was_forced = body.get("tool_choice") == "required"
             raw_est = meter.last_raw
-            nothink_once = False
+            nothink_once = force_tool_once = False
             try:
                 res = await self._stream_step(run, ui, body)
             except net.HTTPStatusError as e:
@@ -426,6 +434,9 @@ class Agent:
                     else:
                         run.emit("notice", {"level": "warn", "text": "上下文超限，正在压缩后重试…"})
                         await self._force_shrink(run, sess, meter, ws)
+                    continue
+                if was_forced and e.status == 400:
+                    run.emit("notice", {"level": "info", "text": "引擎不支持强制工具调用，已改回自动模式。"})
                     continue
                 return "error", f"引擎返回错误 HTTP {e.status}: {e.body[:300]}"
             u = res["usage"]
@@ -445,13 +456,20 @@ class Agent:
             tcs = res["tool_calls"]
             if tcs:
                 msg["tool_calls"] = [{"id": t["id"], "type": "function", "function": {"name": t["name"], "arguments": t["arguments"]}} for t in tcs]
-            if res["content"] or tcs:
-                sess.history.append(msg)
+            failed_call = (not tcs and not force_tried and bool(schemas) and toolcall.looks_like_failed_call(res["content"]))
+            if (res["content"] or tcs) and not failed_call:
+                sess.history.append(msg)          # 无效的“调用文本”不进历史：既不污染上下文，也避免模型照着自己的坏格式继续写
             run.emit("assistant_done", {"finish_reason": res["finish"]})
+            if failed_call:
+                force_tried = force_tool_once = True
+                run.stats.bump("forced_retries")
+                run.emit("notice", {"level": "info", "text": "模型输出的工具调用格式不对，已要求它重新发出一次。"})
+                continue
             if not tcs:
                 if res["finish"] == "length" and not res["content"].strip():
                     if cfg.get("generation", "thinking") != "off" and not nothink_tried:
                         nothink_tried = True
+                        run.stats.bump("thinking_cut")
                         run.emit("notice", {"level": "warn", "text": "思考过长被截断，已关闭思考重试。可在输入框下方把“思考”设为关闭，或调大最大生成长度。"})
                         nothink_once = True
                         continue
@@ -508,7 +526,7 @@ class Agent:
             out.append(cur)
         return out
 
-    def _body(self, sess: Session, mode: str, ws: str, schemas: list[dict], gen: dict, nothink: bool) -> dict:
+    def _body(self, sess: Session, mode: str, ws: str, schemas: list[dict], gen: dict, nothink: bool, force_tool: bool = False) -> dict:
         msgs = [{"role": "system", "content": self.system_prompt(sess, mode, ws)}] + C.api_messages(sess.history)
         b: dict[str, Any] = {"model": "local", "messages": msgs, "stream": True, "stream_options": {"include_usage": True},
                              "temperature": gen["temperature"], "top_p": gen["top_p"], "top_k": gen["top_k"], "min_p": gen["min_p"],
@@ -517,7 +535,7 @@ class Agent:
             b["presence_penalty"] = gen["presence_penalty"]
         if schemas:
             b["tools"] = schemas
-            b["tool_choice"] = "auto"
+            b["tool_choice"] = "required" if force_tool else "auto"
         th = "off" if nothink else gen.get("thinking", "auto")
         if th in ("on", "off"):
             b["chat_template_kwargs"] = {"enable_thinking": th == "on"}
@@ -600,6 +618,7 @@ class Agent:
                     text_blk["text"] = content
                     if not content:
                         ui["blocks"].remove(text_blk)
+                run.stats.bump("text_fallback", len(calls))
                 run.emit("notice", {"level": "info", "text": "（已从文本中解析出工具调用）"})
         for c in calls:
             if not c["id"]:
@@ -611,15 +630,30 @@ class Agent:
     async def _exec_tool(self, run: Run, sess: Session, st: SessionState, ctx: ToolCtx, ui: dict, tc: dict,
                          recent: list[str]) -> tuple[str, list[str]]:
         name, raw_args, tid = tc["name"], tc["arguments"], tc["id"]
+        stats = run.stats
+        stats.bump("tool_calls")
+        fixed_name, _how = toolcall.resolve_name(name, TOOLS)      # 大小写/别名/拼写接近：无歧义才纠正
+        if fixed_name and fixed_name != name:
+            stats.bump("name_fixed")
+            name = fixed_name
         tool = TOOLS.get(name)
-        parsed = repair_json(raw_args) if raw_args.strip() else {}
-        args_ok = isinstance(parsed, dict)
+        parsed, repaired = toolcall.parse_args(raw_args)
+        if repaired:
+            stats.bump("json_repaired")
+        args_ok = parsed is not None
+        if not args_ok:
+            stats.bump("json_failed")
         args: dict = parsed if args_ok else {}
-        # 保证历史里的 arguments 是合法 JSON（否则下一次请求会被服务端拒绝）
+        if tool is not None and args_ok:
+            args, arg_fixes = toolcall.normalize_args(tool.parameters.get("properties", {}), args)
+            if arg_fixes:
+                stats.bump("args_fixed")
+        # 保证历史里的 name / arguments 与实际执行的一致且是合法 JSON（否则下一次请求会被服务端拒绝，模型也会看到前后矛盾的记录）
         for m in reversed(sess.history):
             if m.get("role") == "assistant":
                 for t in m.get("tool_calls") or []:
                     if t["id"] == tid:
+                        t["function"]["name"] = name
                         t["function"]["arguments"] = json.dumps(args, ensure_ascii=False)
                 break
         blk: dict = {"type": "tool", "id": tid, "name": name, "title": name, "args": args, "status": "running", "content": "", "meta": {},
@@ -634,8 +668,13 @@ class Agent:
         if tool is None:
             blk["title"] = name
             run.emit("tool_start", {"id": tid, "name": name, "title": name, "args": args, "risk": "low"})
+            stats.bump("unknown_tool")
             finish("error", f"未知工具 {name}")
-            return f"错误: 没有名为 {name} 的工具。可用工具: {', '.join(TOOLS)}", []
+            ws_now = sess.workspace or self.cfg.get("workspace", default="")
+            avail = [t.name for t in self.tools_for(self.cfg.get("agent", "permission_mode", default="ask"), bool(ws_now), st.tool_groups)]
+            near = toolcall.suggest(name, avail)
+            return (f"错误: 没有名为 {name} 的工具。" + (f"你是不是想用 {' / '.join(near)}？" if near else "")
+                    + f"当前可用工具: {', '.join(avail)}（其余低频工具用 load_tools 加载）"), []
         if not args_ok:
             blk["title"] = tool.describe({})
             run.emit("tool_start", {"id": tid, "name": name, "title": blk["title"], "args": {}, "risk": "low"})
@@ -653,9 +692,12 @@ class Agent:
         recent.append(key)
         del recent[:-8]
         repeat = len(recent) >= 3 and len(set(recent[-3:])) == 1
-        risk = {"write": "medium", "delete": "high", "exec": "high", "skill": "high"}.get(tool.kind, "low")
+        if repeat:
+            stats.bump("repeat_calls")
+        risk = {"write": "medium", "delete": "high", "exec": "high", "skill": "high", "mcp": "high"}.get(tool.kind, "low")
         run.emit("tool_start", {"id": tid, "name": name, "title": blk["title"], "args": args, "risk": risk})
         if cerr:
+            stats.bump("arg_errors")
             finish("error", cerr)
             return f"错误: {cerr}（参数规格: {json.dumps(tool.parameters, ensure_ascii=False)[:600]}）", []
         if tool.precheck:                       # 例如“先读再改”：失败就直接告诉模型，不让用户去审批一个注定失败的操作
@@ -664,6 +706,7 @@ class Agent:
             except Exception:  # noqa: BLE001
                 pre = None
             if pre:
+                stats.bump("precheck_blocked")
                 finish("error", pre)
                 return f"错误: {pre}", []
 
@@ -690,6 +733,8 @@ class Agent:
             u = urlsplit(args.get("url", "") if "://" in args.get("url", "") else "https://" + args.get("url", ""))
             domain_ok = (net.domain_of(u.geturl()) in st.user_domains) and len(u.query) <= 200 and not u.username
         sandboxed = ctx.sandbox_kind != "none" and self.cfg.get("security", "command_sandbox", default="auto") == "auto"
+        if tool.kind == "mcp":      # MCP 服务器是否“被隔离”看它自己的沙箱与联网设置，而不是命令沙箱
+            sandboxed = bool(self.mcp is not None and self.mcp.contained(str(tool.extra.get("server", ""))))
         tainted_eff = st.tainted and bool(self.cfg.get("security", "taint_tracking", default=True))
         dec = sec.Policy.decide(kind=tool.kind, name=name, mode=mode, tainted=tainted_eff, allow_keys=st.allow_keys, sensitive=sensitive,
                                 command=command, sandboxed=sandboxed, domain_ok=domain_ok)
@@ -702,7 +747,7 @@ class Agent:
                 finish("denied", "用户拒绝了此操作")
                 self.audit.append(event="denied", session=sess.id, tool=name, args=sec.summarize_args(args))
                 return "用户拒绝了此操作。不要重复尝试相同操作；请换个方式或询问用户想怎么做。", []
-            if decision == "allow_session" and not sensitive and not tainted_eff and tool.kind in ("write", "exec"):
+            if decision == "allow_session" and not sensitive and not tainted_eff and tool.kind in ("write", "exec", "mcp"):
                 st.allow_keys.add(dec.key)
         # ---- 执行
         t0 = time.time()
