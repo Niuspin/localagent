@@ -12,8 +12,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-CODE_DIR = Path(__file__).resolve().parent.parent          # 代码所在目录（web/ 在这里）
-ROOT = Path(os.environ.get("LAGENT_HOME") or CODE_DIR).resolve()  # 数据根目录（测试可重定向）
+from .paths import CODE_DIR, ROOT          # 代码/资源目录与数据根目录（源码运行、打包运行、测试重定向都在 paths 里处理）
+
 MODELS_DIR = ROOT / "models"
 DATA_DIR = ROOT / "data"
 SKILLS_DIR = ROOT / "skills"
@@ -41,6 +41,7 @@ DEFAULTS: dict[str, Any] = {
         "max_tokens": 8192, "presence_penalty": 0.0,
     },
     "agent": {
+        "profile": "auto",                    # 模型档位：auto 按模型规模自动选；compact / standard / large 强制；off 关闭自适应
         "max_steps": 40, "permission_mode": "ask", "system_prompt_extra": "",
         "auto_title": True, "memory_auto_recall": True, "memory_recall_k": 6,
         "require_read_before_edit": True,     # 改/覆盖已有文本文件前，本会话必须读过它且之后没被别人改动
@@ -121,6 +122,7 @@ SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "engine.extra_args": _str_list,
     "generation.thinking": _enum("auto", "on", "off"),
     "agent.permission_mode": _enum("ask", "auto_edit", "plan", "auto"),
+    "agent.profile": _enum("auto", "compact", "standard", "large", "off"),
     "security.command_sandbox": _enum("auto", "off"),
     "search.mode": _enum("merge", "first"),
     "search.safe": _enum("off", "moderate", "strict"),

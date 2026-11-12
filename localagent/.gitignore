@@ -10,3 +10,6 @@ bin/*
 skills/*
 !skills/.gitkeep
 .pytest_cache/
+build/
+dist/
+*.spec.bak

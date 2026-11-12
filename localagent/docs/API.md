@@ -21,7 +21,8 @@
     "ctx": 32768, "ctx_max": 131072, "vision": true, "error": null,
     "binary": "/path/llama-server|null", "binary_version": "b6xxx|null",
     "load_log_tail": ["..."], "plan": {"summary":"…","n_cpu_moe":12,"ngl":"all","kv_mb":1800,"notes":["…"]},
-    "tps": 42.1
+    "tps": 42.1,
+    "profile": {"tier": "compact|standard|large", "label": "紧凑|标准|大型", "params_b": 30.7, "active_b": 3.6}
   },
   "models": [{"file":"x.gguf","size_gb":17.3,"arch":"qwen3moe","name":"…","moe":true,"experts":128,"experts_used":8,
               "ctx_train":262144,"quant":"Q4_K_M","mmproj":"mmproj-x.gguf|null","vision":true}],
@@ -43,7 +44,7 @@
             "gpu_layers":"auto","n_cpu_moe":"auto","mmproj_offload":"auto","flash_attn":"auto","kv_cache_type":"auto",
             "threads":0,"batch":2048,"ubatch":512,"image_max_tokens":1024,"cache_ram_mb":4096,"vram_reserve_mb":1024,"extra_args":[]},
  "generation": {"thinking":"auto","temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"max_tokens":8192,"presence_penalty":0.0},
- "agent": {"max_steps":40,"permission_mode":"ask","system_prompt_extra":"","auto_title":true,"memory_auto_recall":true,"memory_recall_k":6},
+ "agent": {"profile":"auto|compact|standard|large|off","max_steps":40,"permission_mode":"ask","system_prompt_extra":"","auto_title":true,"memory_auto_recall":true,"memory_recall_k":6},
  "security": {"allow_network_commands":false,"command_sandbox":"auto","command_timeout_s":120,"max_file_mb":20,
               "trash_retention_days":14,"block_remote_images":true,"taint_tracking":true},
  "search": {"providers":["duckduckgo","bing"],"mode":"merge|first","max_results":8,"proxy":"","searxng_url":"","region":"","safe":"moderate",
@@ -151,5 +152,6 @@
 - 工具以 `mcp__<server>__<tool>` 命名，kind=`mcp`，属于工具组 `mcp:<server>`；`tool_start.risk` 恒为 `high`。
 
 ## 其他
+- `POST /api/app/quit` → `{"ok":true}`：请求整个应用退出（停止模型与服务）。仅当由启动器（`run.py` / `LocalAgent.exe`）运行时可用，否则 409。
 - `POST /api/search/test` `{query, provider?}` → `{results:[{title,url,snippet,engine}], errors:{provider:"msg"}}`
 - `GET /api/audit?n=200` → `{entries:[…]}`；`GET /api/audit/verify` → `{"ok":true,"count":123}`（哈希链校验）

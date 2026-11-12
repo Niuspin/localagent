@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import gguf, hw, net
-from .config import Config
+from . import profile as prof_mod
+from .config import DEFAULTS, Config
 
 _BLOCKED_FLAGS = {"--host", "--port", "--api-key", "--api-key-file", "--webui", "--ui", "--path", "--api-prefix", "--slot-save-path",
                   "--media-path", "--models-dir", "--models-preset", "--props", "-hf", "--hf-repo", "-hff", "--hf-file", "-mu",
@@ -116,6 +117,7 @@ class Engine:
         self.ctx_cap = 0
         self.vision = False
         self.plan_info: dict = {}
+        self.profile: prof_mod.Profile | None = None     # 当前已加载模型的档位（未叠加用户覆盖）
         self.log: collections.deque[str] = collections.deque(maxlen=600)
         self.tps = 0.0
         self.binary: Path | None = None
@@ -175,6 +177,10 @@ class Engine:
     def has(self, flag: str) -> bool:
         return bool(re.search(r"(?<![\w-])" + re.escape(flag) + r"(?![\w-])", getattr(self, "_help_text", "")))
 
+    def tuned(self) -> prof_mod.Profile:
+        """当前生效的档位参数（模型档位 + 用户配置覆盖）。没有加载模型时用缺省档位。"""
+        return (self.profile or prof_mod.default(self.cfg)).tuned(self.cfg)
+
     def _flash_takes_value(self) -> bool:
         return bool(re.search(r"(--flash-attn|-fa)[^\n]{0,40}\[on\|off\|auto\]", getattr(self, "_help_text", "")))
 
@@ -194,8 +200,10 @@ class Engine:
 
     # ------------------------------------------------------------ 规划
     def plan(self, model_file: str | None = None, mmproj: str | None = None, ctx: Any = None) -> dict:
-        e = self.cfg.get("engine")
+        e = dict(self.cfg.get("engine"))
         info, mmprojs = self._pick(model_file)
+        prof = prof_mod.for_model(self.cfg, info).tuned(self.cfg)
+        e["ctx_start"], e["batch"], e["ubatch"] = prof.ctx_start, prof.batch, prof.ubatch
         mm_opt = mmproj if mmproj is not None else e["mmproj"]
         mm_path: Path | None = None
         mm_size = 0.0
@@ -323,14 +331,22 @@ class Engine:
         fa_mode = e["flash_attn"]
         fa_eff = "on" if (fa_mode == "auto" and kvt_eff != "f16" and has_gpu) else fa_mode
         threads = e["threads"] or max(1, (_physical_cores() or h["cpu_threads"]))
+        # 提示缓存吃的是内存：权重放不下多少 CPU 内存时按剩余空间收缩（用户手动设过的值不动）
+        cache_mb = prof.cache_ram_mb
+        if cache_mb > 0 and e["cache_ram_mb"] == DEFAULTS["engine"]["cache_ram_mb"] and h["ram_free_gb"] > 0:
+            cache_mb = int(max(256, min(cache_mb, (h["ram_free_gb"] - cpu_w - 2.0) * 1024 * 0.5)))
+        if prof.tier == "large":
+            notes.append(f"大模型档位（≈{prof.params_b:.0f}B，激活≈{prof.active_b:.0f}B）：上下文不足时先压缩再考虑扩容，避免反复重载。")
         summary = (f"{info['name']} · {info['quant']} · {S:.1f} GB" + (" · MoE %s专家/激活%s" % (info["experts"], info["experts_used"]) if info["moe"] else "")
+                   + f" · 档位:{prof.label}"
                    + f" → ctx {ctx_eff}" + (f"(可增至 {cap})" if cap > ctx_eff else "") + f" · KV≈{kv_need:.1f} GB({kvt_eff})"
                    + (f" · GPU≈{gpu_w + fixed:.1f}/{budget:.1f} GB" if has_gpu else " · 纯 CPU") + f" · CPU 权重≈{cpu_w:.1f} GB")
         return {"summary": summary, "model": info["file"], "mmproj": mm_path.relative_to(self.models_dir).as_posix() if mm_path and self.models_dir in mm_path.parents else (mm_path.name if mm_path else None),
                 "mmproj_path": str(mm_path) if mm_path else None, "ctx": ctx_eff, "ctx_cap": cap, "ctx_train": train,
                 "ngl": ngl, "n_cpu_moe": n_cpu_moe, "moe": info["moe"], "kv_type": kvt_eff, "flash_attn": fa_eff, "threads": threads,
                 "kv_mb": int(kv_need * 1024), "gpu_gb": round(gpu_w + fixed, 2), "cpu_gb": round(cpu_w, 2), "budget_gb": round(budget, 2),
-                "mmproj_offload": bool(mm_gpu) if mm_path else False, "notes": notes, "model_path": info["path"], "n_exp_layers": len(exp_layers)}
+                "mmproj_offload": bool(mm_gpu) if mm_path else False, "notes": notes, "model_path": info["path"], "n_exp_layers": len(exp_layers),
+                "batch": prof.batch, "ubatch": prof.ubatch, "cache_ram_mb": cache_mb, "profile": prof.brief()}
 
     # ------------------------------------------------------------ 参数构建
     def build_args(self, plan: dict) -> list[str]:
@@ -380,9 +396,10 @@ class Engine:
             a += (["-fa", fa] if self._flash_takes_value() else (["-fa"] if fa == "on" else []))
         if plan["kv_type"] != "f16":
             a += ["-ctk", plan["kv_type"], "-ctv", plan["kv_type"]]
-        a += ["-t", str(plan["threads"]), "-b", str(e["batch"]), "-ub", str(e["ubatch"])]
-        if e["cache_ram_mb"] != 0 and self.has("--cache-ram"):
-            a += ["--cache-ram", str(e["cache_ram_mb"])]
+        a += ["-t", str(plan["threads"]), "-b", str(plan.get("batch", e["batch"])), "-ub", str(plan.get("ubatch", e["ubatch"]))]
+        cache_mb = plan.get("cache_ram_mb", e["cache_ram_mb"])
+        if cache_mb != 0 and self.has("--cache-ram"):
+            a += ["--cache-ram", str(cache_mb)]
         a += self._safe_extra(e["extra_args"])
         return a
 
@@ -429,7 +446,8 @@ class Engine:
         return {"status": self.status, "model": self.model["file"] if self.model else None, "mmproj": self.mmproj_file,
                 "ctx": self.ctx, "ctx_max": self.ctx_cap, "vision": self.vision, "error": self.error,
                 "binary": str(self.binary) if self.binary else None, "binary_version": self.binary_version,
-                "load_log_tail": ls, "plan": self.plan_info, "tps": round(self.tps, 1)}
+                "load_log_tail": ls, "plan": self.plan_info, "tps": round(self.tps, 1),
+                "profile": self.tuned().brief()}
 
     def _set(self, status: str, error: str | None = None) -> None:
         self.status, self.error = status, error
@@ -456,6 +474,7 @@ class Engine:
             self._last = {"model": plan["model"], "mmproj": mmproj, "ctx": ctx}   # 记录“请求值”，None 表示按配置自动
             self.port, self.api_key = _free_port(), secrets.token_urlsafe(24)
             self.model = next(m for m in self.scan()[0] if m["file"] == plan["model"])
+            self.profile = prof_mod.for_model(self.cfg, self.model)
             self.mmproj_file, self.ctx, self.ctx_cap, self.plan_info = plan["mmproj"], plan["ctx"], plan["ctx_cap"], plan
             self.vision = False
             self.log.clear()

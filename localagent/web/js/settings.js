@@ -262,6 +262,9 @@
     pane.appendChild(F('presence_penalty', num('generation.presence_penalty', { float: true, step: 0.1, min: -2, max: 2 }), '部分量化模型出现重复循环时可设为 0.5~1.5。'));
     pane.appendChild(F('单次最大输出 token', num('generation.max_tokens', { min: 256, step: 256 })));
     pane.appendChild(sec('Agent'));
+    var pf = (LA.S.state && LA.S.state.engine && LA.S.state.engine.profile) || null;
+    pane.appendChild(F('模型档位', sel('agent.profile', [['auto', '自动（按模型规模）'], ['compact', '紧凑（小模型）'], ['standard', '标准'], ['large', '大型（百亿以上 / 大 MoE）'], ['off', '关闭自适应']]),
+      '决定工具是否一次给全、记忆召回条数、步数上限、批处理大小，以及上下文不足时先压缩还是先扩容。' + (pf ? '当前模型判定：' + pf.label + '（约 ' + pf.params_b + 'B，激活约 ' + pf.active_b + 'B）。' : '加载模型后显示判定结果。') + '你在下面手动改过的数值始终优先。'));
     pane.appendChild(F('每轮最多工具步数', num('agent.max_steps', { min: 1, max: 200 }), '防止模型陷入无限循环。'));
     pane.appendChild(F('自动生成标题', sw('agent.auto_title', '用首条消息生成'), '使用规则截取，不额外调用模型，避免挤掉前缀缓存。'));
     pane.appendChild(F('自动召回记忆', sw('agent.memory_auto_recall', '每次提问前检索相关记忆')));
@@ -381,6 +384,10 @@
     var keys = [['Enter', '发送'], ['Shift + Enter', '换行'], ['/', '选择技能'], ['Ctrl/⌘ + Shift + O', '新对话'], ['Ctrl/⌘ + B', '收起/展开侧栏'], ['Esc', '关闭弹窗 / 拒绝当前审批']];
     keys.forEach(function (k) { pane.appendChild(F(k[0], el('span', { text: k[1], style: { color: 'var(--muted)' } }))); });
     pane.appendChild(sec('关于'));
+    pane.appendChild(el('div', { class: 'toolbar' }, btn('退出应用', function () {
+      if (!confirm('退出 LocalAgent？正在运行的任务会被中止，模型进程会停止。')) return;
+      LA.post('/api/app/quit').then(function () { document.body.textContent = '已退出，可以关闭此窗口。'; }).catch(LA.fail);
+    })));
     pane.appendChild(el('div', { class: 'hint2', text: 'LocalAgent ' + ((LA.S.state && LA.S.state.version) || '') + ' · 所有数据保存在本机 data/ 目录；界面不加载任何外部资源。' }));
   }
 })();

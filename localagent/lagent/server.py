@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -21,6 +22,7 @@ from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, R
 from starlette.routing import Route
 
 from . import __version__, gguf, hw
+from .paths import FROZEN
 from . import security as sec
 from .config import BIN_DIR, CODE_DIR, DATA_DIR, MODELS_DIR, ROOT, SKILLS_DIR, WEB_DIR, Config
 from .engine import Engine, EngineError
@@ -62,12 +64,15 @@ class State:
         self.memory = Memory(data / "memory.db")
         self.skills = Skills(root / "skills", CODE_DIR / "lagent" / "builtin_skills", data / "skills_state.json")
         protected = [root / "config.json", root / "skills", root / "models", root / "bin", CODE_DIR / "lagent", CODE_DIR / "web", root / "run.py"]
+        if FROZEN:      # 打包运行：程序本体（exe 与其资源目录）同样只读
+            protected += [Path(sys.executable), CODE_DIR]
         hidden = [data]
         self.mcp = McpManager(data, self.audit)
         self.agent = Agent(cfg=self.cfg, engine=self.engine, store=self.store, journal=self.journal, audit=self.audit, memory=self.memory,
                            skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp)
         self.root = root
         self.autostart = False
+        self.exit_cb: Any = None        # 由启动器设置：请求整个应用退出（测试/纯服务模式下为 None）
 
     def broadcast(self, event: str, data: dict) -> None:
         for q in list(self.subs):
@@ -666,6 +671,13 @@ def make_app(st: State) -> Starlette:
         prov = [d["provider"]] if d.get("provider") else None
         res, errs = await search_mod.run_search(st.cfg, q, providers=prov)
         return J({"results": res, "errors": errs})
+
+    @route("/api/app/quit", ["POST"])
+    async def app_quit(req: Request) -> Response:
+        if st.exit_cb is None:
+            return J({"ok": False, "detail": "当前不是由启动器运行，请在终端里按 Ctrl+C 退出。"}, 409)
+        asyncio.get_running_loop().call_later(0.3, st.exit_cb)       # 先把响应发出去
+        return J({"ok": True})
 
     @route("/api/audit", ["GET"])
     async def audit(req: Request) -> Response:

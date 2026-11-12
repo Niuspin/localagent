@@ -270,6 +270,8 @@ class Agent:
             if d:
                 st.user_domains.add(d)
         st.tool_groups = set(sess.tool_groups) | toolset.detect(text, files_, skills_)
+        if self.engine.tuned().preload_tools:          # 大模型：一次给全，省掉 load_tools 往返（MCP 组仍按需）
+            st.tool_groups |= toolset.static_groups()
         st.seen = self.seen_files.setdefault(sess.id, {})
         status, err = "done", None
         run.emit("run_start", {"run_id": run.id, "session_id": sess.id})
@@ -352,7 +354,7 @@ class Agent:
             except (KeyError, AttributeError):
                 parts += f"\n\n（技能 {name} 不可用）"
         if self.memory and self.cfg.get("agent", "memory_auto_recall", default=True):
-            k = int(self.cfg.get("agent", "memory_recall_k", default=6))
+            k = self.engine.tuned().recall_k
             block, ids = self.memory.recall_block(text, sess.workspace or "", k)
             if block:
                 parts += f"\n\n<memory>\n{block}\n</memory>"
@@ -394,7 +396,7 @@ class Agent:
     async def _loop(self, run: Run, sess: Session, st: SessionState, ctx: ToolCtx, ui: dict) -> tuple[str, str | None]:
         cfg = self.cfg
         gen = cfg.get("generation")
-        max_steps = int(cfg.get("agent", "max_steps", default=40))
+        max_steps = self.engine.tuned().max_steps
         meter = C.Meter(sess.calib, int(cfg.get("engine", "image_max_tokens", default=1024)) or 700)
         recent: list[str] = []
         nothink_once = False
@@ -774,7 +776,7 @@ class Agent:
             run.emit("taint", {"tainted": True, "reason": res.taint})
             self.audit.append(event="taint", session=sess.id, reason=res.taint)
         text = res.content
-        cap = 30000
+        cap = self.engine.tuned().tool_cap
         if self.engine.ctx:
             cap = max(4000, min(cap, int(self.engine.ctx * 1.2)))
         text_for_model = clip(text, cap, "输出过长")
@@ -819,6 +821,7 @@ class Agent:
         eng = self.engine
         cfg = self.cfg
         gen_max = int(cfg.get("generation", "max_tokens", default=8192))
+        prof = eng.tuned()
 
         def usable() -> int:
             return max(1024, eng.ctx - min(gen_max, eng.ctx // 4) - 256)
@@ -830,12 +833,16 @@ class Agent:
         e = est()
         sess.usage.update({"ctx": eng.ctx, "used": e, "pct": round(100 * e / max(1, eng.ctx), 1)})
         if e > 0.70 * usable():
-            saved = C.prune_old(sess.history)
+            saved = C.prune_old(sess.history, keep_recent_tools=prof.keep_recent_tools)
             if saved:
                 e = est()
                 run.emit("context_event", {"kind": "pruned", "detail": f"已精简较早的工具输出（≈{saved // 1000}K 字符）"})
         if e > 0.85 * usable():
-            if cfg.get("engine", "ctx_auto_grow", default=True) and eng.ctx < eng.ctx_cap:
+            can_grow = bool(cfg.get("engine", "ctx_auto_grow", default=True)) and eng.ctx < eng.ctx_cap
+            if not prof.grow_first:          # 大模型重载要几分钟：先压缩，压不下来再扩容
+                await self._compact(run, sess)
+                e = est()
+            if e > 0.85 * usable() and can_grow:
                 new = min(eng.ctx_cap, eng.ctx * 2)
                 run.emit("context_event", {"kind": "grow_start", "detail": f"上下文 {eng.ctx} → {new}，正在重载模型（约需几十秒）…"})
                 await eng.restart(ctx=new)
@@ -843,7 +850,7 @@ class Agent:
                     raise EngineError(eng.error or "扩容后引擎未能启动")
                 run.emit("context_event", {"kind": "grow_done", "detail": f"上下文已扩展到 {eng.ctx}"})
                 e = est()
-            if e > 0.85 * usable():
+            if e > 0.85 * usable() and prof.grow_first:
                 await self._compact(run, sess)
                 e = est()
         if e > 0.97 * usable():

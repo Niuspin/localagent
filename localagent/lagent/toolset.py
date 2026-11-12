@@ -46,6 +46,11 @@ def set_dynamic(groups: dict[str, tuple[tuple[str, ...], str]]) -> None:
             _DYN_OF[t] = g
 
 
+def static_groups() -> set[str]:
+    """内置的全部扩展组（不含 MCP 动态组：外部工具数量不可控，仍按需加载）。"""
+    return set(EXT_GROUPS)
+
+
 def all_groups() -> list[str]:
     return [*EXT_GROUPS, *_DYN]
 

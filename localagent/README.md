@@ -15,7 +15,20 @@
    首次运行会创建 `.venv` 并安装依赖。终端会打印 `http://127.0.0.1:8765/?t=<令牌>`，浏览器自动打开；令牌每次启动都会变。
 5. 在界面里 **选择工作区 → 加载模型**，开始对话。
 
-命令行参数：`python run.py [--port 8765] [--workspace DIR] [--no-browser] [--load]`（`--load` 启动后直接加载上次的模型）。
+命令行参数：`python run.py [--port 8765] [--workspace DIR] [--no-browser] [--browser] [--load]`（`--load` 启动后直接加载上次的模型；`--browser` 用系统默认浏览器而不是应用窗口；`--no-browser` 纯服务模式）。
+
+### 打包成 exe（Windows 应用）
+
+```
+pip install -r requirements-build.txt
+python packaging/build.py          # → dist/LocalAgent/LocalAgent.exe
+```
+
+- 产物是一个**文件夹**（onedir，启动快、误报少）：`LocalAgent.exe` + `models/ bin/ skills/` 空目录 + 使用说明。把 llama.cpp 与模型放进去，双击即用；整个文件夹可拷走（便携）。
+- 双击后在**独立应用窗口**里打开（用系统已有的 Edge / Chrome 应用模式，数据与日常浏览器隔离；都没有则退回默认浏览器）。**关闭窗口 = 退出应用并停止模型**；设置→关于里也有“退出应用”。
+- 数据目录：exe 所在目录；该目录不可写（如装在 Program Files）时改用 `%LOCALAPPDATA%\LocalAgent`；环境变量 `LAGENT_HOME` 可强制指定。无控制台，日志在 `data/logs/app.log`；启动失败会弹消息框。
+- 同一数据目录只允许一个实例，重复双击会提示而不是起两份。
+- `.github/workflows/ci.yml` 的 `build-exe` 任务会在 Windows 上构建并上传产物。注意：**exe 只能在 Windows 上构建**，本仓库的开发环境没有 Windows，打包流程尚未在真机验证（见“已知限制”）。
 
 ## 目录
 
@@ -44,6 +57,20 @@ lagent/          后端代码      web/  前端静态文件      docs/API.md  �
 | **项目指令** | 自动读取工作区根目录的 `AGENTS.md`（没有则 `CLAUDE.md`）写进系统提示：构建/测试命令、代码风格写一次，每个会话都生效。只读普通文件、最多 12000 字符；含“忽略先前指令”“下载即执行”“隐藏字符”等可疑内容时不加载并提示；加载时有提示并记入审计日志；`agent.project_instructions=false` 可关闭 |
 | **先读再改** | 改/覆盖已有文本文件前，本会话必须读过它，且读过之后没被别人改动（否则不弹审批，直接让模型重读）。`edit_file` 还能容忍缩进抄错（唯一匹配时按文件原缩进对齐）。`agent.require_read_before_edit=false` 可关闭 |
 | **任务清单 / 提问** | 多步任务用 `todo_write` 展示进度；信息不足时 `ask_user` 弹出选项卡 |
+
+### 模型档位：小模型与千亿级 MoE 同一套代码
+
+按 GGUF 元数据与文件大小**估算参数量**（文件字节 ×8 ÷ 量化位宽；MoE 的“能力规模”取 √(总参数 × 激活参数)），自动分三档。设置→生成→Agent→“模型档位”可手动指定，`off` 回到旧版行为；你手动改过的数值（步数、召回条数、`ubatch` 等）永远优先。
+
+| | 紧凑（有效规模 <12B） | 标准（旧版默认值） | 大型（≥100B 或有效规模 ≥45B） |
+|---|---|---|---|
+| 工具 | 15 个常驻，其余按需 | 同左 | **一次给全**（省掉 `load_tools` 往返；MCP 仍按需） |
+| 记忆召回 / 步数上限 | 4 条 / 30 步 | 6 条 / 40 步 | 10 条 / 80 步 |
+| 旧工具输出保留 / 单次结果上限 | 3 条 / 12K 字符 | 4 条 / 30K | 8 条 / 60K |
+| 上下文不足时 | 先修剪→扩容→压缩 | 同左 | **先压缩→再扩容**（大模型重载要几分钟） |
+| 引擎起始上下文 / `ubatch` | 32K / 512 | 32K / 512 | 64K / 1024（专家层提示处理更快） |
+
+估算是启发式的（误差来自量化位宽与专家占比）。例如 30B-A3B 这类“总量大但激活很小”的 MoE 会被判为紧凑档，若你觉得保守，手动选“标准”即可。`--cache-ram` 会按 CPU 侧剩余内存自动收缩。
 
 ### MoE 与性能
 
@@ -126,11 +153,13 @@ python tests/ui_smoke.py [截图目录]   # 可选：Chromium 驱动完整界面
 python tests/eval/run_eval.py --repeat 3   # 真实模型评测：通过率 + 摩擦指标（没有模型时自动跳过）
 ```
 
-GitHub Actions（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 上跑上面前两项。
+GitHub Actions（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 上跑上面前两项，并在 Windows 上构建 exe。
 
 ## 已知限制（如实说明）
 
 - 开发环境里**没有真实的 llama.cpp 与 GPU**：引擎路径用与 llama-server 行为对齐的假服务器测试。参数探测、`--fit`、MoE 拆分、mmproj 等在真实环境首次运行请观察“设置→日志”，必要时用“额外参数”微调。
+- **exe 打包与应用窗口**：打包配置、应用窗口、单实例锁、`LOCALAPPDATA` 回退都有单元测试，但**没有在 Windows 真机上构建/运行过**；`packaging/localagent.spec` 的隐式导入列表可能需要在首次构建后按报错补充。
+- **模型档位**阈值来自经验估算，没有在真实大模型（百亿以上）上实测调优；真实环境请对比“摩擦指标”后再调整。
 - **Windows / macOS** 的进程管理（Job Object）、沙箱（sandbox-exec）与路径规则按文档实现，但未在真机验证。
 - 免密钥搜索引擎的 HTML 解析仅用样本页面测试过，见上文。
 - **MCP 沙箱**：开发环境没有 bubblewrap，沙箱参数（只读/可写挂载、断网、HOME）只做了结构验证，“不可用即拒绝启动”已实测；请在装有 bubblewrap 的机器上实际跑一次。只支持本机 stdio 服务器（无 HTTP/OAuth），不支持服务器发起的采样/请求。

@@ -1,0 +1,1406 @@
+From 9b01f5cbfc3fcc7fbc2bed5a8114764d9ed8a8af Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 16:27:30 +0800
+Subject: [PATCH] =?UTF-8?q?=E6=A8=A1=E5=9E=8B=E6=A1=A3=E4=BD=8D=E8=87=AA?=
+ =?UTF-8?q?=E9=80=82=E5=BA=94=20+=20exe=20=E6=89=93=E5=8C=85=E4=B8=8E?=
+ =?UTF-8?q?=E5=BA=94=E7=94=A8=E5=90=AF=E5=8A=A8=E5=99=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- profile：按 GGUF 估算参数量，分 紧凑/标准/大型 三档，接入引擎规划（起始上下文、ubatch、cache-ram）
+  与 Agent 循环（工具一次给全、召回条数、步数、工具输出上限、先压缩还是先扩容）；用户手动值优先，off 回到旧行为
+- paths：源码/打包/测试共用的运行位置规则（便携目录 → LOCALAPPDATA 回退 → LAGENT_HOME）
+- launcher/appwindow：run.py 与 exe 共用入口；Edge/Chrome 应用窗口，关窗即退出；单实例锁；无控制台日志与消息框
+- packaging：PyInstaller spec、build.py、requirements-build；CI 增加 Windows 构建 exe
+- 前端：设置里加“模型档位”与“退出应用”；POST /api/app/quit
+- 测试 +30（档位、规划接入、扩容顺序、运行位置、单实例、独立进程退出）
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014sg15FwxBQF3y3W3TPP343
+---
+ .github/workflows/ci.yml             |  26 +++
+ localagent/.gitignore                |   3 +
+ localagent/README.md                 |  33 ++-
+ localagent/docs/API.md               |   6 +-
+ localagent/lagent/appwindow.py       |  57 ++++++
+ localagent/lagent/config.py          |   6 +-
+ localagent/lagent/engine.py          |  33 ++-
+ localagent/lagent/launcher.py        | 174 ++++++++++++++++
+ localagent/lagent/loop.py            |  19 +-
+ localagent/lagent/paths.py           |  68 +++++++
+ localagent/lagent/profile.py         | 137 +++++++++++++
+ localagent/lagent/server.py          |  12 ++
+ localagent/lagent/toolset.py         |   5 +
+ localagent/packaging/build.py        |  47 +++++
+ localagent/packaging/localagent.spec |  22 ++
+ localagent/requirements-build.txt    |   2 +
+ localagent/run.py                    |  54 +----
+ localagent/tests/test_profile.py     | 294 +++++++++++++++++++++++++++
+ localagent/web/js/settings.js        |   7 +
+ 19 files changed, 937 insertions(+), 68 deletions(-)
+ create mode 100644 localagent/lagent/appwindow.py
+ create mode 100644 localagent/lagent/launcher.py
+ create mode 100644 localagent/lagent/paths.py
+ create mode 100644 localagent/lagent/profile.py
+ create mode 100644 localagent/packaging/build.py
+ create mode 100644 localagent/packaging/localagent.spec
+ create mode 100644 localagent/requirements-build.txt
+ create mode 100644 localagent/tests/test_profile.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index ed4a5b8..94076b6 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -30,3 +30,29 @@ jobs:
+           mkdir -p shots && python tests/ui_smoke.py shots
+       - name: 评测脚本自检（无模型时自动跳过）
+         run: python tests/eval/run_eval.py
++
++  build-exe:
++    needs: test
++    runs-on: windows-latest
++    defaults:
++      run:
++        working-directory: localagent
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++          cache: pip
++          cache-dependency-path: localagent/requirements*.txt
++      - run: pip install -r requirements-build.txt
++      - name: 构建 LocalAgent.exe
++        run: python packaging/build.py
++      - name: 冒烟：exe 能启动并报版本
++        shell: pwsh
++        run: |
++          $p = Start-Process dist/LocalAgent/LocalAgent.exe -ArgumentList "--version" -Wait -PassThru
++          if ($p.ExitCode -ne 0) { exit 1 }
++      - uses: actions/upload-artifact@v4
++        with:
++          name: LocalAgent-windows
++          path: localagent/dist/LocalAgent
+diff --git a/localagent/.gitignore b/localagent/.gitignore
+index daa2c3f..c4cbfce 100644
+--- a/localagent/.gitignore
++++ b/localagent/.gitignore
+@@ -10,3 +10,6 @@ bin/*
+ skills/*
+ !skills/.gitkeep
+ .pytest_cache/
++build/
++dist/
++*.spec.bak
+diff --git a/localagent/README.md b/localagent/README.md
+index a6297a9..2d44002 100644
+--- a/localagent/README.md
++++ b/localagent/README.md
+@@ -15,7 +15,20 @@
+    首次运行会创建 `.venv` 并安装依赖。终端会打印 `http://127.0.0.1:8765/?t=<令牌>`，浏览器自动打开；令牌每次启动都会变。
+ 5. 在界面里 **选择工作区 → 加载模型**，开始对话。
+ 
+-命令行参数：`python run.py [--port 8765] [--workspace DIR] [--no-browser] [--load]`（`--load` 启动后直接加载上次的模型）。
++命令行参数：`python run.py [--port 8765] [--workspace DIR] [--no-browser] [--browser] [--load]`（`--load` 启动后直接加载上次的模型；`--browser` 用系统默认浏览器而不是应用窗口；`--no-browser` 纯服务模式）。
++
++### 打包成 exe（Windows 应用）
++
++```
++pip install -r requirements-build.txt
++python packaging/build.py          # → dist/LocalAgent/LocalAgent.exe
++```
++
++- 产物是一个**文件夹**（onedir，启动快、误报少）：`LocalAgent.exe` + `models/ bin/ skills/` 空目录 + 使用说明。把 llama.cpp 与模型放进去，双击即用；整个文件夹可拷走（便携）。
++- 双击后在**独立应用窗口**里打开（用系统已有的 Edge / Chrome 应用模式，数据与日常浏览器隔离；都没有则退回默认浏览器）。**关闭窗口 = 退出应用并停止模型**；设置→关于里也有“退出应用”。
++- 数据目录：exe 所在目录；该目录不可写（如装在 Program Files）时改用 `%LOCALAPPDATA%\LocalAgent`；环境变量 `LAGENT_HOME` 可强制指定。无控制台，日志在 `data/logs/app.log`；启动失败会弹消息框。
++- 同一数据目录只允许一个实例，重复双击会提示而不是起两份。
++- `.github/workflows/ci.yml` 的 `build-exe` 任务会在 Windows 上构建并上传产物。注意：**exe 只能在 Windows 上构建**，本仓库的开发环境没有 Windows，打包流程尚未在真机验证（见“已知限制”）。
+ 
+ ## 目录
+ 
+@@ -45,6 +58,20 @@ lagent/          后端代码      web/  前端静态文件      docs/API.md  
+ | **先读再改** | 改/覆盖已有文本文件前，本会话必须读过它，且读过之后没被别人改动（否则不弹审批，直接让模型重读）。`edit_file` 还能容忍缩进抄错（唯一匹配时按文件原缩进对齐）。`agent.require_read_before_edit=false` 可关闭 |
+ | **任务清单 / 提问** | 多步任务用 `todo_write` 展示进度；信息不足时 `ask_user` 弹出选项卡 |
+ 
++### 模型档位：小模型与千亿级 MoE 同一套代码
++
++按 GGUF 元数据与文件大小**估算参数量**（文件字节 ×8 ÷ 量化位宽；MoE 的“能力规模”取 √(总参数 × 激活参数)），自动分三档。设置→生成→Agent→“模型档位”可手动指定，`off` 回到旧版行为；你手动改过的数值（步数、召回条数、`ubatch` 等）永远优先。
++
++| | 紧凑（有效规模 <12B） | 标准（旧版默认值） | 大型（≥100B 或有效规模 ≥45B） |
++|---|---|---|---|
++| 工具 | 15 个常驻，其余按需 | 同左 | **一次给全**（省掉 `load_tools` 往返；MCP 仍按需） |
++| 记忆召回 / 步数上限 | 4 条 / 30 步 | 6 条 / 40 步 | 10 条 / 80 步 |
++| 旧工具输出保留 / 单次结果上限 | 3 条 / 12K 字符 | 4 条 / 30K | 8 条 / 60K |
++| 上下文不足时 | 先修剪→扩容→压缩 | 同左 | **先压缩→再扩容**（大模型重载要几分钟） |
++| 引擎起始上下文 / `ubatch` | 32K / 512 | 32K / 512 | 64K / 1024（专家层提示处理更快） |
++
++估算是启发式的（误差来自量化位宽与专家占比）。例如 30B-A3B 这类“总量大但激活很小”的 MoE 会被判为紧凑档，若你觉得保守，手动选“标准”即可。`--cache-ram` 会按 CPU 侧剩余内存自动收缩。
++
+ ### MoE 与性能
+ 
+ - 读取 GGUF 元数据，**精确到每层专家权重的字节数**，据此规划“注意力放显存、专家留内存”的拆分；默认交给 llama.cpp 的 `--fit`，也可手动指定 `gpu_layers` / `n_cpu_moe`。
+@@ -126,11 +153,13 @@ python tests/ui_smoke.py [截图目录]   # 可选：Chromium 驱动完整界面
+ python tests/eval/run_eval.py --repeat 3   # 真实模型评测：通过率 + 摩擦指标（没有模型时自动跳过）
+ ```
+ 
+-GitHub Actions（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 上跑上面前两项。
++GitHub Actions（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 上跑上面前两项，并在 Windows 上构建 exe。
+ 
+ ## 已知限制（如实说明）
+ 
+ - 开发环境里**没有真实的 llama.cpp 与 GPU**：引擎路径用与 llama-server 行为对齐的假服务器测试。参数探测、`--fit`、MoE 拆分、mmproj 等在真实环境首次运行请观察“设置→日志”，必要时用“额外参数”微调。
++- **exe 打包与应用窗口**：打包配置、应用窗口、单实例锁、`LOCALAPPDATA` 回退都有单元测试，但**没有在 Windows 真机上构建/运行过**；`packaging/localagent.spec` 的隐式导入列表可能需要在首次构建后按报错补充。
++- **模型档位**阈值来自经验估算，没有在真实大模型（百亿以上）上实测调优；真实环境请对比“摩擦指标”后再调整。
+ - **Windows / macOS** 的进程管理（Job Object）、沙箱（sandbox-exec）与路径规则按文档实现，但未在真机验证。
+ - 免密钥搜索引擎的 HTML 解析仅用样本页面测试过，见上文。
+ - **MCP 沙箱**：开发环境没有 bubblewrap，沙箱参数（只读/可写挂载、断网、HOME）只做了结构验证，“不可用即拒绝启动”已实测；请在装有 bubblewrap 的机器上实际跑一次。只支持本机 stdio 服务器（无 HTTP/OAuth），不支持服务器发起的采样/请求。
+diff --git a/localagent/docs/API.md b/localagent/docs/API.md
+index 0be6d6b..51d74e0 100644
+--- a/localagent/docs/API.md
++++ b/localagent/docs/API.md
+@@ -21,7 +21,8 @@
+     "ctx": 32768, "ctx_max": 131072, "vision": true, "error": null,
+     "binary": "/path/llama-server|null", "binary_version": "b6xxx|null",
+     "load_log_tail": ["..."], "plan": {"summary":"…","n_cpu_moe":12,"ngl":"all","kv_mb":1800,"notes":["…"]},
+-    "tps": 42.1
++    "tps": 42.1,
++    "profile": {"tier": "compact|standard|large", "label": "紧凑|标准|大型", "params_b": 30.7, "active_b": 3.6}
+   },
+   "models": [{"file":"x.gguf","size_gb":17.3,"arch":"qwen3moe","name":"…","moe":true,"experts":128,"experts_used":8,
+               "ctx_train":262144,"quant":"Q4_K_M","mmproj":"mmproj-x.gguf|null","vision":true}],
+@@ -43,7 +44,7 @@
+             "gpu_layers":"auto","n_cpu_moe":"auto","mmproj_offload":"auto","flash_attn":"auto","kv_cache_type":"auto",
+             "threads":0,"batch":2048,"ubatch":512,"image_max_tokens":1024,"cache_ram_mb":4096,"vram_reserve_mb":1024,"extra_args":[]},
+  "generation": {"thinking":"auto","temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"max_tokens":8192,"presence_penalty":0.0},
+- "agent": {"max_steps":40,"permission_mode":"ask","system_prompt_extra":"","auto_title":true,"memory_auto_recall":true,"memory_recall_k":6},
++ "agent": {"profile":"auto|compact|standard|large|off","max_steps":40,"permission_mode":"ask","system_prompt_extra":"","auto_title":true,"memory_auto_recall":true,"memory_recall_k":6},
+  "security": {"allow_network_commands":false,"command_sandbox":"auto","command_timeout_s":120,"max_file_mb":20,
+               "trash_retention_days":14,"block_remote_images":true,"taint_tracking":true},
+  "search": {"providers":["duckduckgo","bing"],"mode":"merge|first","max_results":8,"proxy":"","searxng_url":"","region":"","safe":"moderate",
+@@ -151,5 +152,6 @@
+ - 工具以 `mcp__<server>__<tool>` 命名，kind=`mcp`，属于工具组 `mcp:<server>`；`tool_start.risk` 恒为 `high`。
+ 
+ ## 其他
++- `POST /api/app/quit` → `{"ok":true}`：请求整个应用退出（停止模型与服务）。仅当由启动器（`run.py` / `LocalAgent.exe`）运行时可用，否则 409。
+ - `POST /api/search/test` `{query, provider?}` → `{results:[{title,url,snippet,engine}], errors:{provider:"msg"}}`
+ - `GET /api/audit?n=200` → `{entries:[…]}`；`GET /api/audit/verify` → `{"ok":true,"count":123}`（哈希链校验）
+diff --git a/localagent/lagent/appwindow.py b/localagent/lagent/appwindow.py
+new file mode 100644
+index 0000000..c58659e
+--- /dev/null
++++ b/localagent/lagent/appwindow.py
+@@ -0,0 +1,57 @@
++"""桌面应用窗口：用系统里已有的 Edge / Chrome（“应用模式”）打开界面——独立窗口、无地址栏，不引入任何额外依赖。
++
++找不到这类浏览器时返回 None，由启动器退回到系统默认浏览器。窗口使用独立的浏览器配置目录（data/browser/），
++和用户日常浏览器的登录、扩展、缓存完全隔离；关闭这个窗口就等于退出应用。
++"""
++from __future__ import annotations
++
++import os
++import shutil
++import subprocess
++import sys
++from pathlib import Path
++
++
++def _candidates() -> list[str]:
++    out: list[str] = []
++    if os.name == "nt":
++        for var in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
++            base = os.environ.get(var)
++            if base:
++                out += [str(Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
++                        str(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")]
++    elif sys.platform == "darwin":
++        out += ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
++                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
++                "/Applications/Chromium.app/Contents/MacOS/Chromium"]
++    else:
++        for name in ("microsoft-edge", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "brave-browser"):
++            w = shutil.which(name)
++            if w:
++                out.append(w)
++    return out
++
++
++def find_browser() -> str | None:
++    for c in _candidates():
++        if Path(c).is_file():
++            return c
++    return None
++
++
++def window_args(exe: str, url: str, profile_dir: Path) -> list[str]:
++    return [exe, f"--app={url}", f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check",
++            "--window-size=1280,860"]
++
++
++def open_window(url: str, profile_dir: Path) -> subprocess.Popen | None:
++    exe = find_browser()
++    if not exe:
++        return None
++    try:
++        profile_dir.mkdir(parents=True, exist_ok=True)
++        kw: dict = {"creationflags": 0x00000008} if os.name == "nt" else {"start_new_session": True}   # 脱离控制台，关闭它不牵连启动器
++        return subprocess.Popen(window_args(exe, url, profile_dir), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
++                                stderr=subprocess.DEVNULL, **kw)
++    except OSError:
++        return None
+diff --git a/localagent/lagent/config.py b/localagent/lagent/config.py
+index 70e9693..70493b6 100644
+--- a/localagent/lagent/config.py
++++ b/localagent/lagent/config.py
+@@ -12,8 +12,8 @@ import threading
+ from pathlib import Path
+ from typing import Any, Callable
+ 
+-CODE_DIR = Path(__file__).resolve().parent.parent          # 代码所在目录（web/ 在这里）
+-ROOT = Path(os.environ.get("LAGENT_HOME") or CODE_DIR).resolve()  # 数据根目录（测试可重定向）
++from .paths import CODE_DIR, ROOT          # 代码/资源目录与数据根目录（源码运行、打包运行、测试重定向都在 paths 里处理）
++
+ MODELS_DIR = ROOT / "models"
+ DATA_DIR = ROOT / "data"
+ SKILLS_DIR = ROOT / "skills"
+@@ -41,6 +41,7 @@ DEFAULTS: dict[str, Any] = {
+         "max_tokens": 8192, "presence_penalty": 0.0,
+     },
+     "agent": {
++        "profile": "auto",                    # 模型档位：auto 按模型规模自动选；compact / standard / large 强制；off 关闭自适应
+         "max_steps": 40, "permission_mode": "ask", "system_prompt_extra": "",
+         "auto_title": True, "memory_auto_recall": True, "memory_recall_k": 6,
+         "require_read_before_edit": True,     # 改/覆盖已有文本文件前，本会话必须读过它且之后没被别人改动
+@@ -121,6 +122,7 @@ SPECIAL: dict[str, Callable[[str, Any], Any]] = {
+     "engine.extra_args": _str_list,
+     "generation.thinking": _enum("auto", "on", "off"),
+     "agent.permission_mode": _enum("ask", "auto_edit", "plan", "auto"),
++    "agent.profile": _enum("auto", "compact", "standard", "large", "off"),
+     "security.command_sandbox": _enum("auto", "off"),
+     "search.mode": _enum("merge", "first"),
+     "search.safe": _enum("off", "moderate", "strict"),
+diff --git a/localagent/lagent/engine.py b/localagent/lagent/engine.py
+index 4cc4389..3f38b87 100644
+--- a/localagent/lagent/engine.py
++++ b/localagent/lagent/engine.py
+@@ -25,7 +25,8 @@ from pathlib import Path
+ from typing import Any, Callable
+ 
+ from . import gguf, hw, net
+-from .config import Config
++from . import profile as prof_mod
++from .config import DEFAULTS, Config
+ 
+ _BLOCKED_FLAGS = {"--host", "--port", "--api-key", "--api-key-file", "--webui", "--ui", "--path", "--api-prefix", "--slot-save-path",
+                   "--media-path", "--models-dir", "--models-preset", "--props", "-hf", "--hf-repo", "-hff", "--hf-file", "-mu",
+@@ -116,6 +117,7 @@ class Engine:
+         self.ctx_cap = 0
+         self.vision = False
+         self.plan_info: dict = {}
++        self.profile: prof_mod.Profile | None = None     # 当前已加载模型的档位（未叠加用户覆盖）
+         self.log: collections.deque[str] = collections.deque(maxlen=600)
+         self.tps = 0.0
+         self.binary: Path | None = None
+@@ -175,6 +177,10 @@ class Engine:
+     def has(self, flag: str) -> bool:
+         return bool(re.search(r"(?<![\w-])" + re.escape(flag) + r"(?![\w-])", getattr(self, "_help_text", "")))
+ 
++    def tuned(self) -> prof_mod.Profile:
++        """当前生效的档位参数（模型档位 + 用户配置覆盖）。没有加载模型时用缺省档位。"""
++        return (self.profile or prof_mod.default(self.cfg)).tuned(self.cfg)
++
+     def _flash_takes_value(self) -> bool:
+         return bool(re.search(r"(--flash-attn|-fa)[^\n]{0,40}\[on\|off\|auto\]", getattr(self, "_help_text", "")))
+ 
+@@ -194,8 +200,10 @@ class Engine:
+ 
+     # ------------------------------------------------------------ 规划
+     def plan(self, model_file: str | None = None, mmproj: str | None = None, ctx: Any = None) -> dict:
+-        e = self.cfg.get("engine")
++        e = dict(self.cfg.get("engine"))
+         info, mmprojs = self._pick(model_file)
++        prof = prof_mod.for_model(self.cfg, info).tuned(self.cfg)
++        e["ctx_start"], e["batch"], e["ubatch"] = prof.ctx_start, prof.batch, prof.ubatch
+         mm_opt = mmproj if mmproj is not None else e["mmproj"]
+         mm_path: Path | None = None
+         mm_size = 0.0
+@@ -323,14 +331,22 @@ class Engine:
+         fa_mode = e["flash_attn"]
+         fa_eff = "on" if (fa_mode == "auto" and kvt_eff != "f16" and has_gpu) else fa_mode
+         threads = e["threads"] or max(1, (_physical_cores() or h["cpu_threads"]))
++        # 提示缓存吃的是内存：权重放不下多少 CPU 内存时按剩余空间收缩（用户手动设过的值不动）
++        cache_mb = prof.cache_ram_mb
++        if cache_mb > 0 and e["cache_ram_mb"] == DEFAULTS["engine"]["cache_ram_mb"] and h["ram_free_gb"] > 0:
++            cache_mb = int(max(256, min(cache_mb, (h["ram_free_gb"] - cpu_w - 2.0) * 1024 * 0.5)))
++        if prof.tier == "large":
++            notes.append(f"大模型档位（≈{prof.params_b:.0f}B，激活≈{prof.active_b:.0f}B）：上下文不足时先压缩再考虑扩容，避免反复重载。")
+         summary = (f"{info['name']} · {info['quant']} · {S:.1f} GB" + (" · MoE %s专家/激活%s" % (info["experts"], info["experts_used"]) if info["moe"] else "")
++                   + f" · 档位:{prof.label}"
+                    + f" → ctx {ctx_eff}" + (f"(可增至 {cap})" if cap > ctx_eff else "") + f" · KV≈{kv_need:.1f} GB({kvt_eff})"
+                    + (f" · GPU≈{gpu_w + fixed:.1f}/{budget:.1f} GB" if has_gpu else " · 纯 CPU") + f" · CPU 权重≈{cpu_w:.1f} GB")
+         return {"summary": summary, "model": info["file"], "mmproj": mm_path.relative_to(self.models_dir).as_posix() if mm_path and self.models_dir in mm_path.parents else (mm_path.name if mm_path else None),
+                 "mmproj_path": str(mm_path) if mm_path else None, "ctx": ctx_eff, "ctx_cap": cap, "ctx_train": train,
+                 "ngl": ngl, "n_cpu_moe": n_cpu_moe, "moe": info["moe"], "kv_type": kvt_eff, "flash_attn": fa_eff, "threads": threads,
+                 "kv_mb": int(kv_need * 1024), "gpu_gb": round(gpu_w + fixed, 2), "cpu_gb": round(cpu_w, 2), "budget_gb": round(budget, 2),
+-                "mmproj_offload": bool(mm_gpu) if mm_path else False, "notes": notes, "model_path": info["path"], "n_exp_layers": len(exp_layers)}
++                "mmproj_offload": bool(mm_gpu) if mm_path else False, "notes": notes, "model_path": info["path"], "n_exp_layers": len(exp_layers),
++                "batch": prof.batch, "ubatch": prof.ubatch, "cache_ram_mb": cache_mb, "profile": prof.brief()}
+ 
+     # ------------------------------------------------------------ 参数构建
+     def build_args(self, plan: dict) -> list[str]:
+@@ -380,9 +396,10 @@ class Engine:
+             a += (["-fa", fa] if self._flash_takes_value() else (["-fa"] if fa == "on" else []))
+         if plan["kv_type"] != "f16":
+             a += ["-ctk", plan["kv_type"], "-ctv", plan["kv_type"]]
+-        a += ["-t", str(plan["threads"]), "-b", str(e["batch"]), "-ub", str(e["ubatch"])]
+-        if e["cache_ram_mb"] != 0 and self.has("--cache-ram"):
+-            a += ["--cache-ram", str(e["cache_ram_mb"])]
++        a += ["-t", str(plan["threads"]), "-b", str(plan.get("batch", e["batch"])), "-ub", str(plan.get("ubatch", e["ubatch"]))]
++        cache_mb = plan.get("cache_ram_mb", e["cache_ram_mb"])
++        if cache_mb != 0 and self.has("--cache-ram"):
++            a += ["--cache-ram", str(cache_mb)]
+         a += self._safe_extra(e["extra_args"])
+         return a
+ 
+@@ -429,7 +446,8 @@ class Engine:
+         return {"status": self.status, "model": self.model["file"] if self.model else None, "mmproj": self.mmproj_file,
+                 "ctx": self.ctx, "ctx_max": self.ctx_cap, "vision": self.vision, "error": self.error,
+                 "binary": str(self.binary) if self.binary else None, "binary_version": self.binary_version,
+-                "load_log_tail": ls, "plan": self.plan_info, "tps": round(self.tps, 1)}
++                "load_log_tail": ls, "plan": self.plan_info, "tps": round(self.tps, 1),
++                "profile": self.tuned().brief()}
+ 
+     def _set(self, status: str, error: str | None = None) -> None:
+         self.status, self.error = status, error
+@@ -456,6 +474,7 @@ class Engine:
+             self._last = {"model": plan["model"], "mmproj": mmproj, "ctx": ctx}   # 记录“请求值”，None 表示按配置自动
+             self.port, self.api_key = _free_port(), secrets.token_urlsafe(24)
+             self.model = next(m for m in self.scan()[0] if m["file"] == plan["model"])
++            self.profile = prof_mod.for_model(self.cfg, self.model)
+             self.mmproj_file, self.ctx, self.ctx_cap, self.plan_info = plan["mmproj"], plan["ctx"], plan["ctx_cap"], plan
+             self.vision = False
+             self.log.clear()
+diff --git a/localagent/lagent/launcher.py b/localagent/lagent/launcher.py
+new file mode 100644
+index 0000000..bf8e325
+--- /dev/null
++++ b/localagent/lagent/launcher.py
+@@ -0,0 +1,174 @@
++"""应用启动器：run.py 与打包后的 LocalAgent.exe 共用的唯一入口。
++
++做的事：创建目录 → 单实例锁 → 起本机服务 → 打开应用窗口（Edge/Chrome 应用模式，缺失则系统默认浏览器）→
++关闭窗口即退出（并停止模型进程）。无控制台的打包版把日志写进 data/logs/app.log。
++"""
++from __future__ import annotations
++
++import argparse
++import os
++import socket
++import sys
++import threading
++import time
++import webbrowser
++from pathlib import Path
++
++from . import __version__
++from .paths import FROZEN, ROOT, ensure_dirs
++
++
++# ------------------------------------------------------------------ 小工具
++def _free(port: int) -> int:
++    for p in ([port] if port else []) + [0]:
++        with socket.socket() as s:
++            try:
++                s.bind(("127.0.0.1", p))
++                return s.getsockname()[1]
++            except OSError:
++                continue
++    raise SystemExit("找不到可用端口")
++
++
++def notify(title: str, msg: str) -> None:
++    """终端里打印；无控制台的 Windows 打包版另弹一个消息框（否则用户什么也看不到）。"""
++    try:
++        print(msg, file=sys.stderr, flush=True)
++    except (OSError, ValueError, AttributeError):
++        pass
++    if os.name == "nt" and (FROZEN or sys.stderr is None):
++        try:
++            import ctypes
++            ctypes.windll.user32.MessageBoxW(0, msg, title, 0x40)  # type: ignore[attr-defined]
++        except Exception:  # noqa: BLE001
++            pass
++
++
++def _setup_stdio(root: Path) -> None:
++    """windowed 打包版 sys.stdout/stderr 为 None：uvicorn/print 会崩。统一改写到日志文件。"""
++    if sys.stdout is not None and sys.stderr is not None:
++        return
++    try:
++        d = root / "data" / "logs"
++        d.mkdir(parents=True, exist_ok=True)
++        f = open(d / "app.log", "a", encoding="utf-8", buffering=1)
++    except OSError:
++        f = open(os.devnull, "w", encoding="utf-8")
++    sys.stdout = sys.stdout or f
++    sys.stderr = sys.stderr or f
++
++
++class SingleInstance:
++    """同一数据目录只允许一个实例（两个实例会抢 models/ 与会话文件）。锁随进程退出自动释放。"""
++
++    def __init__(self, path: Path):
++        self.path, self.fh = path, None
++
++    def acquire(self) -> bool:
++        self.path.parent.mkdir(parents=True, exist_ok=True)
++        fh = open(self.path, "a+")
++        try:
++            if os.name == "nt":
++                import msvcrt
++                fh.seek(0)
++                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
++            else:
++                import fcntl
++                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except OSError:
++            fh.close()
++            return False
++        self.fh = fh
++        return True
++
++
++def _setup_hint(root: Path) -> list[str]:
++    """首次运行缺什么，写进日志/终端；界面里也会在加载模型时给出同样的提示。"""
++    from . import gguf
++    hints = []
++    exe = "llama-server.exe" if os.name == "nt" else "llama-server"
++    bin_dir = root / "bin"
++    has_bin = (bin_dir / exe).is_file() or any(bin_dir.glob(f"*/{exe}")) or any(bin_dir.glob(f"*/*/{exe}"))
++    if not has_bin:
++        hints.append(f"未找到 llama.cpp：请把发行包（含 {exe}）解压到 {bin_dir}，或确保它在 PATH 中。")
++    try:
++        if not gguf.scan(root / "models")[0]:
++            hints.append(f"未找到模型：请把 .gguf 文件放进 {root / 'models'}。")
++    except OSError:
++        pass
++    return hints
++
++
++# ------------------------------------------------------------------ 主流程
++def main(argv: list[str] | None = None) -> int:
++    _setup_stdio(ROOT)          # 必须在解析参数之前：窗口版 exe 的 stdout/stderr 为 None，--help/--version 也会写它们
++    ap = argparse.ArgumentParser(description="LocalAgent — 本地 gguf + llama.cpp 的安全 Agent")
++    ap.add_argument("--port", type=int, default=8765, help="界面端口（默认 8765，被占用则自动换）")
++    ap.add_argument("--workspace", help="启动时设置工作区目录")
++    ap.add_argument("--no-browser", action="store_true", help="不自动打开窗口/浏览器（纯服务模式）")
++    ap.add_argument("--browser", action="store_true", help="用系统默认浏览器，而不是独立应用窗口")
++    ap.add_argument("--load", action="store_true", help="启动后立即加载 config 里上次的模型")
++    ap.add_argument("--version", action="version", version=f"LocalAgent {__version__}")
++    a = ap.parse_args(argv)
++
++    if sys.version_info < (3, 10):
++        notify("LocalAgent", "需要 Python 3.10 或更高版本")
++        return 1
++    failed = ensure_dirs(ROOT)
++    if failed:
++        notify("LocalAgent", f"无法在 {ROOT} 下创建目录：{', '.join(failed)}。请检查写入权限，或用环境变量 LAGENT_HOME 指定数据目录。")
++        return 1
++    lock = SingleInstance(ROOT / "data" / ".lock")
++    if not lock.acquire():
++        notify("LocalAgent", "LocalAgent 已经在运行（同一数据目录只允许一个实例）。请切换到已打开的窗口；若找不到，请先结束旧进程再启动。")
++        return 1
++    try:
++        import uvicorn
++        from . import security as sec
++        from .server import State, make_app
++    except ImportError as e:
++        notify("LocalAgent", f"缺少依赖: {e.name}\n请先运行: pip install -r requirements.txt")
++        return 1
++
++    port = _free(a.port)
++    st = State(sec.new_token(), port)
++    if a.workspace:
++        st.cfg.set_workspace(str(sec.validate_workspace(a.workspace)))
++    url = f"http://127.0.0.1:{port}/?t={st.token}"
++    print("=" * 62)
++    print(f" LocalAgent {__version__} 已启动（仅本机可访问）")
++    print(f" 数据目录: {ROOT}")
++    print(f" 打开: {url}")
++    print(" 提示: 链接里的令牌每次启动都会变化；请勿分享该链接。")
++    for h in _setup_hint(ROOT):
++        print(f" ! {h}")
++    print("=" * 62, flush=True)
++
++    st.autostart = a.load
++    server = uvicorn.Server(uvicorn.Config(make_app(st), host="127.0.0.1", port=port, log_level="warning", access_log=False,
++                                           timeout_graceful_shutdown=3))   # SSE 长连接不能拖住退出
++    st.exit_cb = lambda: setattr(server, "should_exit", True)
++
++    if not a.no_browser:
++        threading.Thread(target=_open_ui, args=(server, url, a.browser), daemon=True).start()
++    server.run()
++    return 0
++
++
++def _open_ui(server: object, url: str, use_browser: bool) -> None:
++    for _ in range(150):                       # 等服务就绪（最多 15 秒）
++        if getattr(server, "started", False):
++            break
++        time.sleep(0.1)
++    else:
++        return
++    if not use_browser:
++        from . import appwindow
++        proc = appwindow.open_window(url, ROOT / "data" / "browser")
++        if proc is not None:
++            t0 = time.time()
++            proc.wait()
++            if time.time() - t0 > 5:           # 窗口被用户关闭 → 退出应用；秒退多半是交给了已有实例，不能据此退出
++                setattr(server, "should_exit", True)
++            return
++    webbrowser.open(url)
+diff --git a/localagent/lagent/loop.py b/localagent/lagent/loop.py
+index 3c5e44f..d9a8360 100644
+--- a/localagent/lagent/loop.py
++++ b/localagent/lagent/loop.py
+@@ -270,6 +270,8 @@ class Agent:
+             if d:
+                 st.user_domains.add(d)
+         st.tool_groups = set(sess.tool_groups) | toolset.detect(text, files_, skills_)
++        if self.engine.tuned().preload_tools:          # 大模型：一次给全，省掉 load_tools 往返（MCP 组仍按需）
++            st.tool_groups |= toolset.static_groups()
+         st.seen = self.seen_files.setdefault(sess.id, {})
+         status, err = "done", None
+         run.emit("run_start", {"run_id": run.id, "session_id": sess.id})
+@@ -352,7 +354,7 @@ class Agent:
+             except (KeyError, AttributeError):
+                 parts += f"\n\n（技能 {name} 不可用）"
+         if self.memory and self.cfg.get("agent", "memory_auto_recall", default=True):
+-            k = int(self.cfg.get("agent", "memory_recall_k", default=6))
++            k = self.engine.tuned().recall_k
+             block, ids = self.memory.recall_block(text, sess.workspace or "", k)
+             if block:
+                 parts += f"\n\n<memory>\n{block}\n</memory>"
+@@ -394,7 +396,7 @@ class Agent:
+     async def _loop(self, run: Run, sess: Session, st: SessionState, ctx: ToolCtx, ui: dict) -> tuple[str, str | None]:
+         cfg = self.cfg
+         gen = cfg.get("generation")
+-        max_steps = int(cfg.get("agent", "max_steps", default=40))
++        max_steps = self.engine.tuned().max_steps
+         meter = C.Meter(sess.calib, int(cfg.get("engine", "image_max_tokens", default=1024)) or 700)
+         recent: list[str] = []
+         nothink_once = False
+@@ -774,7 +776,7 @@ class Agent:
+             run.emit("taint", {"tainted": True, "reason": res.taint})
+             self.audit.append(event="taint", session=sess.id, reason=res.taint)
+         text = res.content
+-        cap = 30000
++        cap = self.engine.tuned().tool_cap
+         if self.engine.ctx:
+             cap = max(4000, min(cap, int(self.engine.ctx * 1.2)))
+         text_for_model = clip(text, cap, "输出过长")
+@@ -819,6 +821,7 @@ class Agent:
+         eng = self.engine
+         cfg = self.cfg
+         gen_max = int(cfg.get("generation", "max_tokens", default=8192))
++        prof = eng.tuned()
+ 
+         def usable() -> int:
+             return max(1024, eng.ctx - min(gen_max, eng.ctx // 4) - 256)
+@@ -830,12 +833,16 @@ class Agent:
+         e = est()
+         sess.usage.update({"ctx": eng.ctx, "used": e, "pct": round(100 * e / max(1, eng.ctx), 1)})
+         if e > 0.70 * usable():
+-            saved = C.prune_old(sess.history)
++            saved = C.prune_old(sess.history, keep_recent_tools=prof.keep_recent_tools)
+             if saved:
+                 e = est()
+                 run.emit("context_event", {"kind": "pruned", "detail": f"已精简较早的工具输出（≈{saved // 1000}K 字符）"})
+         if e > 0.85 * usable():
+-            if cfg.get("engine", "ctx_auto_grow", default=True) and eng.ctx < eng.ctx_cap:
++            can_grow = bool(cfg.get("engine", "ctx_auto_grow", default=True)) and eng.ctx < eng.ctx_cap
++            if not prof.grow_first:          # 大模型重载要几分钟：先压缩，压不下来再扩容
++                await self._compact(run, sess)
++                e = est()
++            if e > 0.85 * usable() and can_grow:
+                 new = min(eng.ctx_cap, eng.ctx * 2)
+                 run.emit("context_event", {"kind": "grow_start", "detail": f"上下文 {eng.ctx} → {new}，正在重载模型（约需几十秒）…"})
+                 await eng.restart(ctx=new)
+@@ -843,7 +850,7 @@ class Agent:
+                     raise EngineError(eng.error or "扩容后引擎未能启动")
+                 run.emit("context_event", {"kind": "grow_done", "detail": f"上下文已扩展到 {eng.ctx}"})
+                 e = est()
+-            if e > 0.85 * usable():
++            if e > 0.85 * usable() and prof.grow_first:
+                 await self._compact(run, sess)
+                 e = est()
+         if e > 0.97 * usable():
+diff --git a/localagent/lagent/paths.py b/localagent/lagent/paths.py
+new file mode 100644
+index 0000000..8a09a36
+--- /dev/null
++++ b/localagent/lagent/paths.py
+@@ -0,0 +1,68 @@
++"""运行位置：源码运行与 PyInstaller 打包运行共用一套规则，其余模块只从这里取路径。
++
++- CODE_DIR：只读资源（web/、内置技能）所在目录。源码运行时是项目目录；打包后是 PyInstaller 的资源目录（_internal / _MEIPASS）。
++- ROOT：可写的数据根（models/ bin/ skills/ data/ config.json）。优先级：环境变量 LAGENT_HOME > 打包后 exe 所在目录（便携模式）
++  > exe 目录不可写时用户数据目录（%LOCALAPPDATA%\\LocalAgent 等）> 源码目录。
++"""
++from __future__ import annotations
++
++import os
++import sys
++from pathlib import Path
++
++FROZEN = bool(getattr(sys, "frozen", False))
++APP_NAME = "LocalAgent"
++
++
++def code_dir() -> Path:
++    if FROZEN:
++        return Path(getattr(sys, "_MEIPASS", None) or Path(sys.executable).parent).resolve()
++    return Path(__file__).resolve().parent.parent
++
++
++def _writable(p: Path) -> bool:
++    try:
++        p.mkdir(parents=True, exist_ok=True)
++        probe = p / ".write-test"
++        probe.write_text("x")
++        probe.unlink()
++        return True
++    except OSError:
++        return False
++
++
++def user_data_dir() -> Path:
++    if os.name == "nt":
++        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
++    elif sys.platform == "darwin":
++        base = str(Path.home() / "Library" / "Application Support")
++    else:
++        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
++    return Path(base) / APP_NAME
++
++
++def data_root() -> Path:
++    env = os.environ.get("LAGENT_HOME")
++    if env:
++        return Path(env).resolve()
++    if not FROZEN:
++        return code_dir()
++    exe_dir = Path(sys.executable).resolve().parent
++    if _writable(exe_dir):
++        return exe_dir
++    return user_data_dir()
++
++
++CODE_DIR = code_dir()
++ROOT = data_root()
++
++
++def ensure_dirs(root: Path = ROOT) -> list[str]:
++    """创建运行所需目录；返回无法创建的目录名（通常为空）。"""
++    failed = []
++    for name in ("models", "bin", "skills", "data"):
++        try:
++            (root / name).mkdir(parents=True, exist_ok=True)
++        except OSError:
++            failed.append(name)
++    return failed
+diff --git a/localagent/lagent/profile.py b/localagent/lagent/profile.py
+new file mode 100644
+index 0000000..4b2d48c
+--- /dev/null
++++ b/localagent/lagent/profile.py
+@@ -0,0 +1,137 @@
++"""模型档位：按模型规模与结构自动选择 Agent / 引擎参数，让同一套代码既照顾小模型，也吃满千亿级 MoE。
++
++为什么需要：
++- 小模型（≤十几 B）上下文紧、工具选择容易出错：工具要分级按需加载、少召回、早收敛、工具输出要短。
++- 千亿级 MoE 能力强、上下文大、**重载一次要几分钟**：工具一次给全（省掉 load_tools 往返）、多召回、
++  多步数、保留更多工具输出，上下文不够时先压缩再考虑扩容重启；批处理参数更大以加快专家层的提示处理。
++- 中间档（standard）等于旧版默认值，行为不变。
++
++分档只看 GGUF 元数据与文件大小，不加载模型：参数量 ≈ 文件字节 × 8 ÷ 量化位宽；MoE 的“能力规模”取 √(总参数 × 激活参数)。
++这是启发式估算，误差主要来自量化位宽与专家占比；不合适时可在 设置→生成→Agent 里把“模型档位”手动指定。
++
++用户自定义优先：配置里的数值与默认值相同时视为“没改过”，由档位接管；一旦改成别的数，永远按用户的来。
++"""
++from __future__ import annotations
++
++import math
++from dataclasses import dataclass, replace
++from typing import Any
++
++# ---- 量化位宽（含元数据与缩放的有效值，近似）
++_BPW = {
++    "F32": 32.0, "F16": 16.0, "BF16": 16.0, "Q8_0": 8.5, "Q6_K": 6.6, "Q5_K_M": 5.7, "Q5_K_S": 5.5, "Q5_0": 5.5, "Q5_1": 6.0,
++    "Q4_K_M": 4.85, "Q4_K_S": 4.6, "Q4_0": 4.5, "Q4_1": 5.0, "Q3_K_L": 4.3, "Q3_K_M": 3.9, "Q3_K_S": 3.5, "Q2_K": 2.9,
++    "IQ4_XS": 4.3, "IQ4_NL": 4.5, "IQ3_M": 3.7, "IQ3_S": 3.5, "IQ3_XS": 3.3, "IQ3_XXS": 3.1, "IQ2_M": 2.7, "IQ2_S": 2.5,
++    "IQ2_XS": 2.3, "IQ2_XXS": 2.1, "IQ1_M": 1.8, "IQ1_S": 1.6, "MXFP4": 4.25,
++}
++_FAMILY = (("IQ4", 4.4), ("IQ3", 3.3), ("IQ2", 2.4), ("IQ1", 1.7), ("Q8", 8.5), ("Q6", 6.6), ("Q5", 5.6), ("Q4", 4.8),
++           ("Q3", 3.9), ("Q2", 2.9), ("BF16", 16.0), ("F16", 16.0), ("F32", 32.0))
++_DEFAULT_BPW = 4.8          # 找不到量化信息时按最常见的 Q4_K_M 估算
++_DENSE_SHARE = 0.06         # MoE 里注意力/嵌入等非专家权重占总参数的比例（经验值）
++
++LABELS = {"compact": "紧凑", "standard": "标准", "large": "大型"}
++
++
++@dataclass(frozen=True)
++class Profile:
++    tier: str
++    params_b: float = 0.0          # 估算总参数量（十亿）
++    active_b: float = 0.0          # 估算每 token 激活参数量（密集模型等于总量）
++    preload_tools: bool = False    # 一次性加载全部静态工具组（大模型不怕工具多，省掉 load_tools 往返）
++    recall_k: int = 6              # 记忆召回条数
++    max_steps: int = 40            # 单次任务最大工具步数
++    keep_recent_tools: int = 4     # 上下文精简时保留最近多少条完整工具输出
++    tool_cap: int = 30000          # 单次工具结果交给模型的字符上限
++    grow_first: bool = True        # 上下文不够时先扩容（重载）还是先压缩；大模型重载太贵，先压缩
++    ctx_start: int = 32768         # 引擎起始上下文
++    batch: int = 2048
++    ubatch: int = 512
++    cache_ram_mb: int = 4096       # llama.cpp 提示缓存占用的内存上限
++
++    @property
++    def label(self) -> str:
++        return LABELS.get(self.tier, self.tier)
++
++    def brief(self) -> dict:
++        return {"tier": self.tier, "label": self.label, "params_b": round(self.params_b, 1), "active_b": round(self.active_b, 1)}
++
++    def tuned(self, cfg: Any) -> "Profile":
++        """叠加用户配置：数值与默认值相同 → 用档位的；用户改过 → 用用户的。"""
++        from .config import DEFAULTS  # 延迟导入，避免循环
++        g = cfg.get
++        pairs = (("recall_k", ("agent", "memory_recall_k"), DEFAULTS["agent"]["memory_recall_k"]),
++                 ("max_steps", ("agent", "max_steps"), DEFAULTS["agent"]["max_steps"]),
++                 ("ctx_start", ("engine", "ctx_start"), DEFAULTS["engine"]["ctx_start"]),
++                 ("batch", ("engine", "batch"), DEFAULTS["engine"]["batch"]),
++                 ("ubatch", ("engine", "ubatch"), DEFAULTS["engine"]["ubatch"]),
++                 ("cache_ram_mb", ("engine", "cache_ram_mb"), DEFAULTS["engine"]["cache_ram_mb"]))
++        over = {}
++        for attr, path, default in pairs:
++            v = g(*path, default=default)
++            if v != default:
++                over[attr] = int(v)
++        return replace(self, **over) if over else self
++
++
++# ---- 各档的取值（standard = 旧版默认值）
++_TIERS: dict[str, dict] = {
++    "compact": dict(preload_tools=False, recall_k=4, max_steps=30, keep_recent_tools=3, tool_cap=12000, grow_first=True,
++                    ctx_start=32768, batch=2048, ubatch=512, cache_ram_mb=4096),
++    "standard": dict(preload_tools=False, recall_k=6, max_steps=40, keep_recent_tools=4, tool_cap=30000, grow_first=True,
++                     ctx_start=32768, batch=2048, ubatch=512, cache_ram_mb=4096),
++    "large": dict(preload_tools=True, recall_k=10, max_steps=80, keep_recent_tools=8, tool_cap=60000, grow_first=False,
++                  ctx_start=65536, batch=2048, ubatch=1024, cache_ram_mb=2048),
++}
++
++
++def bits_per_weight(quant: str | None) -> float:
++    q = (quant or "").upper().replace("UD-", "")
++    if q in _BPW:
++        return _BPW[q]
++    for prefix, bpw in _FAMILY:
++        if q.startswith(prefix):
++            return bpw
++    return _DEFAULT_BPW
++
++
++def estimate(info: dict) -> tuple[float, float]:
++    """(总参数量 B, 激活参数量 B)。info 是 gguf.model_info 的结果。"""
++    size = float(info.get("size_bytes") or 0)
++    total = size * 8 / bits_per_weight(info.get("quant")) / 1e9
++    if not info.get("moe"):
++        return total, total
++    ne = int(info.get("experts") or 0)
++    nu = int(info.get("experts_used") or 0)
++    frac = (nu / ne) if ne and nu else 0.125
++    return total, total * (_DENSE_SHARE + (1 - _DENSE_SHARE) * min(1.0, frac))
++
++
++def classify(info: dict | None) -> tuple[str, float, float]:
++    if not info:
++        return "standard", 0.0, 0.0
++    total, active = estimate(info)
++    eff = math.sqrt(total * active) if info.get("moe") else total
++    if total >= 100 or eff >= 45:
++        tier = "large"
++    elif eff < 12:
++        tier = "compact"
++    else:
++        tier = "standard"
++    return tier, total, active
++
++
++def for_model(cfg: Any, info: dict | None) -> Profile:
++    """该模型在当前配置下的档位（尚未叠加用户数值覆盖，见 Profile.tuned）。"""
++    mode = cfg.get("agent", "profile", default="auto")
++    tier, total, active = classify(info)
++    if mode == "off":
++        tier = "standard"
++    elif mode in _TIERS:
++        tier = mode
++    return Profile(tier=tier, params_b=total, active_b=active, **_TIERS[tier])
++
++
++def default(cfg: Any) -> Profile:
++    """没有加载模型时的缺省档位（标准）。"""
++    mode = cfg.get("agent", "profile", default="auto")
++    return Profile(tier=mode if mode in _TIERS else "standard", **_TIERS[mode if mode in _TIERS else "standard"])
+diff --git a/localagent/lagent/server.py b/localagent/lagent/server.py
+index a3bf74b..a5a09c4 100644
+--- a/localagent/lagent/server.py
++++ b/localagent/lagent/server.py
+@@ -9,6 +9,7 @@ import json
+ import mimetypes
+ import os
+ import re
++import sys
+ import time
+ import uuid
+ from pathlib import Path
+@@ -21,6 +22,7 @@ from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, R
+ from starlette.routing import Route
+ 
+ from . import __version__, gguf, hw
++from .paths import FROZEN
+ from . import security as sec
+ from .config import BIN_DIR, CODE_DIR, DATA_DIR, MODELS_DIR, ROOT, SKILLS_DIR, WEB_DIR, Config
+ from .engine import Engine, EngineError
+@@ -62,12 +64,15 @@ class State:
+         self.memory = Memory(data / "memory.db")
+         self.skills = Skills(root / "skills", CODE_DIR / "lagent" / "builtin_skills", data / "skills_state.json")
+         protected = [root / "config.json", root / "skills", root / "models", root / "bin", CODE_DIR / "lagent", CODE_DIR / "web", root / "run.py"]
++        if FROZEN:      # 打包运行：程序本体（exe 与其资源目录）同样只读
++            protected += [Path(sys.executable), CODE_DIR]
+         hidden = [data]
+         self.mcp = McpManager(data, self.audit)
+         self.agent = Agent(cfg=self.cfg, engine=self.engine, store=self.store, journal=self.journal, audit=self.audit, memory=self.memory,
+                            skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp)
+         self.root = root
+         self.autostart = False
++        self.exit_cb: Any = None        # 由启动器设置：请求整个应用退出（测试/纯服务模式下为 None）
+ 
+     def broadcast(self, event: str, data: dict) -> None:
+         for q in list(self.subs):
+@@ -667,6 +672,13 @@ def make_app(st: State) -> Starlette:
+         res, errs = await search_mod.run_search(st.cfg, q, providers=prov)
+         return J({"results": res, "errors": errs})
+ 
++    @route("/api/app/quit", ["POST"])
++    async def app_quit(req: Request) -> Response:
++        if st.exit_cb is None:
++            return J({"ok": False, "detail": "当前不是由启动器运行，请在终端里按 Ctrl+C 退出。"}, 409)
++        asyncio.get_running_loop().call_later(0.3, st.exit_cb)       # 先把响应发出去
++        return J({"ok": True})
++
+     @route("/api/audit", ["GET"])
+     async def audit(req: Request) -> Response:
+         return J({"entries": st.audit.tail(min(int(req.query_params.get("n", 200)), 2000))})
+diff --git a/localagent/lagent/toolset.py b/localagent/lagent/toolset.py
+index 9fc6599..9e2abbd 100644
+--- a/localagent/lagent/toolset.py
++++ b/localagent/lagent/toolset.py
+@@ -46,6 +46,11 @@ def set_dynamic(groups: dict[str, tuple[tuple[str, ...], str]]) -> None:
+             _DYN_OF[t] = g
+ 
+ 
++def static_groups() -> set[str]:
++    """内置的全部扩展组（不含 MCP 动态组：外部工具数量不可控，仍按需加载）。"""
++    return set(EXT_GROUPS)
++
++
+ def all_groups() -> list[str]:
+     return [*EXT_GROUPS, *_DYN]
+ 
+diff --git a/localagent/packaging/build.py b/localagent/packaging/build.py
+new file mode 100644
+index 0000000..1b07d72
+--- /dev/null
++++ b/localagent/packaging/build.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python3
++"""一键构建 LocalAgent.exe（需在目标系统上运行：Windows 出 exe，Linux/macOS 出对应可执行文件）。
++
++用法：python packaging/build.py          → dist/LocalAgent/（含 LocalAgent.exe 与 models/ bin/ skills/ 空目录、使用说明）
++"""
++from __future__ import annotations
++
++import shutil
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++DIST = ROOT / "dist" / "LocalAgent"
++
++README = """LocalAgent 使用说明
++====================
++1. 把 llama.cpp 发行包（含 llama-server）解压到 bin\\ 目录；
++2. 把 .gguf 模型放进 models\\（多模态模型请把 mmproj-*.gguf 放在同一目录）；
++3. 双击 LocalAgent.exe。会打开独立应用窗口；关闭窗口即退出并停止模型。
++
++数据（会话、记忆、审计日志）都在本目录的 data\\ 下，整个文件夹可直接拷走（便携）。
++目录不可写时（如装在 Program Files）会改用 %LOCALAPPDATA%\\LocalAgent。
++日志：data\\logs\\app.log。已有实例在运行时再次双击会提示，不会重复启动。
++"""
++
++
++def main() -> int:
++    try:
++        import PyInstaller  # noqa: F401
++    except ImportError:
++        print("缺少 PyInstaller：pip install pyinstaller", file=sys.stderr)
++        return 1
++    shutil.rmtree(ROOT / "build", ignore_errors=True)
++    shutil.rmtree(ROOT / "dist", ignore_errors=True)
++    subprocess.check_call([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(ROOT / "packaging" / "localagent.spec")],
++                          cwd=ROOT)
++    for d in ("models", "bin", "skills"):
++        (DIST / d).mkdir(parents=True, exist_ok=True)
++        (DIST / d / ".gitkeep").write_text("")
++    (DIST / "使用说明.txt").write_text(README, encoding="utf-8")
++    print(f"\n构建完成：{DIST}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/localagent/packaging/localagent.spec b/localagent/packaging/localagent.spec
+new file mode 100644
+index 0000000..4e6d2b5
+--- /dev/null
++++ b/localagent/packaging/localagent.spec
+@@ -0,0 +1,22 @@
++# -*- mode: python ; coding: utf-8 -*-
++# PyInstaller 配置：onedir（启动快、杀软误报少），无控制台窗口。构建：python packaging/build.py
++from pathlib import Path
++
++ROOT = Path(SPECPATH).parent
++
++hidden = [
++    "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.loops.asyncio", "uvicorn.protocols.http.auto",
++    "uvicorn.protocols.http.h11_impl", "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on",
++    "multipart", "lxml.etree", "lxml._elementpath", "docx", "openpyxl", "pptx", "pypdf", "pdfplumber", "reportlab",
++]
++datas = [
++    (str(ROOT / "web"), "web"),
++    (str(ROOT / "lagent" / "builtin_skills"), "lagent/builtin_skills"),
++]
++a = Analysis(
++    [str(ROOT / "run.py")], pathex=[str(ROOT)], datas=datas, hiddenimports=hidden,
++    excludes=["tkinter", "pytest", "playwright", "IPython", "matplotlib", "numpy.tests"],
++)
++pyz = PYZ(a.pure)
++exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="LocalAgent", console=False, icon=None)
++coll = COLLECT(exe, a.binaries, a.datas, name="LocalAgent")
+diff --git a/localagent/requirements-build.txt b/localagent/requirements-build.txt
+new file mode 100644
+index 0000000..732f35b
+--- /dev/null
++++ b/localagent/requirements-build.txt
+@@ -0,0 +1,2 @@
++-r requirements.txt
++pyinstaller>=6.6,<7
+diff --git a/localagent/run.py b/localagent/run.py
+index fc7cd45..a617530 100644
+--- a/localagent/run.py
++++ b/localagent/run.py
+@@ -1,58 +1,14 @@
+ #!/usr/bin/env python3
+-"""LocalAgent 启动入口：python run.py [--port N] [--workspace DIR] [--no-browser] [--load]"""
+-from __future__ import annotations
++"""LocalAgent 启动入口：python run.py [--port N] [--workspace DIR] [--no-browser] [--browser] [--load]
+ 
+-import argparse
+-import socket
++真正的逻辑在 lagent/launcher.py（打包后的 LocalAgent.exe 走同一个入口）。
++"""
+ import sys
+-import threading
+-import time
+-import webbrowser
+ 
+ if sys.version_info < (3, 10):
+     sys.exit("需要 Python 3.10 或更高版本")
+ 
+-
+-def _free(port: int) -> int:
+-    for p in ([port] if port else []) + [0]:
+-        with socket.socket() as s:
+-            try:
+-                s.bind(("127.0.0.1", p))
+-                return s.getsockname()[1]
+-            except OSError:
+-                continue
+-    raise SystemExit("找不到可用端口")
+-
+-
+-def main() -> None:
+-    ap = argparse.ArgumentParser(description="LocalAgent — 本地 gguf + llama.cpp 的安全 Agent")
+-    ap.add_argument("--port", type=int, default=8765, help="界面端口（默认 8765，被占用则自动换）")
+-    ap.add_argument("--workspace", help="启动时设置工作区目录")
+-    ap.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+-    ap.add_argument("--load", action="store_true", help="启动后立即加载 config 里上次的模型")
+-    a = ap.parse_args()
+-    try:
+-        import uvicorn
+-        from lagent import security as sec
+-        from lagent.server import State, make_app
+-    except ImportError as e:
+-        sys.exit(f"缺少依赖: {e.name}\n请先运行: pip install -r requirements.txt")
+-    port = _free(a.port)
+-    st = State(sec.new_token(), port)
+-    if a.workspace:
+-        st.cfg.set_workspace(str(sec.validate_workspace(a.workspace)))
+-    url = f"http://127.0.0.1:{port}/?t={st.token}"
+-    print("=" * 62)
+-    print(" LocalAgent 已启动（仅本机可访问）")
+-    print(f" 打开: {url}")
+-    print(" 提示: 链接里的令牌每次启动都会变化；请勿分享该链接。")
+-    print("=" * 62, flush=True)
+-    if not a.no_browser:
+-        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+-    st.autostart = a.load
+-    app = make_app(st)
+-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", access_log=False)
+-
++from lagent.launcher import main  # noqa: E402
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
+diff --git a/localagent/tests/test_profile.py b/localagent/tests/test_profile.py
+new file mode 100644
+index 0000000..435ca3e
+--- /dev/null
++++ b/localagent/tests/test_profile.py
+@@ -0,0 +1,294 @@
++"""模型档位、引擎规划接入、上下文扩容顺序、运行位置与启动器的单元测试。"""
++from __future__ import annotations
++
++import asyncio
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++
++import make_gguf  # noqa: E402
++from lagent import appwindow, paths, toolset  # noqa: E402
++from lagent import context as C  # noqa: E402
++from lagent import profile as P  # noqa: E402
++from lagent.config import Config  # noqa: E402
++from lagent.engine import Engine  # noqa: E402
++from lagent.launcher import SingleInstance  # noqa: E402
++from lagent.loop import Agent  # noqa: E402
++
++GB = 1_000_000_000
++
++
++def info(size_gb, quant="Q4_K_M", moe=False, experts=None, used=None):
++    return {"size_bytes": int(size_gb * GB), "quant": quant, "moe": moe, "experts": experts, "experts_used": used}
++
++
++def cfg(tmp_path, **patch):
++    c = Config(tmp_path / "c.json", tmp_path / "s.json")
++    if patch:
++        c.patch(patch)
++    return c
++
++
++# ------------------------------------------------------------------ 分档
++@pytest.mark.parametrize("model,tier", [
++    (info(2.5), "compact"),                                   # 4B 稠密
++    (info(18.6, moe=True, experts=128, used=8), "compact"),   # 30B-A3B：激活很小，按“小模型”照顾
++    (info(8.5), "standard"),                                  # 14B 稠密
++    (info(19.8), "standard"),                                 # 32B 稠密
++    (info(42), "large"),                                      # 70B 稠密
++    (info(142, moe=True, experts=128, used=8), "large"),      # 235B-A22B
++    (info(63, quant="MXFP4", moe=True, experts=128, used=4), "large"),   # 百亿级 MoE（≈117B）
++])
++def test_classify(model, tier):
++    assert P.classify(model)[0] == tier
++
++
++def test_classify_without_info_is_standard():
++    assert P.classify(None)[0] == "standard"
++
++
++def test_bits_per_weight_families():
++    assert P.bits_per_weight("Q4_K_M") == 4.85
++    assert P.bits_per_weight("UD-Q2_K_XL") == 2.9      # 动态量化命名按家族估算
++    assert P.bits_per_weight("IQ3_XXS") == 3.1
++    assert P.bits_per_weight("") == P.bits_per_weight("???")   # 未知 → 默认值
++
++
++def test_moe_estimate_is_sane():
++    total, active = P.estimate(info(142, moe=True, experts=128, used=8))
++    assert 200 < total < 260 and 20 < active < 35
++
++
++def test_manual_and_off_profile(tmp_path):
++    big = info(142, moe=True, experts=128, used=8)
++    assert P.for_model(cfg(tmp_path, agent={"profile": "compact"}), big).tier == "compact"
++    off = P.for_model(cfg(tmp_path, agent={"profile": "off"}), big)
++    assert off.tier == "standard" and off.max_steps == 40         # off = 旧版行为
++
++
++def test_standard_equals_legacy_defaults(tmp_path):
++    p = P.for_model(cfg(tmp_path), info(19.8)).tuned(cfg(tmp_path))
++    assert (p.recall_k, p.max_steps, p.keep_recent_tools, p.tool_cap, p.ubatch, p.cache_ram_mb) == (6, 40, 4, 30000, 512, 4096)
++    assert p.grow_first and not p.preload_tools
++
++
++def test_user_values_beat_tier(tmp_path):
++    c = cfg(tmp_path, agent={"max_steps": 12}, engine={"ubatch": 256})
++    big = P.for_model(c, info(142, moe=True, experts=128, used=8)).tuned(c)
++    assert big.tier == "large" and big.max_steps == 12 and big.ubatch == 256   # 改过的永远按用户的
++    assert big.recall_k == 10 and big.preload_tools and not big.grow_first       # 没改的由档位接管
++    small = P.for_model(c, info(2.5)).tuned(c)
++    assert small.recall_k == 4 and small.tool_cap == 12000
++
++
++def test_static_groups_exclude_dynamic():
++    toolset.set_dynamic({"mcp:demo": (("mcp__demo__x",), "demo")})
++    try:
++        assert toolset.static_groups() == set(toolset.EXT_GROUPS)
++        assert "mcp:demo" not in toolset.static_groups()
++    finally:
++        toolset.set_dynamic({})
++
++
++# ------------------------------------------------------------------ 引擎规划
++def make_engine(tmp_path, **model_kw):
++    models = tmp_path / "models"
++    make_gguf.make(models / "m-Q4_K_M.gguf", **model_kw)
++    c = cfg(tmp_path)
++    eng = Engine(c, models, tmp_path / "bin")
++    return eng
++
++
++def test_plan_carries_profile_and_batch(tmp_path):
++    eng = make_engine(tmp_path)
++    plan = eng.plan()
++    assert plan["profile"]["tier"] == "compact" and "档位:紧凑" in plan["summary"]
++    assert plan["ubatch"] == 512 and plan["batch"] == 2048
++    assert plan["cache_ram_mb"] <= 4096
++
++
++def test_build_args_use_plan_values(tmp_path):
++    eng = make_engine(tmp_path)
++    eng.binary, eng.port, eng.api_key = Path("llama-server"), 1234, "k"
++    eng._help_text = "--cache-ram --fit --n-cpu-moe"
++    plan = eng.plan()
++    plan.update(ubatch=1024, batch=4096, cache_ram_mb=777)
++    a = eng.build_args(plan)
++    assert a[a.index("-ub") + 1] == "1024" and a[a.index("-b") + 1] == "4096" and a[a.index("--cache-ram") + 1] == "777"
++
++
++def test_large_tier_raises_start_ctx_and_ubatch(tmp_path):
++    eng = make_engine(tmp_path)
++    eng.cfg.patch({"agent": {"profile": "large"}})
++    plan = eng.plan()
++    assert plan["profile"]["tier"] == "large" and plan["ubatch"] == 1024
++    assert plan["ctx"] <= plan["ctx_cap"]
++
++
++def test_tuned_before_model_is_loaded(tmp_path):
++    eng = make_engine(tmp_path)
++    assert eng.tuned().tier == "standard"           # 没加载模型时用缺省档位
++    eng.profile = P.for_model(eng.cfg, info(142, moe=True, experts=128, used=8))
++    assert eng.tuned().tier == "large" and eng.state()["profile"]["label"] == "大型"
++
++
++# ------------------------------------------------------------------ 上下文：先压缩还是先扩容
++class _Eng:
++    def __init__(self, prof, order):
++        self.ctx, self.ctx_cap, self.order, self._prof, self.error = 1024, 4096, order, prof, None
++
++    def tuned(self):
++        return self._prof
++
++    async def restart(self, **kw):
++        self.order.append("grow")
++        self.ctx = kw["ctx"]
++
++    async def wait_ready(self):
++        return True
++
++
++def _fit_order(tmp_path, tier):
++    order: list[str] = []
++    prof = P.for_model(cfg(tmp_path, agent={"profile": tier}), None).tuned(cfg(tmp_path))
++    stub = SimpleNamespace(cfg=cfg(tmp_path), engine=_Eng(prof, order))
++    stub.system_prompt = lambda *a: "sys"
++
++    async def compact(run, sess):
++        order.append("compact")
++        sess.history = [{"role": "user", "content": "摘要"}]      # 真的压短，才能验证“压缩后放得下就不扩容”
++        return True
++    stub._compact = compact
++    sess = SimpleNamespace(history=[{"role": "user", "content": "字" * 1500}], usage={}, ui=[])
++    run = SimpleNamespace(emit=lambda *a, **k: None)
++    asyncio.run(Agent._fit_context(stub, run, sess, C.Meter(), [], "ask", ""))
++    return order
++
++
++def test_standard_grows_before_compacting(tmp_path):
++    assert _fit_order(tmp_path, "standard") == ["grow", "compact"]
++
++
++def test_large_compacts_before_growing(tmp_path):
++    order = _fit_order(tmp_path, "large")
++    assert order[0] == "compact"
++    assert "grow" not in order          # 压缩后已经放得下，就不必重载模型
++
++
++# ------------------------------------------------------------------ 运行位置（源码 / 打包）
++def test_source_layout():
++    assert (paths.CODE_DIR / "web" / "index.html").is_file()
++    assert (paths.CODE_DIR / "lagent" / "builtin_skills").is_dir()
++
++
++def _freeze(monkeypatch, tmp_path):
++    exe = tmp_path / "app" / "LocalAgent.exe"
++    exe.parent.mkdir(parents=True)
++    exe.write_bytes(b"")
++    monkeypatch.setattr(sys, "frozen", True, raising=False)
++    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "app" / "_internal"), raising=False)
++    monkeypatch.setattr(sys, "executable", str(exe))
++    monkeypatch.delenv("LAGENT_HOME", raising=False)
++    monkeypatch.setattr(paths, "FROZEN", True)
++    return exe
++
++
++def test_frozen_is_portable_next_to_exe(monkeypatch, tmp_path):
++    exe = _freeze(monkeypatch, tmp_path)
++    assert paths.code_dir() == (tmp_path / "app" / "_internal").resolve()
++    assert paths.data_root() == exe.parent.resolve()
++
++
++def test_frozen_falls_back_to_user_dir_when_readonly(monkeypatch, tmp_path):
++    _freeze(monkeypatch, tmp_path)
++    monkeypatch.setattr(paths, "_writable", lambda p: False)
++    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
++    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
++    monkeypatch.setattr(sys, "platform", "linux")
++    assert paths.data_root().name == "LocalAgent" and str(tmp_path) in str(paths.data_root())
++
++
++def test_env_override_wins(monkeypatch, tmp_path):
++    _freeze(monkeypatch, tmp_path)
++    monkeypatch.setenv("LAGENT_HOME", str(tmp_path / "custom"))
++    assert paths.data_root() == (tmp_path / "custom").resolve()
++
++
++def test_ensure_dirs(tmp_path):
++    assert paths.ensure_dirs(tmp_path / "root") == []
++    assert all((tmp_path / "root" / d).is_dir() for d in ("models", "bin", "skills", "data"))
++
++
++# ------------------------------------------------------------------ 启动器
++@pytest.mark.skipif(sys.platform == "win32", reason="用 flock 语义验证；Windows 走 msvcrt")
++def test_single_instance_lock(tmp_path):
++    a, b = SingleInstance(tmp_path / "d" / ".lock"), SingleInstance(tmp_path / "d" / ".lock")
++    assert a.acquire() is True
++    assert b.acquire() is False
++    a.fh.close()
++    assert SingleInstance(tmp_path / "d" / ".lock").acquire() is True
++
++
++def test_app_window_args(monkeypatch, tmp_path):
++    a = appwindow.window_args("edge", "http://127.0.0.1:1/?t=x", tmp_path / "prof")
++    assert a[0] == "edge" and "--app=http://127.0.0.1:1/?t=x" in a and f"--user-data-dir={tmp_path / 'prof'}" in a
++    monkeypatch.setattr(appwindow, "_candidates", lambda: [str(tmp_path / "nope")])
++    assert appwindow.find_browser() is None
++    assert appwindow.open_window("http://x", tmp_path / "p") is None      # 没有可用浏览器 → 交给启动器退回默认浏览器
++    fake = tmp_path / "chrome"
++    fake.write_text("")
++    monkeypatch.setattr(appwindow, "_candidates", lambda: [str(tmp_path / "nope"), str(fake)])
++    assert appwindow.find_browser() == str(fake)
++
++
++# ------------------------------------------------------------------ 端到端（真实服务进程 + 假 llama-server）
++def test_e2e_state_exposes_profile_and_config_validates(ready):
++    s, st = ready.get("/api/state")
++    assert s == 200 and st["engine"]["profile"]["tier"] in ("compact", "standard", "large")
++    assert "档位:" in st["engine"]["plan"]["summary"]
++    assert ready.patch("/api/config", {"agent": {"profile": "large"}})[0] == 200
++    assert ready.patch("/api/config", {"agent": {"profile": "huge"}})[0] == 400      # 非法档位被拒
++    ready.patch("/api/config", {"agent": {"profile": "auto"}})
++
++
++def test_e2e_quit_endpoint_requires_auth(server):
++    assert server.post("/api/app/quit", cookie=False)[0] == 401
++
++
++def test_e2e_quit_stops_process_and_single_instance(tmp_path):
++    """独立进程：第二个实例被拒绝；调用退出接口后进程在数秒内干净退出（SSE 长连接不能拖住）。"""
++    import os, re, subprocess, time
++    from conftest import Api, free_port
++    env = {**os.environ, "LAGENT_HOME": str(tmp_path), "NO_PROXY": "127.0.0.1,localhost"}
++    run_py = str(Path(__file__).resolve().parent.parent / "run.py")
++    port = free_port()
++    p = subprocess.Popen([sys.executable, run_py, "--no-browser", "--port", str(port)], env=env,
++                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++    try:
++        token = None
++        t0 = time.time()
++        while time.time() - t0 < 30 and not token:
++            m = re.search(r"\?t=(\S+)", p.stdout.readline() or "")
++            token = m.group(1) if m else None
++        assert token
++        api = Api(port, token)
++        for _ in range(50):
++            try:
++                if api.get("/api/state")[0] == 200:
++                    break
++            except OSError:
++                time.sleep(0.2)
++        if sys.platform != "win32":
++            second = subprocess.run([sys.executable, run_py, "--no-browser", "--port", str(free_port())], env=env,
++                                    capture_output=True, text=True, timeout=30)
++            assert second.returncode == 1 and "已经在运行" in second.stderr
++        assert api.post("/api/app/quit")[0] == 200
++        assert p.wait(15) == 0
++    finally:
++        if p.poll() is None:
++            p.kill()
+diff --git a/localagent/web/js/settings.js b/localagent/web/js/settings.js
+index f46c590..5b213bf 100644
+--- a/localagent/web/js/settings.js
++++ b/localagent/web/js/settings.js
+@@ -262,6 +262,9 @@
+     pane.appendChild(F('presence_penalty', num('generation.presence_penalty', { float: true, step: 0.1, min: -2, max: 2 }), '部分量化模型出现重复循环时可设为 0.5~1.5。'));
+     pane.appendChild(F('单次最大输出 token', num('generation.max_tokens', { min: 256, step: 256 })));
+     pane.appendChild(sec('Agent'));
++    var pf = (LA.S.state && LA.S.state.engine && LA.S.state.engine.profile) || null;
++    pane.appendChild(F('模型档位', sel('agent.profile', [['auto', '自动（按模型规模）'], ['compact', '紧凑（小模型）'], ['standard', '标准'], ['large', '大型（百亿以上 / 大 MoE）'], ['off', '关闭自适应']]),
++      '决定工具是否一次给全、记忆召回条数、步数上限、批处理大小，以及上下文不足时先压缩还是先扩容。' + (pf ? '当前模型判定：' + pf.label + '（约 ' + pf.params_b + 'B，激活约 ' + pf.active_b + 'B）。' : '加载模型后显示判定结果。') + '你在下面手动改过的数值始终优先。'));
+     pane.appendChild(F('每轮最多工具步数', num('agent.max_steps', { min: 1, max: 200 }), '防止模型陷入无限循环。'));
+     pane.appendChild(F('自动生成标题', sw('agent.auto_title', '用首条消息生成'), '使用规则截取，不额外调用模型，避免挤掉前缀缓存。'));
+     pane.appendChild(F('自动召回记忆', sw('agent.memory_auto_recall', '每次提问前检索相关记忆')));
+@@ -381,6 +384,10 @@
+     var keys = [['Enter', '发送'], ['Shift + Enter', '换行'], ['/', '选择技能'], ['Ctrl/⌘ + Shift + O', '新对话'], ['Ctrl/⌘ + B', '收起/展开侧栏'], ['Esc', '关闭弹窗 / 拒绝当前审批']];
+     keys.forEach(function (k) { pane.appendChild(F(k[0], el('span', { text: k[1], style: { color: 'var(--muted)' } }))); });
+     pane.appendChild(sec('关于'));
++    pane.appendChild(el('div', { class: 'toolbar' }, btn('退出应用', function () {
++      if (!confirm('退出 LocalAgent？正在运行的任务会被中止，模型进程会停止。')) return;
++      LA.post('/api/app/quit').then(function () { document.body.textContent = '已退出，可以关闭此窗口。'; }).catch(LA.fail);
++    })));
+     pane.appendChild(el('div', { class: 'hint2', text: 'LocalAgent ' + ((LA.S.state && LA.S.state.version) || '') + ' · 所有数据保存在本机 data/ 目录；界面不加载任何外部资源。' }));
+   }
+ })();
+-- 
+2.43.0
+
