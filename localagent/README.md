@@ -56,6 +56,8 @@ lagent/          后端代码      web/  前端静态文件      docs/API.md  �
 | **多模态** | 图片粘贴/拖入，自动缩放；mmproj 自动配对，并按显存决定是否放 GPU |
 | **项目指令** | 自动读取工作区根目录的 `AGENTS.md`（没有则 `CLAUDE.md`）写进系统提示：构建/测试命令、代码风格写一次，每个会话都生效。只读普通文件、最多 12000 字符；含“忽略先前指令”“下载即执行”“隐藏字符”等可疑内容时不加载并提示；加载时有提示并记入审计日志；`agent.project_instructions=false` 可关闭 |
 | **先读再改** | 改/覆盖已有文本文件前，本会话必须读过它，且读过之后没被别人改动（否则不弹审批，直接让模型重读）。`edit_file` 还能容忍缩进抄错（唯一匹配时按文件原缩进对齐）。`agent.require_read_before_edit=false` 可关闭 |
+| **大输出落盘** | 超长工具输出（命令、网页、搜索）完整保存在 `data/outputs/<会话>/`，上下文里只留头尾和句柄；被截断或为省上下文而精简的内容，模型用 `read_tool_output` 按句柄分段读取或按关键词查找，不必重跑原工具（重跑对网页/命令既慢又可能结果不同）。取回的内容仍带“不可信”标记，不会因落盘而洗白；单条 8M 字符、单会话 64MB 上限，删会话时一并清理。`agent.offload_outputs=false` 可关闭 |
+| **编辑后验证** | 本次任务改过文件、模型准备收尾却没跑验证命令时，框架提醒它先验证（最多 2 次；失败后同样提醒修复或如实告知）。验证命令取自设置 `agent.verify_command`，或 `AGENTS.md` 里一行 `验证命令: make check`（也认 `Verify:`）。**框架从不自己执行它**：命令来自仓库，只用来提醒，真正执行仍是模型的一次 `run_command`，走黑名单、沙箱与审批。`agent.verify_after_edit=false` 可关闭 |
 | **任务清单 / 提问** | 多步任务用 `todo_write` 展示进度；信息不足时 `ask_user` 弹出选项卡 |
 
 ### 模型档位：小模型与千亿级 MoE 同一套代码
@@ -145,6 +147,8 @@ skills/my-skill/
 可在界面“技能”里安装 zip / 文件夹，或新建；也可直接让 Agent 用 `create_skill` 帮你起草（需审批）。
 
 ## 测试
+
+> 有真实 llama.cpp 与模型的机器上，请按 [docs/REAL_ENV_TEST.md](docs/REAL_ENV_TEST.md) 做真机验证。
 
 ```
 pip install -r requirements-dev.txt

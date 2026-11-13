@@ -34,6 +34,7 @@ class ToolCtx:
     vision: bool = False
     memory: Any = None
     skills: Any = None
+    outputs: Any = None      # OutputStore：大输出落盘（见 outputs.py）
     emit: Callable[[str, dict], None] | None = None
     ask: Callable[[str, list[str]], Awaitable[str]] | None = None
     cancel: asyncio.Event | None = None

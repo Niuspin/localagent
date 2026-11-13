@@ -94,6 +94,21 @@ def script(messages, body=None):
         if "multi" in u and ntool == 1:
             return ("tool", "read_file", {"path": "notes/hello.txt"})
         return ("text", f"完成。工具返回: {tc[:80]}", None)
+    if "【验证提醒】" in u:    # 框架注入的内部提醒：照做，运行反引号里的验证命令
+        import re as _re
+        mm = _re.search(r"`([^`]+)`", u)
+        return ("tool", "run_command", {"command": mm.group(1) if mm else "echo verify-ok"})
+    if "大输出" in u:        # 一条命令产生远超单次上限的输出（约 100K 字符）
+        return ("tool", "run_command", {"command": "python3 -c \"for i in range(4000): print('row', i, 'payload-' + str(i * 7))\""})
+    if "取回" in u:          # 从历史里找出输出句柄，并用关键词取回其中的一行
+        import re as _re
+        found = None
+        for m in reversed(messages):
+            hit = _re.search(r"(?:已保存为|完整内容已保存为) (o[0-9a-f]{8})", text_of(m))
+            if hit:
+                found = hit.group(1)
+                break
+        return ("tool", "read_tool_output", {"id": found or "o00000000", "contains": "row 3999 "})
     if "创建文件" in u:
         return ("tool", "write_file", {"path": "notes/hello.txt", "content": "你好，世界\n第二行\n"})
     if "编辑文件" in u:

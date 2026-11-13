@@ -208,9 +208,30 @@ def hard_deny_reason(cmd: str) -> str | None:
     return None
 
 
-_RO_CMDS = {"ls", "dir", "cat", "type", "head", "tail", "wc", "pwd", "echo", "date", "whoami", "uname", "which", "where",
-            "tree", "stat", "file", "du", "df", "grep", "rg", "sort", "uniq", "cut", "basename", "dirname", "hostname", "cd"}
-_RO_GIT = {"status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "blame", "remote", "describe", "tag"}
+# “只读命令”白名单（免确认）。原则：宁可多问一次，也不能让带写/执行副作用的用法溜过去。
+#  - 纯读取、没有任何写/执行选项的命令：只要命令名在表里即可。
+#  - 带有写文件或执行外部程序选项的命令（sort -o、uniq 第二个位置参数、tree -o、rg --pre、git branch -D …）：
+#    改为“参数白名单”——只放行明确安全的选项，其余一律交给人工确认。GNU 工具的长选项可以缩写
+#    （如 sort --outp=x），所以这类命令不能用黑名单，必须白名单精确匹配。
+_RO_SIMPLE = {"ls", "dir", "cat", "type", "head", "tail", "wc", "pwd", "echo", "whoami", "uname", "which", "where",
+              "stat", "du", "df", "grep", "cut", "basename", "dirname", "cd"}
+# 命令 → (允许的短选项字符, 允许的长选项名, 位置参数个数上限, 位置参数必须以此开头)
+_RO_STRICT: dict[str, tuple[str, frozenset[str], int | None, str | None]] = {
+    "sort": ("nruktfbdghMVcCsz", frozenset({"numeric-sort", "reverse", "unique", "key", "field-separator", "ignore-case",
+                                            "ignore-leading-blanks", "dictionary-order", "general-numeric-sort",
+                                            "human-numeric-sort", "month-sort", "version-sort", "check", "stable",
+                                            "zero-terminated"}), None, None),
+    "uniq": ("cdiu", frozenset({"count", "repeated", "unique", "ignore-case"}), 1, None),   # 第 2 个位置参数是输出文件
+    "tree": ("adfFiLlpqsuDhnrtCNQ", frozenset({"all", "dirsfirst", "noreport", "du", "si", "gitignore", "prune"}), None, None),
+    "file": ("bihLkrsz", frozenset({"brief", "mime", "mime-type", "mime-encoding", "dereference", "no-dereference"}), None, None),
+    "date": ("uR", frozenset({"utc", "universal", "rfc-email"}), 1, "+"),                   # 裸数字参数会设置系统时间
+    "hostname": ("sfiIdA", frozenset({"short", "fqdn", "ip-address", "domain"}), 0, None),   # 带参数会改主机名
+}
+_RO_GIT_READ = {"status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "describe"}
+# git 读类子命令里，这些选项会写文件或调用外部程序；长选项允许缩写，所以按“前缀互含”判断
+_GIT_BAD_LONG = ("output", "ext-diff")
+# ripgrep 里会执行外部程序的选项：--pre（预处理命令）、--hostname-bin、--search-zip/-z（调用解压程序）
+_RG_BAD_LONG = ("pre", "hostname-bin", "search-zip")
 _META = re.compile(r"[;|&<>$`\n(){}*?!]")
 
 
@@ -218,8 +239,88 @@ def normalize_cmd(cmd: str) -> str:
     return re.sub(r"\s+", " ", cmd.strip())
 
 
+def _split_flags(args: list[str]) -> tuple[list[str], list[str]]:
+    """把参数拆成 (选项, 位置参数)。“--”之后全部算位置参数。"""
+    flags: list[str] = []
+    pos: list[str] = []
+    rest = False
+    for t in args:
+        if rest:
+            pos.append(t)
+        elif t == "--":
+            rest = True
+        elif t.startswith("-") and len(t) > 1:
+            flags.append(t)
+        else:
+            pos.append(t)
+    return flags, pos
+
+
+def _short_ok(flag: str, allowed: str) -> bool:
+    return all(c in allowed or c.isdigit() or c in ",.:" for c in flag[1:])
+
+
+def _long_name(flag: str) -> str:
+    return flag[2:].split("=", 1)[0]
+
+
+def _bad_long(name: str, bad: tuple[str, ...]) -> bool:
+    """名字与危险选项互为前缀（覆盖缩写，如 --outp、--pre-glob）。"""
+    return any(b.startswith(name) or name.startswith(b) for b in bad)
+
+
+def _strict_ok(exe: str, args: list[str]) -> bool:
+    shorts, longs, max_pos, pos_prefix = _RO_STRICT[exe]
+    flags, pos = _split_flags(args)
+    for f in flags:
+        if f.startswith("--"):
+            if _long_name(f) not in longs:
+                return False
+        elif not _short_ok(f, shorts):
+            return False
+    if max_pos is not None and len(pos) > max_pos:
+        return False
+    return not pos_prefix or all(p.startswith(pos_prefix) for p in pos)
+
+
+def _rg_ok(args: list[str]) -> bool:
+    flags, _ = _split_flags(args)
+    for f in flags:
+        if f.startswith("--"):
+            if _bad_long(_long_name(f), _RG_BAD_LONG):
+                return False
+        elif "z" in f[1:]:      # -z = --search-zip
+            return False
+    return True
+
+
+def _git_ok(args: list[str]) -> bool:
+    if not args:
+        return False
+    sub, rest = args[0], args[1:]
+    flags, pos = _split_flags(rest)
+    if sub in _RO_GIT_READ:
+        for f in flags:
+            if f.startswith("--"):
+                if _bad_long(_long_name(f), _GIT_BAD_LONG):
+                    return False
+            elif "o" in f[1:]:      # -o：diff/log 的输出文件，ls-files 的 --others（保守起见一并拒绝）
+                return False
+        return True
+    # 下面三个子命令既能读也能改：只放行“列出”的写法，其余（-D、-d、-m、add、set-url、创建分支/标签…）一律确认
+    if sub == "branch":
+        ok = {"-a", "-r", "-v", "-vv", "--all", "--remotes", "--verbose", "--show-current", "--list", "-l", "--no-color"}
+        return all(f in ok for f in flags) and (not pos or "--list" in flags or "-l" in flags)
+    if sub == "tag":
+        return all(f in {"-l", "--list"} or re.fullmatch(r"-n\d*", f) for f in flags) and (not pos or "--list" in flags or "-l" in flags)
+    if sub == "remote":
+        return not pos and all(f in ("-v", "--verbose") for f in flags)
+    return False
+
+
 def is_readonly_command(cmd: str) -> bool:
-    """极保守的“只读命令”白名单：无 shell 元字符、无绝对路径/上级路径/家目录引用。"""
+    """极保守的“只读命令”白名单：无 shell 元字符、无绝对路径/上级路径/家目录引用，命令名必须是不带路径的裸名
+    （否则 ./cat 会被当成 cat，而它可能是工作区里的脚本）。有写/执行副作用的选项见上面的表。"""
     if _META.search(cmd):
         return False
     try:
@@ -231,13 +332,20 @@ def is_readonly_command(cmd: str) -> bool:
     for t in toks[1:]:
         if t.startswith(("/", "~", "\\")) or ".." in t or re.match(r"^[A-Za-z]:", t) or sensitive_reason(t):
             return False
-    exe = Path(toks[0]).name.lower()
+    if "/" in toks[0] or "\\" in toks[0]:
+        return False
+    exe = toks[0].lower()
     exe = exe[:-4] if exe.endswith(".exe") else exe
+    args = toks[1:]
     if exe == "git":
-        return len(toks) > 1 and toks[1] in _RO_GIT and "--output" not in " ".join(toks) and "-o" not in toks
+        return _git_ok(args)
     if exe in ("python", "python3", "node", "pip", "pip3", "npm", "cargo", "go", "java"):
-        return len(toks) == 2 and toks[1] in ("--version", "-V", "-v", "version")
-    return exe in _RO_CMDS
+        return len(args) == 1 and args[0] in ("--version", "-V", "-v", "version")
+    if exe == "rg":
+        return _rg_ok(args)
+    if exe in _RO_STRICT:
+        return _strict_ok(exe, args)
+    return exe in _RO_SIMPLE
 
 
 # =============================================================== 沙箱

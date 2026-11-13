@@ -17,9 +17,11 @@ EXT_GROUPS: dict[str, tuple[str, ...]] = {
     "fileops": ("delete_path", "move_path", "copy_path", "make_dir"),
     "extras": ("read_skill_file", "create_skill", "memory_forget"),
     "jobs": ("job_output", "job_stop"),
+    "outputs": ("read_tool_output",),     # 无关键词触发：输出被截断/精简、出现句柄时由循环自动加载
 }
 
 GROUP_DESC: dict[str, str] = {
+    "outputs": "取回被截断/精简的工具输出（按句柄分段读取或按关键词查找）",
     "office": "创建/修改 Word、Excel、PowerPoint、PDF 文档",
     "fileops": "删除、移动、复制文件，新建目录",
     "extras": "读取技能附带文件、创建技能、删除记忆",

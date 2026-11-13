@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 from . import context as C
 from . import net
+from . import outputs as outputs_mod
 from . import projectdoc
 from . import security as sec
 from . import toolcall, toolset
@@ -53,6 +54,10 @@ class Run:
         self.questions: dict[str, asyncio.Future] = {}
         self.ended_at = 0.0
         self.stats = toolcall.RunStats()          # 本次运行的容错/摩擦计数，结束时写审计并随 run_end 下发
+        self.dirty = False                        # 本次运行里改过文件，且之后还没跑过验证命令
+        self.verify_failed = False                # 最近一次验证命令失败（且之后没再改动）
+        self.nudges = 0                           # 已发出的“请验证”提醒次数
+        self.handles: dict[str, str] = {}         # 工具调用 id → 输出句柄（_exec_tool 写入，_loop 在记录 tool 消息时取走）
         self._loop = asyncio.get_running_loop()
 
     def emit(self, event: str, data: dict) -> None:
@@ -144,9 +149,11 @@ def make_title(text: str, files_: list[str]) -> str:
 # ====================================================================== Agent
 class Agent:
     def __init__(self, *, cfg: Config, engine: Engine, store: SessionStore, journal: Journal, audit: sec.AuditLog,
-                 memory: Any, skills: Any, protected: list[Path], hidden: list[Path], notify: Any = None, mcp: Any = None):
+                 memory: Any, skills: Any, protected: list[Path], hidden: list[Path], notify: Any = None, mcp: Any = None,
+                 outputs: Any = None):
         self.cfg, self.engine, self.store, self.journal, self.audit = cfg, engine, store, journal, audit
         self.memory, self.skills, self.mcp = memory, skills, mcp
+        self.outputs = outputs                                # OutputStore | None：大输出落盘（见 outputs.py）
         self.protected, self.hidden = protected, hidden
         self.runs: dict[str, Run] = {}
         self.allow_keys: dict[str, set[str]] = {}
@@ -340,7 +347,7 @@ class Agent:
             except asyncio.TimeoutError:
                 return "（用户未回答）"
         return ToolCtx(cfg=self.cfg, guard=guard, journal=self.journal, session=st, audit=self.audit, vision=self.engine.vision,
-                       memory=self.memory, skills=self.skills, emit=run.emit, ask=ask, cancel=run.cancel_evt,
+                       memory=self.memory, skills=self.skills, outputs=self.outputs, emit=run.emit, ask=ask, cancel=run.cancel_evt,
                        sandbox_kind=sec.sandbox_info()["kind"])
 
     async def _append_user(self, run: Run, sess: Session, ctx: ToolCtx, text: str, images: list[str], files_: list[str], skills_: list[str]) -> None:
@@ -411,6 +418,8 @@ class Agent:
             run.stats.steps = step
             mode = cfg.get("agent", "permission_mode", default="ask")
             ws = sess.workspace or cfg.get("workspace", default="")
+            if self.outputs is not None and "outputs" not in st.tool_groups and any(m.get("_pruned") and m.get("_out") for m in sess.history):
+                self._ensure_outputs_group(sess, st)       # 历史里已有“可取回”的占位（上一轮或更早精简的）
             tools = self.tools_for(mode, bool(ws), st.tool_groups)
             schemas = [t.schema() for t in tools]
             await self.engine.ensure_ready()
@@ -478,6 +487,12 @@ class Agent:
                     run.emit("notice", {"level": "warn", "text": "回答因达到最大生成长度被截断（可在 设置→生成 调大）。"})
                 elif res["finish"] == "length":
                     run.emit("notice", {"level": "warn", "text": "回答因达到最大生成长度被截断。"})
+                if res["finish"] != "length":
+                    nudge = self._verify_nudge(run, sess, mode)
+                    if nudge:
+                        sess.history.append({"role": "user", "_internal": True, "content": nudge})
+                        run.emit("notice", {"level": "info", "text": "改动后还没跑验证命令，已提醒模型先验证再收尾。"})
+                        continue
                 self.store.save(sess)
                 return "done", None
             for batch in self._batches(tcs):
@@ -489,7 +504,10 @@ class Agent:
                     outs = [await self._exec_tool(run, sess, st, ctx, ui, batch[0], recent)]
                 pics: list[str] = []
                 for t, (result_text, imgs) in zip(batch, outs):
-                    sess.history.append({"role": "tool", "tool_call_id": t["id"], "content": result_text})
+                    tmsg: dict = {"role": "tool", "tool_call_id": t["id"], "content": result_text}
+                    if t["id"] in run.handles:
+                        tmsg["_out"] = run.handles.pop(t["id"])      # 内部字段，不发给模型；精简旧输出时据此写“可取回”的占位
+                    sess.history.append(tmsg)
                     if imgs and self.engine.vision:
                         pics += imgs
                     if len(recent) >= 5 and len(set(recent[-5:])) == 1:
@@ -779,7 +797,12 @@ class Agent:
         cap = self.engine.tuned().tool_cap
         if self.engine.ctx:
             cap = max(4000, min(cap, int(self.engine.ctx * 1.2)))
-        text_for_model = clip(text, cap, "输出过长")
+        hid = self._offload(run, sess, st, tool, tid, text, res)
+        if hid and len(text) > cap:     # 超长：上下文里留头尾，完整内容按句柄取回（而不是永久丢掉中间部分）
+            self._ensure_outputs_group(sess, st)
+            text_for_model = clip(text, cap, f"完整输出已保存为 {hid}，可用 read_tool_output 分段读取或按关键词查找")
+        else:
+            text_for_model = clip(text, cap, "输出过长")
         if res.untrusted_source:
             text_for_model = sec.wrap_untrusted(text_for_model, res.untrusted_source, st.nonce)
         else:
@@ -787,7 +810,77 @@ class Agent:
         if repeat:
             text_for_model += "\n\n（提示：你已连续 3 次发出完全相同的调用。请换个办法，或向用户说明卡在哪里。）"
         finish("error" if res.error else "ok", text, res.meta, dur)
+        if res.error:
+            self._track_verify_failure(run, sess, tool, args)
+        else:
+            self._track_verify(run, sess, tool, args, res)
         return text_for_model, res.images
+
+    # ------------------------------------------------------------ 编辑后验证
+    def _verify_command(self, sess: Session) -> str:
+        """当前生效的验证命令：设置里手填的优先，其次是工作区项目指令里声明的。被硬拒绝规则拦下的命令一律不用。"""
+        if not self.cfg.get("agent", "verify_after_edit", default=True):
+            return ""
+        cmd = (self.cfg.get("agent", "verify_command", default="") or "").strip()
+        if not cmd:
+            ws = sess.workspace or self.cfg.get("workspace", default="")
+            if not ws or not self.cfg.get("agent", "project_instructions", default=True):
+                return ""
+            cmd = projectdoc.verify_command(projectdoc.load(ws))
+        return "" if not cmd or sec.hard_deny_reason(cmd) else cmd
+
+    def _track_verify(self, run: Run, sess: Session, tool: Tool, args: dict, res: ToolResult) -> None:
+        if res.error:
+            return
+        if tool.kind in ("write", "delete"):
+            run.dirty, run.verify_failed = True, False
+        elif tool.name == "run_command" and not args.get("background"):
+            vc = self._verify_command(sess)
+            if vc and sec.normalize_cmd(str(args.get("command", ""))) == sec.normalize_cmd(vc):
+                run.dirty = False
+                run.verify_failed = False
+
+    def _track_verify_failure(self, run: Run, sess: Session, tool: Tool, args: dict) -> None:
+        """验证命令本身失败（退出码非 0）：记下来，收尾前提醒模型修复或如实告知用户。"""
+        if tool.name == "run_command" and not args.get("background"):
+            vc = self._verify_command(sess)
+            if vc and sec.normalize_cmd(str(args.get("command", ""))) == sec.normalize_cmd(vc):
+                run.dirty, run.verify_failed = False, True
+
+    def _verify_nudge(self, run: Run, sess: Session, mode: str) -> str | None:
+        """模型准备收尾时：若改过文件却没验证，或验证失败后没处理，返回一条要追加给模型的内部提醒；否则 None。最多提醒 2 次。"""
+        if mode == "plan" or run.nudges >= 2 or not (run.dirty or run.verify_failed):
+            return None
+        vc = self._verify_command(sess)
+        if not vc:
+            return None
+        run.nudges += 1
+        run.stats.bump("verify_nudges")
+        if run.verify_failed:
+            return (f"【验证提醒】上一次验证命令 `{vc}` 失败了，之后你没有再修改。请根据输出修复问题并重新运行它；"
+                    "如果确实无法修复，请在回答里如实告诉用户验证未通过及原因，不要说“已完成”。")
+        return (f"【验证提醒】你在这次任务里修改了文件，但还没运行项目的验证命令 `{vc}`。请用 run_command 运行它并根据结果收尾；"
+                "失败就修复后重跑，无法运行或无法通过时如实告诉用户。")
+
+    # 不落盘的工具：read_tool_output 自己（避免套娃）；按路径读取的只读工具（read_file/grep/glob/list_dir：随时能重读，且以磁盘现状为准）。
+    # 注意 run_command 虽有 cwd 路径参数，但输出不可重现，必须落盘。
+    def _offload(self, run: Run, sess: Session, st: SessionState, tool: Tool, tid: str, text: str, res: ToolResult) -> str | None:
+        if self.outputs is None or tool.name == "read_tool_output" or (tool.kind == "read" and tool.path_args) or res.images:
+            return None
+        if not self.cfg.get("agent", "offload_outputs", default=True) or len(text) < outputs_mod.MIN_CHARS:
+            return None
+        hid = self.outputs.save(sess.id, text, tool=tool.name, source=res.untrusted_source, taint=res.taint)
+        if hid:
+            run.handles[tid] = hid
+            run.stats.bump("offloaded")
+        return hid
+
+    @staticmethod
+    def _ensure_outputs_group(sess: Session, st: SessionState) -> None:
+        """出现句柄后，让模型看得到 read_tool_output（组在会话内只增不减，只会让前缀缓存失效一次）。"""
+        if "outputs" not in st.tool_groups:
+            st.tool_groups.add("outputs")
+            sess.tool_groups = sorted(st.tool_groups)
 
     async def _ask(self, run: Run, ctx: ToolCtx, blk: dict, tool: Tool, args: dict, dec: sec.Decision, tainted: bool) -> str:
         preview = None

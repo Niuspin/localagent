@@ -27,6 +27,43 @@ register(Tool("load_tools", "加载低频工具组。groups 可选: office（Wor
               load_tools, "meta", title=lambda a: "加载工具: " + ",".join(map(str, a.get("groups") or []))))
 
 
+# ------------------------------------------------------------------ 取回被截断/精简的工具输出
+async def read_tool_output(ctx: ToolCtx, a: dict) -> ToolResult:
+    if ctx.outputs is None:
+        return err("输出暂存未启用")
+    oid = str(a.get("id", "")).strip()
+    r = ctx.outputs.read(ctx.sid, oid, int(a.get("offset") or 0), int(a.get("limit") or 0), str(a.get("contains") or ""))
+    if r is None:
+        return err(f"没有找到输出 {oid or '（空）'}。句柄形如 o1a2b3c4d，只在当前会话内有效；找不到时请重新执行原工具。")
+    meta = r["meta"]
+    head = f"[输出 {oid} · {meta['tool'] or '工具'} · 共 {meta['chars']} 字符"
+    if meta["stored"] < meta["chars"]:
+        head += f"（仅保存了前 {meta['stored']} 字符）"
+    if "hits" in r:
+        body = r["text"] or "没有匹配的行。"
+        foot = f"\n[共 {r['hits']} 行匹配{'，已达上限，请换更具体的关键词' if r['capped'] else ''}；行号为输出内的行号。"\
+               f"要看上下文：read_tool_output(id=\"{oid}\", offset=…)]"
+        head += " · 关键词查找]\n"
+    else:
+        body = r["text"]
+        left = r["total"] - r["end"]
+        head += f" · 第 {r['start']}–{r['end']} 字符]\n"
+        foot = (f"\n[还有 {left} 字符。继续读取: read_tool_output(id=\"{oid}\", offset={r['end']})；"
+                f"或用 contains 关键词查找]") if left > 0 else "\n[已读到末尾]"
+    # 原输出的不可信标记原样带回，由循环重新包裹并（必要时）重新标记会话为不可信
+    return ToolResult(head + body + foot, taint=meta["taint"], untrusted_source=meta["source"])
+
+
+register(Tool("read_tool_output", "取回此前被截断或为节省上下文而省略的工具输出（句柄形如 o1a2b3c4d，出现在“已截断/已省略”的提示里）。"
+                                  "可用 offset/limit 分段读取，或用 contains 按关键词查找行。比重新执行原工具更快，结果也与当时一致。",
+              obj({"id": P("string", "输出句柄，如 o1a2b3c4d"),
+                   "offset": P("integer", "从第几个字符开始（默认 0）"),
+                   "limit": P("integer", "最多读取多少字符（默认 8000，上限 30000）"),
+                   "contains": P("string", "只返回包含该关键词的行（不区分大小写，最多 40 行）")}, ["id"]),
+              read_tool_output, "read", group="outputs", title=lambda a: f"取回输出 {a.get('id', '')}"
+              + (f"（查找 {a.get('contains')}）" if a.get("contains") else "")))
+
+
 # ------------------------------------------------------------------ 记忆
 async def memory_save(ctx: ToolCtx, a: dict) -> ToolResult:
     if ctx.memory is None:

@@ -30,6 +30,7 @@ from .journal import Journal, atomic_write
 from .loop import Agent
 from .mcp import McpManager
 from .memory import Memory
+from .outputs import OutputStore
 from .sessions import SessionStore
 from .skills import Skills
 from .tools import search as search_mod
@@ -60,6 +61,8 @@ class State:
         self.engine = Engine(self.cfg, root / "models", root / "bin", self.broadcast)
         self.store = SessionStore(data / "sessions")
         self.journal = Journal(data)
+        self.outputs = OutputStore(data / "outputs")
+        self.outputs.sweep({m["id"] for m in self.store.list()})      # 清掉已删除会话遗留的输出
         self.audit = sec.AuditLog(data / "audit.jsonl")
         self.memory = Memory(data / "memory.db")
         self.skills = Skills(root / "skills", CODE_DIR / "lagent" / "builtin_skills", data / "skills_state.json")
@@ -69,7 +72,8 @@ class State:
         hidden = [data]
         self.mcp = McpManager(data, self.audit)
         self.agent = Agent(cfg=self.cfg, engine=self.engine, store=self.store, journal=self.journal, audit=self.audit, memory=self.memory,
-                           skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp)
+                           skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp,
+                           outputs=self.outputs)
         self.root = root
         self.autostart = False
         self.exit_cb: Any = None        # 由启动器设置：请求整个应用退出（测试/纯服务模式下为 None）
@@ -293,6 +297,7 @@ def make_app(st: State) -> Starlette:
             from .tools import jobs as _jobs
             _jobs.stop_session(s.id)           # 会话没了，它启动的后台任务也一并终止
             st.agent.seen_files.pop(s.id, None)
+            st.outputs.drop(s.id)
             return J({"ok": True})
         if req.method == "PATCH":
             d = await jbody(req)

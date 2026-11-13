@@ -709,7 +709,11 @@ async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
     text = buf.decode("utf-8", "replace") if buf else ""
     if sec.IS_WIN and "�" in text:
         text = bytes(buf).decode("gb18030", "replace")
-    text = clip(text.strip(), 20000, "输出过长")
+    # 落盘开启时不在这里预截断：完整输出交给循环落盘（上限见 outputs.MAX_ITEM_CHARS），模型看到的头尾由循环统一裁剪；
+    # 关闭时保持旧行为。命令本身的输出缓冲另有上限，不会无限增长。
+    text = text.strip()
+    if ctx.outputs is None or not ctx.cfg.get("agent", "offload_outputs", default=True):
+        text = clip(text, 20000, "输出过长")
     dur = time.time() - t0
     tag = {"bwrap": "沙箱·bwrap", "sandbox-exec": "沙箱·seatbelt", "none": "无沙箱"}[kind if mode == "auto" else "none"]
     if timed_out:

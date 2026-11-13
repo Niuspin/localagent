@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,6 +67,26 @@ def load(ws: str | Path | None) -> ProjectDoc | None:
         _cache[str(p)] = (key, doc)
         return doc
     return None
+
+
+# 声明验证命令的写法（整行匹配，大小写不敏感）：`验证命令: make check`、`Verify: pytest -q`、`verify: `npm test``
+_VERIFY_RX = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?(?:验证命令|verify(?:\s+command)?)(?:\*\*)?\s*[:：]\s*(.+?)\s*$", re.I | re.M)
+VERIFY_MAX = 300
+
+
+def verify_command(doc: ProjectDoc | None) -> str:
+    """从项目指令里取“验证命令”（改完代码后用来自检的 lint/测试命令）。没有声明或被判可疑时返回空串。
+
+    只返回文本，**框架绝不自己执行它**：来自仓库的命令属于半可信输入，只用来提醒模型“该跑它了”，
+    真正执行仍由模型调用 run_command，照常走硬拒绝、沙箱与审批。含 shell 控制符以外的内容不做改写。
+    """
+    if doc is None or not doc.usable:
+        return ""
+    m = _VERIFY_RX.search(doc.text)
+    if not m:
+        return ""
+    cmd = m.group(1).strip().strip("`").strip()
+    return cmd if 0 < len(cmd) <= VERIFY_MAX else ""
 
 
 def prompt_block(doc: ProjectDoc) -> str:

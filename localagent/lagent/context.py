@@ -78,7 +78,12 @@ def prune_old(history: list[dict], keep_recent_tools: int = 4, min_len: int = 50
         c = m.get("content")
         if isinstance(c, str) and len(c) > min_len and not m.get("_pruned"):
             head = c[:260].replace("\n", " ")
-            m["content"] = f"[旧工具结果已省略以节省上下文（原 {len(c)} 字符）。开头: {head}…  需要时请重新调用工具获取]"
+            hid = m.get("_out")
+            if hid:     # 完整输出已落盘：给出取回办法，不必重跑（重跑对 web_fetch / 命令 / 搜索既慢又可能结果不同）
+                m["content"] = (f"[旧工具结果已省略以节省上下文（原 {len(c)} 字符，完整内容已保存为 {hid}）。开头: {head}…  "
+                                f"需要时调用 read_tool_output(id=\"{hid}\")，可加 contains 关键词查找；无需重新执行原工具]")
+            else:
+                m["content"] = f"[旧工具结果已省略以节省上下文（原 {len(c)} 字符）。开头: {head}…  需要时请重新调用工具获取]"
             m["_pruned"] = True
             saved += len(c)
     starts = turn_starts(history)
@@ -160,7 +165,8 @@ def hard_trim(history: list[dict], budget_tokens: int, meter: Meter) -> int:
         dropped += starts[1]
     for m in history:
         if m.get("role") == "tool" and isinstance(m.get("content"), str) and len(m["content"]) > 300:
-            m["content"] = m["content"][:240].replace("\n", " ") + f"…[已为腾出上下文而截断，原 {len(m['content'])} 字符]"
+            tail = f"；完整内容见 {m['_out']}，可用 read_tool_output 取回" if m.get("_out") else ""
+            m["content"] = m["content"][:240].replace("\n", " ") + f"…[已为腾出上下文而截断，原 {len(m['content'])} 字符{tail}]"
             m["_pruned"] = True
             dropped += 1
             if meter.raw(history) * meter.calib <= budget_tokens:

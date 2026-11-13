@@ -71,6 +71,38 @@ def test_not_hard_denied(cmd):
     assert sec.hard_deny_reason(cmd) is None
 
 
+# 这些写法看起来是“只读命令”，实际会写文件、改仓库或执行外部程序，必须走人工确认
+@pytest.mark.parametrize("cmd", [
+    "sort -o out.txt in.txt", "sort -oout.txt in.txt", "sort --output=out.txt in.txt", "sort --outp=out.txt in.txt",
+    "sort --compress-program=gzip a.txt", "sort -T tmpdir a.txt",
+    "uniq in.txt out.txt", "tree -o out.txt", "tree -R", "tree -H .", "file -C", "date -s 12:00", "date 111217002026", "hostname newname",
+    "git branch -D old", "git branch -d old", "git branch -m a b", "git branch newbranch", "git tag -d v1", "git tag v2",
+    "git remote add x http://h", "git remote set-url origin http://h", "git remote show origin", "git remote remove origin",
+    "git diff --output=x", "git diff --outp=x", "git log --ext-diff", "git log --ext", "git ls-files -o", "git log -p -o x",
+    "git -c core.pager=sh log", "git push", "git commit -am x", "git config user.name x", "git checkout main", "git stash",
+    "rg --pre ./evil.sh foo", "rg --pre=./evil.sh foo", "rg --pr ./evil.sh foo", "rg --pre-glob '*.x' foo", "rg --hostname-bin ./h foo",
+    "rg -z foo", "rg --search-zip foo",
+    "./cat x", "/bin/ls", "bin/ls", ".\\dir",
+])
+def test_readonly_bypass_rejected(cmd):
+    assert not sec.is_readonly_command(cmd), cmd
+
+
+# 常用的只读写法不能被收得太紧，否则会重新变成“每条命令都问”，反而削弱审批的意义
+@pytest.mark.parametrize("cmd", [
+    "sort a.txt", "sort -nr a.txt", "sort -u -k 2 a.txt", "sort --reverse --unique a.txt", "uniq a.txt", "uniq -c a.txt",
+    "tree", "tree -L 2", "tree -a -L2", "file a.bin", "file --mime-type a.bin", "date", "date -u", "date +%s", "hostname", "hostname -s",
+    "git status", "git status -s", "git diff", "git diff --stat", "git diff HEAD~1", "git log", "git log --oneline -n 5",
+    "git log -p -3", "git show HEAD", "git show HEAD:README.md", "git blame README.md", "git describe --tags", "git rev-parse HEAD",
+    "git ls-files", "git branch", "git branch -a", "git branch -vv", "git branch --show-current", "git branch --list",
+    "git tag", "git tag -l", "git tag --list", "git tag -n", "git remote", "git remote -v",
+    "rg foo", "rg -n -i foo src", "rg --files", "rg -t py foo", "ls", "cat a.txt", "head -n 5 a.txt", "tail -20 a.txt", "wc -l a.txt",
+    "grep -rn foo src", "echo hello", "node --version",
+])
+def test_readonly_common_allowed(cmd):
+    assert sec.is_readonly_command(cmd), cmd
+
+
 def test_readonly_commands():
     ok = ["ls", "ls -la src", "git status", "git log", "cat README.md", "pwd", "python --version", "grep foo a.txt"]
     no = ["ls; rm x", "cat /etc/passwd", "cat ../x", "ls | sh", "echo $(id)", "cat ~/x", "git push", "python x.py", "cat .env", "ls > out", "git diff --output=x"]

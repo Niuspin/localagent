@@ -46,6 +46,9 @@ DEFAULTS: dict[str, Any] = {
         "auto_title": True, "memory_auto_recall": True, "memory_recall_k": 6,
         "require_read_before_edit": True,     # 改/覆盖已有文本文件前，本会话必须读过它且之后没被别人改动
         "parallel_readonly": True,            # 同一步里连续的只读工具调用并发执行
+        "verify_after_edit": True,            # 改过文件后收尾前提醒模型跑验证命令（AGENTS.md 的“验证命令:”或下面的 verify_command）
+        "verify_command": "",                 # 手动指定验证命令（优先于 AGENTS.md；用户自己填的才算可信）
+        "offload_outputs": True,              # 大输出落盘并用句柄取回，而不是永久截断/让模型重跑工具（见 outputs.py）
         "project_instructions": True,         # 自动加载工作区里的 AGENTS.md / CLAUDE.md
     },
     "security": {
