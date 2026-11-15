@@ -33,6 +33,7 @@ from .engine import Engine, EngineError
 from .hooks import HookManager
 from .journal import Journal
 from .permissions import PermissionManager
+from .router import ModelRouter
 from .sessions import Session, SessionStore
 from .tools import agentic, files, jobs, office, search, web  # noqa: F401  (导入即注册)
 from .tools.base import TOOLS, Tool, ToolResult, clip, coerce_args, repair_json
@@ -166,17 +167,25 @@ class Agent:
         self._pi_seen: dict[str, str] = {}                    # sid → 已提示过的项目指令哈希（仅内存）
         self._perm_mgrs: dict[str, PermissionManager] = {}    # ws → 细粒度权限规则管理器
         self._hook_mgrs: dict[str, HookManager] = {}          # ws → 生命周期钩子管理器
+        self._sub_docs_seen: dict[str, set[str]] = {}         # sid → 已注入的子目录指令文件相对路径
+        self.router = ModelRouter(self.cfg, self.engine)
         self.notify = notify or (lambda e, d: None)
 
     def _get_perm_mgr(self, ws: str) -> PermissionManager:
-        if ws not in self._perm_mgrs:
-            self._perm_mgrs[ws] = PermissionManager(ws)
-        return self._perm_mgrs[ws]
+        mgr = self._perm_mgrs.get(ws)
+        if mgr is None:
+            mgr = self._perm_mgrs[ws] = PermissionManager(ws)
+        else:
+            mgr.reload_if_changed()
+        return mgr
 
     def _get_hook_mgr(self, ws: str) -> HookManager:
-        if ws not in self._hook_mgrs:
-            self._hook_mgrs[ws] = HookManager(ws)
-        return self._hook_mgrs[ws]
+        mgr = self._hook_mgrs.get(ws)
+        if mgr is None:
+            mgr = self._hook_mgrs[ws] = HookManager(ws)
+        else:
+            mgr.reload_if_changed()
+        return mgr
 
     # ------------------------------------------------------------ 公共接口
     def get_run(self, rid: str) -> Run | None:
@@ -924,6 +933,20 @@ class Agent:
             text_for_model = sec.wrap_untrusted(text_for_model, res.untrusted_source, st.nonce)
         else:
             text_for_model = sec.sanitize_untrusted(text_for_model) if res.taint else text_for_model
+        if not res.error and ws_curr and tool.path_args and tool.name in (
+            "read_file", "edit_file", "write_file", "list_dir", "grep", "repo_map"
+        ) and self.cfg.get("agent", "project_instructions", default=True):
+            seen_sub = self._sub_docs_seen.setdefault(sess.id, set())
+            for pa in tool.path_args:
+                if args.get(pa):
+                    try:
+                        rel_p = call_ctx.guard.rel(call_ctx.guard.resolve(args[pa], write=False))
+                        for sdoc in projectdoc.load_for_path(ws_curr, rel_p):
+                            if sdoc.usable and sdoc.name not in seen_sub:
+                                seen_sub.add(sdoc.name)
+                                text_for_model += f"\n\n{projectdoc.prompt_block(sdoc)}"
+                    except Exception:  # noqa: BLE001
+                        pass
         if repeat:
             text_for_model += "\n\n（提示：你已连续 3 次发出完全相同的调用。请换个办法，或向用户说明卡在哪里。）"
         finish("error" if res.error else "ok", text, res.meta, dur)
@@ -1042,6 +1065,19 @@ class Agent:
             return meter.estimate(sysmsg + C.api_messages(sess.history), schemas)
 
         e = est()
+        if e > 0.72 * usable() and getattr(eng, "status", "") == "ready" and callable(getattr(eng, "tokenize", None)):
+            try:
+                sysmsg = [{"role": "system", "content": self.system_prompt(sess, mode, ws)}]
+                blob = "\n".join(str(m.get("content") or "") for m in sysmsg + C.api_messages(sess.history))
+                if schemas:
+                    blob += "\n" + json.dumps(schemas, ensure_ascii=False)
+                real_n = await eng.tokenize(blob)
+                if isinstance(real_n, int) and real_n > 0 and meter.last_raw > 0 and real_n >= meter.last_raw * 0.2:
+                    meter.observe(meter.last_raw, real_n)
+                    sess.calib = meter.calib
+                    e = est()
+            except Exception:  # noqa: BLE001
+                pass
         sess.usage.update({"ctx": eng.ctx, "used": e, "pct": round(100 * e / max(1, eng.ctx), 1)})
         if e > 0.70 * usable():
             saved = C.prune_old(sess.history, keep_recent_tools=prof.keep_recent_tools)
@@ -1056,9 +1092,21 @@ class Agent:
             if e > 0.85 * usable() and can_grow:
                 new = min(eng.ctx_cap, eng.ctx * 2)
                 run.emit("context_event", {"kind": "grow_start", "detail": f"上下文 {eng.ctx} → {new}，正在重载模型（约需几十秒）…"})
+                slot_file = f"grow_{str(getattr(sess, 'id', 'sess'))[:12]}.bin"
+                saved_slot = False
+                if hasattr(eng, "save_slot") and getattr(eng, "status", "") == "ready":
+                    try:
+                        saved_slot = await eng.save_slot(0, slot_file)
+                    except Exception:  # noqa: BLE001
+                        saved_slot = False
                 await eng.restart(ctx=new)
                 if not await eng.wait_ready():
                     raise EngineError(eng.error or "扩容后引擎未能启动")
+                if saved_slot and hasattr(eng, "restore_slot"):
+                    try:
+                        await eng.restore_slot(0, slot_file)
+                    except Exception:  # noqa: BLE001
+                        pass
                 run.emit("context_event", {"kind": "grow_done", "detail": f"上下文已扩展到 {eng.ctx}"})
                 e = est()
             if e > 0.85 * usable() and prof.grow_first:
@@ -1074,9 +1122,14 @@ class Agent:
         sess.usage.update({"ctx": eng.ctx, "used": e, "pct": round(100 * e / max(1, eng.ctx), 1)})
 
     async def _summarize(self, text: str) -> str:
-        r = await self.engine.chat({"model": "local", "messages": [{"role": "system", "content": C.SUMMARY_PROMPT}, {"role": "user", "content": text}],
-                                    "temperature": 0.2, "max_tokens": 1200, "chat_template_kwargs": {"enable_thinking": False}}, timeout=900)
-        return (r.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+        return await self.router.complete(
+            role="compact",
+            messages=[{"role": "system", "content": C.SUMMARY_PROMPT}, {"role": "user", "content": text}],
+            temperature=0.2,
+            max_tokens=1200,
+            timeout=900,
+            disable_thinking=True,
+        )
 
     async def _compact(self, run: Run | None, sess: Session) -> bool:
         before = len(sess.history)
@@ -1137,12 +1190,30 @@ class Agent:
 
         if parent_ctx.emit:
             orig_emit = sub_run.emit
+            parent_tid = getattr(parent_ctx, "tool_call_id", "")
             def forwarded_emit(ev: str, data: dict) -> None:
                 orig_emit(ev, data)
                 if ev == "notice":
                     parent_ctx.emit("notice", data)
                 elif ev == "tool_start":
-                    parent_ctx.emit("notice", {"level": "info", "text": f"[子代理] 调用工具: {data.get('title') or data.get('name')}"})
+                    title = data.get("title") or data.get("name", "")
+                    parent_ctx.emit("subagent_step", {
+                        "tool_id": parent_tid,
+                        "phase": "start",
+                        "call_id": data.get("id", ""),
+                        "name": data.get("name", ""),
+                        "title": title,
+                    })
+                    parent_ctx.emit("notice", {"level": "info", "text": f"[子代理] 调用工具: {title}"})
+                elif ev == "tool_result":
+                    parent_ctx.emit("subagent_step", {
+                        "tool_id": parent_tid,
+                        "phase": "done",
+                        "call_id": data.get("id", ""),
+                        "name": data.get("name", ""),
+                        "status": data.get("status", "ok"),
+                        "duration_ms": data.get("duration_ms", 0),
+                    })
             sub_run.emit = forwarded_emit  # type: ignore
 
         role_desc = (

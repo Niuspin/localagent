@@ -98,7 +98,17 @@
   function codeBlock(lang, code) {
     var rawL = (lang || '').replace(/[^\w+#.-]/g, '').slice(0, 20);
     var l = esc(rawL);
+    var isMermaid = rawL.toLowerCase() === 'mermaid';
     var copySvg = '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 9h10v11H9zM5 15V4h10"/></svg>';
+    if (isMermaid) {
+      return '<div class="codeblock mermaid-box">' +
+        '<div class="cb-head">' +
+          '<span class="cb-lang">Mermaid 图表（离线源码）</span>' +
+          '<button type="button" class="cb-copy" data-copy="1" title="复制源码">' + copySvg + '<span class="cb-copy-lbl">复制</span></button>' +
+        '</div>' +
+        '<pre class="mermaid-src"><code>' + esc(code) + '</code></pre>' +
+      '</div>';
+    }
     return '<div class="codeblock">' +
       '<div class="cb-head">' +
         '<span class="cb-lang">' + (l || 'code') + '</span>' +
@@ -161,6 +171,18 @@
         while (i < lines.length && !(lines[i].trim().indexOf(fence) === 0 && /^[`~]+\s*$/.test(lines[i].trim()))) { body.push(lines[i]); i++; }
         i++; // 吃掉收尾围栏
         out.push(codeBlock(lang, body.join('\n')));
+        continue;
+      }
+      if (/^ {0,3}\$\$/.test(ln)) {
+        var singleM = /^ {0,3}\$\$(.+?)\$\$\s*$/.exec(ln);
+        if (singleM) {
+          out.push('<div class="math-block"><span class="math-tag">公式</span><code>' + esc(singleM[1].trim()) + '</code></div>');
+          i++; continue;
+        }
+        var mBody = []; i++;
+        while (i < lines.length && !/^ {0,3}\$\$\s*$/.test(lines[i])) { mBody.push(lines[i]); i++; }
+        i++;
+        out.push('<div class="math-block"><span class="math-tag">公式</span><code>' + esc(mBody.join('\n').trim()) + '</code></div>');
         continue;
       }
       if ((m = reH.exec(ln))) { var lv = Math.min(m[1].length, 4); out.push('<h' + lv + '>' + inline(m[2]) + '</h' + lv + '>'); i++; continue; }

@@ -99,9 +99,32 @@ def physical_cores() -> int:
         return 0
 
 
-def detect(force: bool = False) -> dict:
+def _llama_devices(binary: Any | None) -> list[dict]:
+    """回退探测：调用 llama-server --list-devices 识别 Vulkan / SYCL / ROCm / CUDA 设备。"""
+    if not binary:
+        return []
+    out = _run([str(binary), "--list-devices"], timeout=4.0)
+    if not out:
+        return []
+    import re
+    rx = re.compile(r"^\s*(CUDA\d+|Vulkan\d+|ROCm\d+|SYCL\d+|Metal[^:]*):\s*(.+?)\s*\((\d+)\s*MiB(?:,\s*(\d+)\s*MiB\s*free)?", re.I)
+    gpus: list[dict] = []
+    for ln in out.splitlines():
+        m = rx.match(ln)
+        if not m:
+            continue
+        dev_id, name, tot_s, free_s = m.group(1), m.group(2).strip(), m.group(3), m.group(4)
+        tot = float(tot_s) / 1024.0
+        free = float(free_s) / 1024.0 if free_s else tot * 0.85
+        low = dev_id.lower()
+        vendor = "nvidia" if low.startswith("cuda") else "amd" if low.startswith("rocm") else "apple" if low.startswith("metal") else "vulkan"
+        gpus.append({"name": name, "vram_gb": round(tot, 2), "free_gb": round(free, 2), "vendor": vendor, "device": dev_id})
+    return gpus
+
+
+def detect(force: bool = False, binary: Any | None = None) -> dict:
     global _cache
-    if _cache and not force and time.time() - _cache[0] < 5:
+    if _cache and not force and not binary and time.time() - _cache[0] < 5:
         return _cache[1]
     ram, free = _ram()
     gpus = _nvidia() or _amd()
@@ -110,6 +133,8 @@ def detect(force: bool = False) -> dict:
         unified = True
         gpus = [{"name": "Apple Silicon (统一内存)", "vram_gb": round(ram * 0.70, 2),
                  "free_gb": round(max(0.0, free - ram * 0.05), 2), "vendor": "apple"}]
+    if not gpus and binary:
+        gpus = _llama_devices(binary)
     threads = os.cpu_count() or 1
     cores = physical_cores() or threads
     info = {

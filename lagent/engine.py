@@ -223,7 +223,10 @@ class Engine:
             mm_path = Path(q["path"])
         if mm_path:
             mm_size = mm_path.stat().st_size / GiB
-        h = hw.detect()
+        try:
+            h = hw.detect(binary=self.binary)
+        except TypeError:
+            h = hw.detect()
         gpus = h["gpus"]
         has_gpu = bool(gpus)
         gpu_free = sum(g["free_gb"] for g in gpus) * (0.95 if len(gpus) > 1 else 1.0)
@@ -361,6 +364,9 @@ class Engine:
             notes.append(f"投机解码：已选用 Draft 模型 {adv['spec'].get('draft_model')}（--spec-draft-n-max {adv['spec'].get('draft_n_max')}）。")
         elif adv["spec"]["mode"] in ("ngram-mod", "ngram-simple"):
             notes.append(f"投机解码：已启用轻量无模型 {adv['spec']['mode']}（--spec-draft-n-max {adv['spec'].get('draft_n_max')}）。")
+        if adv["spec"]["mode"] != "off" and e.get("auto_disable_bad_spec", True) and self.telemetry.should_disable_speculation():
+            adv["spec"] = {"mode": "off", "flags": []}
+            notes.append("遥测检测到近期投机解码采纳率过低 (<25%)，本次已自动关闭投机解码以减少无效开销。")
         if adv["moe"]["moe_cache_mib"] > 0:
             notes.append(f"MoE 优化：已启用 GPU 专家缓存（--moe-cache-mib {adv['moe']['moe_cache_mib']}）。")
         if adv["threads"]["threads_batch"] > threads and (self.has("--threads-batch") or self.has("-tb")):
@@ -381,17 +387,26 @@ class Engine:
                 "mlock": adv["memory_lock"]["enabled"], "memory_lock_flags": adv["memory_lock"]["flags"]}
 
     # ------------------------------------------------------------ 参数构建
+    def slots_dir(self) -> Path:
+        return self.cfg.secrets_path.parent / "slots"
+
     def build_args(self, plan: dict) -> list[str]:
         assert self.binary
         e = self.cfg.get("engine")
+        slots = max(1, min(8, int(e.get("slots", 1) or 1)))
         a = [str(self.binary), "-m", plan["model_path"], "--host", "127.0.0.1", "--port", str(self.port), "--api-key", self.api_key,
-             "-c", str(plan["ctx"]), "-np", "1"]
+             "-c", str(plan["ctx"]), "-np", str(slots)]
         if self.has("--no-webui"):
             a.append("--no-webui")
         if self.has("--jinja"):
             a.append("--jinja")
-        if self.has("--reasoning-format"):
-            a += ["--reasoning-format", "deepseek"]
+        rf = str(e.get("reasoning_format", "auto") or "auto")
+        if self.has("--reasoning-format") and rf != "none":
+            a += ["--reasoning-format", "deepseek" if rf == "auto" else rf]
+        if self.has("--slot-save-path"):
+            sd = self.slots_dir()
+            sd.mkdir(parents=True, exist_ok=True)
+            a += ["--slot-save-path", str(sd)]
         if self.has("--no-context-shift"):
             a.append("--no-context-shift")
         if plan.get("mmproj_path"):
@@ -740,6 +755,30 @@ class Engine:
         except Exception:  # noqa: BLE001
             return None
         return None
+
+    async def save_slot(self, slot_id: int = 0, filename: str = "active.bin") -> bool:
+        """保存热点 KV 槽位到 data/slots，用于扩容/重启后的快速恢复。"""
+        if self.status != "ready" or not self.port or not self.has("--slot-save-path"):
+            return False
+        try:
+            st, _ = await net.local_json("127.0.0.1", self.port, "POST", f"/slots/{int(slot_id)}?action=save",
+                                         {"filename": filename}, headers=self._auth(), timeout=15)
+            return st == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def restore_slot(self, slot_id: int = 0, filename: str = "active.bin") -> bool:
+        """恢复已保存的 KV 槽位文件（不存在或引擎不支持时静默返回 False）。"""
+        if self.status != "ready" or not self.port or not self.has("--slot-save-path"):
+            return False
+        if not (self.slots_dir() / filename).is_file():
+            return False
+        try:
+            st, _ = await net.local_json("127.0.0.1", self.port, "POST", f"/slots/{int(slot_id)}?action=restore",
+                                         {"filename": filename}, headers=self._auth(), timeout=20)
+            return st == 200
+        except Exception:  # noqa: BLE001
+            return False
 
 
 def _physical_cores() -> int:

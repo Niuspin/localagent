@@ -61,6 +61,8 @@ class HookManager:
 
     def __init__(self, workspace: str | Path | None = None, hooks: dict[str, list[dict]] | None = None):
         self.workspace = Path(workspace) if workspace else None
+        self._explicit = hooks is not None
+        self._sig_val: tuple | None = None
         self.hooks: dict[str, list[HookDef]] = {
             "PreToolUse": [],
             "PostToolUse": [],
@@ -71,6 +73,25 @@ class HookManager:
             self._load_from_dict(hooks)
         elif self.workspace:
             self.reload()
+
+    def _cand_files(self) -> list[Path]:
+        if not self.workspace:
+            return []
+        return [
+            self.workspace / ".localagent" / "hooks.json",
+            self.workspace / ".claude" / "hooks.json",
+            self.workspace / ".claude" / "settings.json",
+        ]
+
+    def _sig(self) -> tuple:
+        out = []
+        for f in self._cand_files():
+            try:
+                st = f.stat()
+                out.append((str(f), st.st_mtime_ns, st.st_size))
+            except OSError:
+                out.append((str(f), None, None))
+        return tuple(out)
 
     def _load_from_dict(self, d: dict) -> None:
         raw_hooks = d.get("hooks") if isinstance(d.get("hooks"), dict) else d
@@ -86,14 +107,10 @@ class HookManager:
 
     def reload(self) -> None:
         self.hooks = {"PreToolUse": [], "PostToolUse": [], "Stop": [], "UserPromptSubmit": []}
+        self._sig_val = self._sig()
         if not self.workspace or not self.workspace.is_dir():
             return
-        cand_files = [
-            self.workspace / ".localagent" / "hooks.json",
-            self.workspace / ".claude" / "hooks.json",
-            self.workspace / ".claude" / "settings.json",
-        ]
-        for f in cand_files:
+        for f in self._cand_files():
             if f.is_file():
                 try:
                     data = json.loads(f.read_text("utf-8"))
@@ -101,6 +118,15 @@ class HookManager:
                         self._load_from_dict(data)
                 except (OSError, ValueError):
                     pass
+
+    def reload_if_changed(self) -> bool:
+        if self._explicit or not self.workspace:
+            return False
+        cur = self._sig()
+        if cur != self._sig_val:
+            self.reload()
+            return True
+        return False
 
     def list_hooks(self) -> dict[str, list[dict]]:
         return {

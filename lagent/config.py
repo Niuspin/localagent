@@ -35,6 +35,7 @@ DEFAULTS: dict[str, Any] = {
         "spec_mode": "auto", "spec_draft_max": 0, "spec_draft_min": 0,
         "threads": 0, "threads_batch": 0, "batch": 2048, "ubatch": 512,
         "cache_reuse": 256, "mlock": False,
+        "slots": 1, "reasoning_format": "auto", "auto_disable_bad_spec": True,
         "image_max_tokens": 1024, "cache_ram_mb": 4096, "vram_reserve_mb": 1024,
         "extra_args": [],
     },
@@ -55,6 +56,8 @@ DEFAULTS: dict[str, Any] = {
         "hooks_enabled": True,                # 项目生命周期钩子（.localagent/hooks.json）
         "granular_permissions": True,         # 细粒度权限规则（allow/ask/deny，不绕过硬安全防线）
         "subagent_max_steps": 8,              # delegate_task 子代理步数上限
+        "compact_endpoint": "",               # 可选：用于摘要压缩的外部 OpenAI 兼容端点（留空走本地引擎）
+        "compact_model": "",                  # 可选：摘要压缩专用轻量模型名
     },
     "security": {
         "allow_network_commands": False, "command_sandbox": "auto", "command_timeout_s": 120,
@@ -129,6 +132,7 @@ SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "engine.flash_attn": _enum("auto", "on", "off"),
     "engine.kv_cache_type": _enum("auto", "f16", "q8_0", "q4_0"),
     "engine.spec_mode": _enum("auto", "off", "draft", "ngram-mod", "ngram-simple"),
+    "engine.reasoning_format": _enum("auto", "deepseek", "none"),
     "engine.extra_args": _str_list,
     "generation.thinking": _enum("auto", "on", "off"),
     "agent.permission_mode": _enum("ask", "auto_edit", "plan", "auto"),
@@ -146,7 +150,7 @@ RANGES: dict[str, tuple[float, float]] = {
     "engine.spec_draft_max": (0, 256), "engine.spec_draft_min": (0, 256),
     "engine.moe_cache_cpu_share": (0.0, 1.0), "engine.cache_reuse": (0, 16384),
     "engine.image_max_tokens": (0, 16384), "engine.cache_ram_mb": (-1, 1_048_576),
-    "engine.vram_reserve_mb": (0, 65536),
+    "engine.vram_reserve_mb": (0, 65536), "engine.slots": (1, 8),
     "generation.temperature": (0, 2), "generation.top_p": (0, 1), "generation.top_k": (0, 500),
     "generation.min_p": (0, 1), "generation.max_tokens": (64, 262144), "generation.presence_penalty": (-2, 2),
     "agent.max_steps": (1, 200), "agent.memory_recall_k": (0, 30), "agent.subagent_max_steps": (1, 30),

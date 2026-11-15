@@ -448,7 +448,7 @@
     ['state', 'config', 'runstate', 'taint', 'sessionmeta', 'session'].forEach(function (n) { LA.bus.on(n, function () { updatePills(); updateSend(); }); });
     LA.bus.on('fschanged', function () { fileTreeCache.ts = 0; });
     LA.bus.on('workspace', function () { fileTreeCache = { ts: 0, ws: '', entries: [] }; slashCache = { ts: 0, ws: '', items: null }; });
-    LA.bus.on('session', function () { fileTreeCache.ts = 0; slashCache.ts = 0; queued = []; renderQueue(); });
+    LA.bus.on('session', function (v) { fileTreeCache.ts = 0; slashCache.ts = 0; queued = []; renderQueue(); if (v) fetchSlashCommands(); });
     updatePills(); updateSend(); autosize();
   };
 })();

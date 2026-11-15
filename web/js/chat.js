@@ -475,6 +475,20 @@
         body.append(liveHdr, livePre);
         livePre.scrollTop = livePre.scrollHeight;
       }
+      if (b.substeps && b.substeps.length) {
+        if (s === 'running' && !open) { open = true; root.classList.add('open'); head.setAttribute('aria-expanded', 'true'); }
+        var subHdr = el('div', { class: 't-sec-head' }, el('h6', { text: '子代理执行轨迹（' + b.substeps.length + '）' }));
+        var subList = el('div', { class: 't-substeps' });
+        b.substeps.forEach(function (st) {
+          var ic = st.status === 'running' ? '<span class="spin"></span>'
+            : st.status === 'ok' ? icon('check', 13) : icon('alert', 13);
+          subList.appendChild(el('div', { class: 't-substep ' + (st.status || 'ok') },
+            el('span', { class: 't-sub-ic', html: ic }),
+            el('span', { class: 't-sub-title', text: st.title || st.name || '' }),
+            st.duration_ms ? el('span', { class: 'dur-pill', text: fmtDur(st.duration_ms) }) : null));
+        });
+        body.append(subHdr, subList);
+      }
       var meta = b.meta || {};
       var chips = el('div', { class: 't-meta' });
       if (meta.path) chips.appendChild(el('span', { class: 'meta-chip', text: meta.path }));
@@ -644,6 +658,25 @@
       tool_output_delta: function (d) {
         var v = findTool(d.id); if (!v) return;
         v.b.live_output = ((v.b.live_output || '') + (d.chunk || '')).slice(-16000);
+        sched(v);
+      },
+      subagent_step: function (d) {
+        var v = findTool(d.tool_id); if (!v) return;
+        v.b.substeps = v.b.substeps || [];
+        if (d.phase === 'start') {
+          v.b.substeps.push({ call_id: d.call_id || '', name: d.name || '', title: d.title || d.name || '', status: 'running', duration_ms: 0 });
+        } else {
+          var hit = null;
+          for (var i = v.b.substeps.length - 1; i >= 0; i--) {
+            if ((d.call_id && v.b.substeps[i].call_id === d.call_id) || v.b.substeps[i].status === 'running') {
+              hit = v.b.substeps[i]; break;
+            }
+          }
+          if (hit) {
+            hit.status = d.status || 'ok';
+            hit.duration_ms = d.duration_ms || 0;
+          }
+        }
         sched(v);
       },
       approval_request: function (d) {

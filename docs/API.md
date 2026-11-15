@@ -59,13 +59,13 @@
 返回当前生效的斜杠命令列表（内置 15 个 Claude Code 标准命令 + 工作区 `.localagent/commands/*.md` 与 `.claude/commands/*.md` 自定义命令）：  
 `{"commands": [{"name": str, "description": str, "kind": "builtin" | "custom", ...}]}`
 
-### `GET /api/permissions?workspace=...`
+### `GET /api/permissions?workspace=...&session_id=...`
 返回当前生效的细粒度权限规则清单：  
-`{"rules": [{"action": "allow" | "ask" | "deny", "tool": str, "pattern": str, ...}]}`
+`{"rules": {"deny": [...], "ask": [...], "allow": [...]}}`
 
-### `GET /api/hooks?workspace=...`
+### `GET /api/hooks?workspace=...&session_id=...`
 返回已配置的生命周期钩子（`PreToolUse` / `PostToolUse` / `Stop` / `UserPromptSubmit`）：  
-`{"hooks": [...]}`
+`{"hooks": {...}}`
 
 ### `PUT /api/workspace` / `GET /api/workspace/browse` / `GET /api/workspace/tree` / `GET /api/workspace/file` / `GET /api/workspace/git`
 - `PUT /api/workspace`: 绑定工作区路径（校验 `PathGuard` 与目录存在性）
@@ -78,8 +78,8 @@
 
 ## 会话、运行、撤销与实时事件
 
-### `GET /api/sessions` / `POST /api/sessions` / `GET /api/sessions/{sid}` / `DELETE /api/sessions/{sid}`
-管理持久化的对话会话与历史消息、工作区绑定及审计变更记录（`changes`）。
+### `GET /api/sessions` / `GET /api/sessions/search?q=...` / `POST /api/sessions` / `GET /api/sessions/{sid}` / `DELETE /api/sessions/{sid}`
+管理持久化的对话会话与历史消息、工作区绑定及审计变更记录（`changes`）；`search` 支持按标题或历史对话消息全文检索并返回摘要片段（`snippet`）。
 
 ### `POST /api/sessions/{sid}/undo`
 回退上一回合（Turn）在工作区中产生的文件新建、修改与删除（基于 `Journal` 原子快照）。  
@@ -101,7 +101,7 @@
 单次运行实时事件流，常见事件类型：
 - `thinking_delta` / `thinking_end`
 - `text_delta`
-- `tool_start` / `tool_output_delta` / `tool_result`
+- `tool_start` / `tool_output_delta` / `subagent_step` / `tool_result`
 - `approval_request`（需前端回传 `POST /api/approvals/{aid}`）
 - `usage`: `{"prompt_tokens": int, "completion_tokens": int, "ctx": int, "used": int, "pct": float, "tps": float}`
 - `run_end`: `{"status": "done" | "cancelled" | "error", "stats": dict, ...}`

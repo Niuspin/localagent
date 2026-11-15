@@ -374,6 +374,26 @@ def _apply_edit(text: str, old: str, new: str, replace_all: bool) -> tuple[str |
     return text.replace(old, new) if replace_all else text.replace(old, new, 1), "ok"
 
 
+def _apply_edits_args(text: str, a: dict) -> tuple[str | None, str]:
+    """支持单次 old_string/new_string 替换，以及 edits 数组的原子顺序批量替换。"""
+    edits = a.get("edits")
+    if edits is not None:
+        if not isinstance(edits, list) or not edits:
+            return None, "edits 必须是非空数组，每项包含 old_string 和 new_string"
+        cur = text
+        for idx, op in enumerate(edits, 1):
+            if not isinstance(op, dict) or "old_string" not in op or "new_string" not in op:
+                return None, f"edits[{idx}] 缺少 old_string 或 new_string"
+            nxt, why = _apply_edit(cur, str(op["old_string"]), str(op["new_string"]), bool(op.get("replace_all")))
+            if nxt is None:
+                return None, f"第 {idx} 处编辑失败: {why}"
+            cur = nxt
+        return cur, f"ok({len(edits)} 处修改)"
+    if "old_string" not in a or "new_string" not in a:
+        return None, "缺少 old_string / new_string（或提供 edits 数组）"
+    return _apply_edit(text, str(a["old_string"]), str(a["new_string"]), bool(a.get("replace_all")))
+
+
 async def edit_file(ctx: ToolCtx, a: dict) -> ToolResult:
     p = ctx.guard.resolve(a["path"], write=True)
     if not p.is_file():
@@ -384,7 +404,7 @@ async def edit_file(ctx: ToolCtx, a: dict) -> ToolResult:
     if looks_binary(raw):
         return err("二进制文件，不能按文本编辑")
     text, enc, nl = decode_bytes(raw)
-    new_text, why = _apply_edit(text, a["old_string"], a["new_string"], bool(a.get("replace_all")))
+    new_text, why = _apply_edits_args(text, a)
     if new_text is None:
         return err(why)
     data = encode_text(new_text, enc, nl)
@@ -400,7 +420,7 @@ async def edit_preview(ctx: ToolCtx, a: dict) -> dict | None:
         if not p.is_file():
             return {"kind": "text", "text": "文件不存在"}
         text = decode_bytes(p.read_bytes())[0]
-        new_text, why = _apply_edit(text, a.get("old_string", ""), a.get("new_string", ""), bool(a.get("replace_all")))
+        new_text, why = _apply_edits_args(text, a)
         if new_text is None:
             return {"kind": "text", "text": why}
         return {"kind": "diff", "text": make_diff(text, new_text, ctx.guard.rel(p))}
@@ -409,12 +429,34 @@ async def edit_preview(ctx: ToolCtx, a: dict) -> dict | None:
 
 
 register(Tool(
-    "edit_file", "对已有文本文件做精确字符串替换。old_string 必须在文件中唯一（否则加上下文或设 replace_all）。修改前先 read_file。",
-    obj({"path": P("string", "文件路径"), "old_string": P("string", "要被替换的原文（逐字符，含缩进）"),
-         "new_string": P("string", "替换后的文本"), "replace_all": P("boolean", "替换所有出现处，默认 false")},
-        ["path", "old_string", "new_string"]),
+    "edit_file", "对已有文本文件做精确字符串替换（支持单次 old_string/new_string，或传 edits 数组按顺序原子应用多处修改）。修改前先 read_file。",
+    obj({"path": P("string", "文件路径"),
+         "old_string": P("string", "要被替换的原文（逐字符，含缩进）"),
+         "new_string": P("string", "替换后的文本"),
+         "replace_all": P("boolean", "替换所有出现处，默认 false"),
+         "edits": {"type": "array", "description": "多处按顺序替换列表（全成功才写入，与单次替换二选一）",
+                   "items": obj({"old_string": P("string", "原文"), "new_string": P("string", "新文本"),
+                                 "replace_all": P("boolean", "替换所有出现处")}, ["old_string", "new_string"])}},
+        ["path"]),
     edit_file, "write", title=lambda a: f"编辑 {a.get('path', '')}", preview=edit_preview, path_args=("path",),
     precheck=_edit_precheck))
+
+
+async def repo_map(ctx: ToolCtx, a: dict) -> ToolResult:
+    from ..repomap import build_repo_map
+    sub = str(a.get("path") or ".").strip() or "."
+    p = ctx.guard.resolve(sub)
+    if not p.is_dir():
+        return err(f"不是目录: {sub}")
+    rel = ctx.guard.rel(p)
+    max_files = max(10, min(int(a.get("max_files") or 80), 200))
+    return ToolResult(build_repo_map(ctx.guard.ws, subdir=rel, max_files=max_files, guard=ctx.guard))
+
+
+register(Tool(
+    "repo_map", "生成工作区代码结构骨架（目录 + Python/JS/TS/Go/Rust 主要类与函数定义），快速了解大型项目布局。",
+    obj({"path": P("string", "相对子目录，默认 '.'"), "max_files": P("integer", "最多解析的源码文件数（10-200，默认 80）")}, []),
+    repo_map, "read", group="extras", title=lambda a: f"代码骨架 {a.get('path') or '.'}", path_args=("path",)))
 
 
 # ------------------------------------------------------------------ list_dir / glob / grep

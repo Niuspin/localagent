@@ -1887,3 +1887,43 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
   color: var(--muted);
   flex-shrink: 0;
 }
+
+/* ---------- 规则与 Hooks、会话搜索摘要、子代理轨迹、离线 Mermaid/公式块 ---------- */
+.rules-grid { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.rule-sec, .hook-list { display: flex; flex-direction: column; gap: 6px; }
+.rule-grp { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rule-act {
+  font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 5px; text-transform: uppercase;
+  border: 1px solid var(--border);
+}
+.rule-act.deny { color: var(--danger); border-color: var(--danger); }
+.rule-act.ask { color: #b7791f; border-color: #d69e2e; }
+.rule-act.allow { color: #1f883d; border-color: #2ea043; }
+.rule-pill {
+  font-size: 12px; padding: 2px 8px; border-radius: 6px;
+  background: var(--code-bg, rgba(127, 127, 127, 0.08)); border: 1px solid var(--border);
+}
+.hook-row { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+.sb-twrap { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.sb-snip { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.t-substeps {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-bottom: 8px; padding: 6px 8px;
+  border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg-soft, rgba(127, 127, 127, 0.05));
+}
+.t-substep { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.t-sub-ic { display: inline-flex; align-items: center; width: 14px; justify-content: center; flex-shrink: 0; }
+.t-sub-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mermaid-box { border-left: 3px solid var(--accent); }
+.math-block {
+  margin: 10px 0; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  background: var(--code-bg, rgba(127, 127, 127, 0.06));
+  overflow-x: auto;
+}
+.math-block .math-tag {
+  display: inline-block; font-size: 11px; color: var(--muted);
+  margin-right: 8px; font-weight: 600;
+}
+.math-block code { font-family: var(--mono, monospace); font-size: .9em; white-space: pre-wrap; background: none; padding: 0; }

@@ -294,6 +294,47 @@ def make_app(st: State) -> Starlette:
             return J(s.view())
         return J(st.store.list())
 
+    @route("/api/sessions/search", ["GET"])
+    async def sessions_search(req: Request) -> Response:
+        q = (req.query_params.get("q") or "").strip().lower()
+        items = st.store.list()
+        if not q:
+            return J(items)
+        out: list[dict] = []
+        for meta in items:
+            s = st.store.get(meta["id"])
+            if s is None:
+                continue
+            snippet = ""
+            if q in (s.title or "").lower():
+                snippet = s.title
+            if not snippet:
+                for u in s.ui:
+                    txt = str(u.get("text") or "")
+                    idx = txt.lower().find(q)
+                    if idx >= 0:
+                        lo = max(0, idx - 24)
+                        snippet = ("…" if lo > 0 else "") + txt[lo:idx + len(q) + 56].replace("\n", " ")
+                        break
+                    for b in u.get("blocks") or []:
+                        if b.get("type") in ("text", "tool"):
+                            bt = str(b.get("text") or b.get("title") or "")
+                            idx = bt.lower().find(q)
+                            if idx >= 0:
+                                lo = max(0, idx - 24)
+                                snippet = ("…" if lo > 0 else "") + bt[lo:idx + len(q) + 56].replace("\n", " ")
+                                break
+                    if snippet:
+                        break
+            if not snippet and s.summary:
+                idx = s.summary.lower().find(q)
+                if idx >= 0:
+                    lo = max(0, idx - 24)
+                    snippet = ("…" if lo > 0 else "") + s.summary[lo:idx + len(q) + 56].replace("\n", " ")
+            if snippet:
+                out.append({**meta, "snippet": snippet[:120]})
+        return J(out)
+
     def sess_or_404(req: Request):
         s = st.store.get(req.path_params["sid"])
         if not s:
@@ -792,12 +833,22 @@ def make_app(st: State) -> Starlette:
 
     @route("/api/permissions", ["GET"])
     async def api_permissions(req: Request) -> Response:
-        ws = req.query_params.get("workspace") or st.cfg.get("workspace", default="")
+        ws = req.query_params.get("workspace") or ""
+        if not ws and req.query_params.get("session_id"):
+            s = st.store.get(req.query_params["session_id"])
+            if s:
+                ws = s.workspace
+        ws = ws or st.cfg.get("workspace", default="")
         return J({"rules": PermissionManager(ws or None).list_rules()})
 
     @route("/api/hooks", ["GET"])
     async def api_hooks(req: Request) -> Response:
-        ws = req.query_params.get("workspace") or st.cfg.get("workspace", default="")
+        ws = req.query_params.get("workspace") or ""
+        if not ws and req.query_params.get("session_id"):
+            s = st.store.get(req.query_params["session_id"])
+            if s:
+                ws = s.workspace
+        ws = ws or st.cfg.get("workspace", default="")
         return J({"hooks": HookManager(ws or None).list_hooks()})
 
     # ------------------------------------------------------------ 静态文件

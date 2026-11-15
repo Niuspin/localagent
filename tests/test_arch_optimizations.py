@@ -1,6 +1,7 @@
 """P0 契约修复与 P1 架构优化的单元测试与 HTTP 集成测试。"""
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -233,3 +234,273 @@ def test_server_bearer_tree_recursive_tainted_and_git(server, tmp_path: Path):
     assert s_c == 200
     assert server.get(f"/api/state?session_id={sess['id']}")[1]["tainted"] is False
     assert server.patch("/api/config", {"agent": {"permission_mode": "auto_edit"}})[0] == 200
+
+    # Session search endpoint: matches content snippet even when title is generic
+    assert server.patch(f"/api/sessions/{sess['id']}", {"title": "排查 WebSocket 断连重连策略与 KV 缓存命中"})[0] == 200
+    sc, found = server.get("/api/sessions/search?q=断连重连")
+    assert sc == 200
+    assert any(x["id"] == sess["id"] and "断连重连" in x.get("snippet", "") for x in found)
+
+    # Also test message-body full-text snippet search directly via ASGI app (no extra httpx dependency)
+    import asyncio
+    from lagent.server import State, make_app
+    home2 = tmp_path / "search_home"
+    (home2 / "data").mkdir(parents=True)
+    (home2 / "models").mkdir()
+    (home2 / "bin").mkdir()
+    st2 = State(token="tok123", port=8000, root=home2)
+    app2 = make_app(st2)
+    sr = st2.store.create("")
+    sr.ui.append({"id": "u1", "role": "user", "text": "优化上下文 KV 前缀缓存与投机解码命中率", "ts": 1})
+    st2.store.save(sr)
+
+    async def asgi_get(path_str: str, query: bytes):
+        out_status = 0
+        chunks: list[bytes] = []
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "GET", "scheme": "http", "path": path_str, "raw_path": path_str.encode(),
+            "query_string": query,
+            "headers": [
+                (b"host", b"127.0.0.1:8000"),
+                (b"authorization", b"Bearer tok123"),
+            ],
+            "server": ("127.0.0.1", 8000), "client": ("127.0.0.1", 50000),
+        }
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        async def send(msg):
+            nonlocal out_status
+            if msg["type"] == "http.response.start":
+                out_status = msg["status"]
+            elif msg["type"] == "http.response.body":
+                chunks.append(msg.get("body", b""))
+        await app2(scope, receive, send)
+        return out_status, json.loads(b"".join(chunks).decode("utf-8"))
+
+    from urllib.parse import quote
+    rs_code, hits = asyncio.run(asgi_get("/api/sessions/search", f"q={quote('投机解码命中率')}".encode("ascii")))
+    assert rs_code == 200 and len(hits) == 1 and hits[0]["id"] == sr.id and "投机解码命中率" in hits[0]["snippet"]
+
+    # Permissions & hooks with session_id fallback
+    pr_c, pr_d = server.get(f"/api/permissions?session_id={sess['id']}")
+    hk_c, hk_d = server.get(f"/api/hooks?session_id={sess['id']}")
+    assert pr_c == 200 and "rules" in pr_d
+    assert hk_c == 200 and "hooks" in hk_d
+
+
+def test_hw_llama_devices_fallback(monkeypatch, tmp_path):
+    from lagent import hw
+
+    fake_bin = tmp_path / ("llama-server.exe" if __import__("os").name == "nt" else "llama-server")
+    fake_bin.write_bytes(b"bin")
+    monkeypatch.setattr(hw, "_nvidia", lambda: [])
+    monkeypatch.setattr(hw, "_amd", lambda: [])
+    monkeypatch.setattr(hw.sys, "platform", "win32")
+    monkeypatch.setattr(hw, "_run", lambda args, timeout=5.0: (
+        "Available devices:\n"
+        "  CUDA0: NVIDIA RTX 4090 (24564 MiB, 22000 MiB free)\n"
+        "  Vulkan0: Intel Graphics (4096 MiB, 4096 MiB free)\n"
+    ) if "--list-devices" in args else "")
+    info = hw.detect(force=True, binary=fake_bin)
+    assert len(info["gpus"]) == 2
+    assert info["gpus"][0]["vendor"] == "nvidia"
+    assert info["gpus"][0]["name"].startswith("NVIDIA RTX 4090")
+    assert info["gpus"][0]["vram_gb"] == round(24564 / 1024.0, 2)
+    assert info["gpus"][1]["vendor"] == "vulkan"
+
+
+def test_model_router_fallback_and_remote(monkeypatch, tmp_path):
+    import asyncio
+    from lagent import net
+    from lagent.config import Config
+    from lagent.router import ModelRouter
+
+    cfg = Config(tmp_path / "cfg.json")
+
+    class FakeEng:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, body, timeout=600):
+            self.calls += 1
+            return {"choices": [{"message": {"content": "local-summary"}}]}
+
+    eng = FakeEng()
+    router = ModelRouter(cfg, eng)
+    out1 = asyncio.run(router.complete(role="compact", messages=[{"role": "user", "content": "hi"}]))
+    assert eng.calls == 1
+    assert out1 == "local-summary"
+
+    # Configure compact endpoint + mock net.fetch
+    cfg.set("agent", "compact_endpoint", "http://127.0.0.1:11434/v1/chat/completions")
+    cfg.set("agent", "compact_model", "qwen2.5:1.5b")
+
+    async def fake_fetch(url, method="GET", headers=None, data=None, timeout=120, max_bytes=2_000_000, allow_private=False):
+        assert allow_private is True
+        body = json.loads(data.decode("utf-8"))
+        assert body["model"] == "qwen2.5:1.5b"
+        return net.Response(status=200, url=url, headers={}, body=b'{"choices":[{"message":{"content":"remote-summary"}}]}')
+
+    monkeypatch.setattr("lagent.router.net.fetch", fake_fetch)
+    out2 = asyncio.run(router.complete(role="compact", messages=[{"role": "user", "content": "hi"}]))
+    assert eng.calls == 1
+    assert out2 == "remote-summary"
+
+
+def test_repomap_and_subdir_projectdoc(tmp_path):
+    from lagent import projectdoc
+    from lagent.repomap import build_repo_map
+
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "ignored.js").write_text("function leak() {}\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("dist/\n", encoding="utf-8")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "out.py").write_text("def compiled(): pass\n", encoding="utf-8")
+
+    pkg = tmp_path / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "core.py").write_text(
+        "class EngineCore:\n    def run(self, x):\n        return x\n\ndef helper():\n    pass\n",
+        encoding="utf-8",
+    )
+    (pkg / "ui.ts").write_text("export async function renderView(id: string) {}\n", encoding="utf-8")
+    (tmp_path / "src" / "AGENTS.md").write_text("请在 src 目录保持纯函数风格。\n", encoding="utf-8")
+
+    rmap = build_repo_map(tmp_path)
+    assert "EngineCore" in rmap and "helper" in rmap and "renderView" in rmap
+    assert "node_modules" not in rmap and "compiled" not in rmap
+
+    sdocs = projectdoc.load_for_path(tmp_path, "src/pkg/core.py")
+    assert len(sdocs) == 1 and sdocs[0].usable
+    assert sdocs[0].name == "src/AGENTS.md"
+    assert "纯函数风格" in sdocs[0].text
+
+
+def test_edit_file_atomic_multi_edit(tmp_path):
+    import asyncio
+    from lagent.config import Config
+    from lagent.journal import Journal
+    from lagent.security import AuditLog, PathGuard
+    from lagent.tools.base import TOOLS
+    from lagent.tools.ctx import SessionState, ToolCtx
+    from lagent.tools.files import mark_seen
+
+    f = tmp_path / "sample.py"
+    f.write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
+    guard = PathGuard(tmp_path)
+    ctx = ToolCtx(
+        cfg=Config(tmp_path / "cfg.json"),
+        guard=guard,
+        journal=Journal(tmp_path / "j"),
+        session=SessionState("s1"),
+        audit=AuditLog(tmp_path / "a.jsonl"),
+    )
+    mark_seen(ctx, f, f.read_bytes())
+
+    # Failing second edit must abort atomically without changing file
+    res_fail = asyncio.run(TOOLS["edit_file"].fn(ctx, {
+        "path": "sample.py",
+        "edits": [
+            {"old_string": "a = 1", "new_string": "a = 10"},
+            {"old_string": "nonexistent", "new_string": "x = 99"},
+        ],
+    }))
+    assert res_fail.error
+    assert f.read_text(encoding="utf-8") == "a = 1\nb = 2\nc = 3\n"
+
+    res_ok = asyncio.run(TOOLS["edit_file"].fn(ctx, {
+        "path": "sample.py",
+        "edits": [
+            {"old_string": "a = 1", "new_string": "a = 10"},
+            {"old_string": "c = 3", "new_string": "c = 30"},
+        ],
+    }))
+    assert not res_ok.error
+    assert f.read_text(encoding="utf-8") == "a = 10\nb = 2\nc = 30\n"
+
+
+def test_managers_reload_if_changed(tmp_path):
+    import json
+    from lagent.hooks import HookManager
+    from lagent.permissions import PermissionManager
+
+    cfg_dir = tmp_path / ".localagent"
+    cfg_dir.mkdir()
+    s_file = cfg_dir / "settings.json"
+    h_file = cfg_dir / "hooks.json"
+    s_file.write_text(json.dumps({"permissions": {"allow": ["Read(*.py)"]}}), encoding="utf-8")
+    h_file.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "run_command", "command": "echo 1"}]}}), encoding="utf-8")
+
+    pm = PermissionManager(tmp_path)
+    hm = HookManager(tmp_path)
+    assert pm.reload_if_changed() is False
+    assert hm.reload_if_changed() is False
+
+    s_file.write_text(json.dumps({"permissions": {"allow": ["Read(*.py)", "Edit(docs/**)"]}}), encoding="utf-8")
+    h_file.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "run_command", "command": "echo 2"}, {"matcher": "edit_file", "command": "echo 3"}]}}), encoding="utf-8")
+    assert pm.reload_if_changed() is True
+    assert len(pm.rules["allow"]) == 2
+    assert hm.reload_if_changed() is True
+    assert len(hm.hooks["PreToolUse"]) == 2
+
+
+def test_engine_slots_spec_disable_and_slot_persistence(monkeypatch, tmp_path):
+    import asyncio
+    from lagent.config import Config
+    from lagent.engine import Engine
+
+    models = tmp_path / "models"
+    models.mkdir()
+    make_gguf(models / "main.gguf")
+    make_gguf(models / "draft.gguf", arch="llama")
+    b = tmp_path / ("llama-server.exe" if __import__("os").name == "nt" else "llama-server")
+    b.write_bytes(b"")
+
+    cfg = Config(tmp_path / "cfg.json")
+    cfg.set("engine", "model", "main.gguf")
+    cfg.set("engine", "slots", 2)
+    cfg.set("engine", "reasoning_format", "deepseek")
+    cfg.set("engine", "draft_model", "draft.gguf")
+
+    monkeypatch.setattr("lagent.engine.hw.detect", lambda **kw: {
+        "os": "linux", "arch": "x86_64", "cpu_cores": 8, "cpu_threads": 16,
+        "ram_gb": 32.0, "ram_free_gb": 24.0, "gpus": [], "unified": False,
+    })
+    eng = Engine(cfg, models, tmp_path / "bin")
+    eng.binary = b
+    eng._help_text = "--reasoning-format --slot-save-path --model-draft -md --spec-draft-n-max -np --threads --ctx-size -m"
+
+    plan1 = eng.plan()
+    args1 = eng.build_args(plan1)
+    assert "-np" in args1 and args1[args1.index("-np") + 1] == "2"
+    assert "--reasoning-format" in args1 and args1[args1.index("--reasoning-format") + 1] == "deepseek"
+    assert "--slot-save-path" in args1
+    assert plan1["spec"]["mode"] == "draft"
+    assert any("draft.gguf" in str(x) and x != plan1["model_path"] for x in args1)
+
+    # Simulate low speculative acceptance -> auto-disable speculation
+    for _ in range(4):
+        eng.record_timings({"draft_n": 100, "draft_n_accepted": 5, "predicted_per_second": 20.0})
+    assert eng.telemetry.should_disable_speculation() is True
+    plan2 = eng.plan()
+    assert plan2["spec"]["mode"] == "off"
+    assert any("采纳率过低" in n for n in plan2["notes"])
+
+    # Test save_slot & restore_slot
+    eng.status = "ready"
+    eng.port = 12345
+    eng.slots_dir().mkdir(parents=True, exist_ok=True)
+
+    async def fake_local_json(host, port, method, path, body=None, headers=None, timeout=15):
+        if "action=save" in path:
+            (eng.slots_dir() / body["filename"]).write_bytes(b"slot")
+            return 200, {"ok": True}
+        if "action=restore" in path:
+            return 200, {"ok": True}
+        return 404, {}
+
+    monkeypatch.setattr("lagent.engine.net.local_json", fake_local_json)
+    assert asyncio.run(eng.save_slot(0, "test.bin")) is True
+    assert asyncio.run(eng.restore_slot(0, "test.bin")) is True
+

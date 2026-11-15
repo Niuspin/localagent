@@ -3,6 +3,7 @@
   'use strict';
   var LA = window.LA, el = LA.el, icon = LA.icon;
   var listEl, searchInp, searchClear, filterQuery = '';
+  var searchHits = null, searchTimer = null, searchSeq = 0;
 
   /* ------------------------------------------------------------ 会话切换 */
   LA.setSession = function (view, opts) {
@@ -68,9 +69,13 @@
     var ss = LA.S.sessions || [];
 
     if (filterQuery) {
-      ss = ss.filter(function (s) {
-        return (s.title || '新对话').toLowerCase().indexOf(filterQuery) >= 0;
-      });
+      if (searchHits !== null) {
+        ss = ss.filter(function (s) { return Object.prototype.hasOwnProperty.call(searchHits, s.id); });
+      } else {
+        ss = ss.filter(function (s) {
+          return (s.title || '新对话').toLowerCase().indexOf(filterQuery) >= 0;
+        });
+      }
     }
 
     if (!ss.length) {
@@ -109,7 +114,11 @@
     });
 
     if (s.pinned) row.appendChild(el('span', { class: 'pin', html: icon('pin', 14) }));
-    row.appendChild(el('span', { class: 't', text: s.title || '新对话' }));
+    var snip = (searchHits && searchHits[s.id] && filterQuery) ? searchHits[s.id] : '';
+    var titleWrap = el('span', { class: 'sb-twrap' },
+      el('span', { class: 't', text: s.title || '新对话' }),
+      snip && snip !== (s.title || '新对话') ? el('span', { class: 'sb-snip', text: snip }) : null);
+    row.appendChild(titleWrap);
     if (running) row.appendChild(el('span', { class: 'run-dot', title: '运行中' }));
 
     function act(ic, title, fn) {
@@ -171,13 +180,32 @@
         searchInp.addEventListener('input', function () {
           filterQuery = searchInp.value.trim().toLowerCase();
           if (searchClear) searchClear.hidden = !filterQuery;
+          if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+          if (!filterQuery || filterQuery.length < 2) {
+            searchHits = null;
+            renderList();
+            return;
+          }
           renderList();
+          var mySeq = ++searchSeq, qNow = filterQuery;
+          searchTimer = setTimeout(function () {
+            LA.get('/api/sessions/search?q=' + encodeURIComponent(qNow)).then(function (rows) {
+              if (mySeq !== searchSeq || filterQuery !== qNow) return;
+              var map = {};
+              (rows || []).forEach(function (r) { map[r.id] = r.snippet || ''; });
+              searchHits = map;
+              renderList();
+            }).catch(function () {});
+          }, 180);
         });
       }
       if (searchClear) {
         searchClear.addEventListener('click', function () {
           if (searchInp) { searchInp.value = ''; searchInp.focus(); }
+          if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+          searchSeq++;
           filterQuery = '';
+          searchHits = null;
           searchClear.hidden = true;
           renderList();
         });

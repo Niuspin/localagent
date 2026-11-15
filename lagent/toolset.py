@@ -15,7 +15,7 @@ import re
 EXT_GROUPS: dict[str, tuple[str, ...]] = {
     "office": ("write_document", "write_spreadsheet", "write_presentation", "edit_office"),
     "fileops": ("delete_path", "move_path", "copy_path", "make_dir"),
-    "extras": ("read_skill_file", "create_skill", "memory_forget"),
+    "extras": ("read_skill_file", "create_skill", "memory_forget", "repo_map"),
     "jobs": ("job_output", "job_stop"),
     "outputs": ("read_tool_output",),     # 无关键词触发：输出被截断/精简、出现句柄时由循环自动加载
 }
@@ -24,7 +24,7 @@ GROUP_DESC: dict[str, str] = {
     "outputs": "取回被截断/精简的工具输出（按句柄分段读取或按关键词查找）",
     "office": "创建/修改 Word、Excel、PowerPoint、PDF 文档",
     "fileops": "删除、移动、复制文件，新建目录",
-    "extras": "读取技能附带文件、创建技能、删除记忆",
+    "extras": "读取技能附带文件、创建技能、删除记忆、代码库结构骨架（repo_map）",
     "jobs": "查看/终止后台命令（run_command background=true 启动）",
 }
 

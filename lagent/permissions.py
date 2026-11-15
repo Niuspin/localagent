@@ -96,11 +96,32 @@ class PermissionManager:
 
     def __init__(self, workspace: str | Path | None = None, rules: dict[str, list[str]] | None = None):
         self.workspace = Path(workspace) if workspace else None
+        self._explicit = rules is not None
+        self._sig_val: tuple | None = None
         self.rules: dict[str, list[PermissionRule]] = {"deny": [], "ask": [], "allow": []}
         if rules:
             self._load_from_dict(rules)
         elif self.workspace:
             self.reload()
+
+    def _cand_files(self) -> list[Path]:
+        if not self.workspace:
+            return []
+        return [
+            self.workspace / ".localagent" / "settings.json",
+            self.workspace / ".claude" / "settings.local.json",
+            self.workspace / ".claude" / "settings.json",
+        ]
+
+    def _sig(self) -> tuple:
+        out = []
+        for f in self._cand_files():
+            try:
+                st = f.stat()
+                out.append((str(f), st.st_mtime_ns, st.st_size))
+            except OSError:
+                out.append((str(f), None, None))
+        return tuple(out)
 
     def _load_from_dict(self, d: dict) -> None:
         perms = d.get("permissions") if isinstance(d.get("permissions"), dict) else d
@@ -113,15 +134,11 @@ class PermissionManager:
 
     def reload(self) -> None:
         self.rules = {"deny": [], "ask": [], "allow": []}
+        self._sig_val = self._sig()
         if not self.workspace or not self.workspace.is_dir():
             return
         # 寻找配置文件优先级：.localagent/settings.json -> .claude/settings.local.json -> .claude/settings.json
-        cand_files = [
-            self.workspace / ".localagent" / "settings.json",
-            self.workspace / ".claude" / "settings.local.json",
-            self.workspace / ".claude" / "settings.json",
-        ]
-        for f in cand_files:
+        for f in self._cand_files():
             if f.is_file():
                 try:
                     data = json.loads(f.read_text("utf-8"))
@@ -129,6 +146,15 @@ class PermissionManager:
                         self._load_from_dict(data)
                 except (OSError, ValueError):
                     pass
+
+    def reload_if_changed(self) -> bool:
+        if self._explicit or not self.workspace:
+            return False
+        cur = self._sig()
+        if cur != self._sig_val:
+            self.reload()
+            return True
+        return False
 
     def evaluate(
         self,

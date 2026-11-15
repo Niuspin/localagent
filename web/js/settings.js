@@ -253,6 +253,9 @@
     adv.appendChild(F('图片最大 token', num('engine.image_max_tokens', { min: 64, step: 64 }), '越大看得越清楚，也越占上下文。'));
     adv.appendChild(F('前缀缓存内存 (MB)', num('engine.cache_ram_mb', { min: 0, step: 256 })));
     adv.appendChild(F('显存预留 (MB)', num('engine.vram_reserve_mb', { min: 0, step: 128 })));
+    adv.appendChild(F('并发推理槽位 (-np)', num('engine.slots', { min: 1, max: 8 }), '并行请求槽位数，默认 1 专注单任务最大上下文；多任务可调为 2~4。'));
+    adv.appendChild(F('推理思考格式', sel('engine.reasoning_format', [['auto', '自动'], ['deepseek', 'deepseek'], ['none', 'none（不拆分标签）']]), '控制 llama-server 的 --reasoning-format 参数。'));
+    adv.appendChild(F('投机解码低命中降级', sw('engine.auto_disable_bad_spec', '当 Draft 接受率过低时自动关闭投机解码')));
     var extra = el('input', { class: 'inp wide', value: (LA.cfg('engine.extra_args', []) || []).join(' '), placeholder: '例如 --no-mmap --cache-reuse 256', spellcheck: false });
     extra.addEventListener('change', function () { LA.cfgSet('engine.extra_args', extra.value.trim() ? extra.value.trim().split(/\s+/) : []); });
     adv.appendChild(F('额外参数', extra, '--host / --port / --api-key / -m 等安全相关参数会被拒绝。'));
@@ -287,6 +290,8 @@
     pane.appendChild(F('子代理步数上限', num('agent.subagent_max_steps', { min: 1, max: 30 }), 'delegate_task 只读子代理的最大推理步数。'));
     pane.appendChild(F('工作区 Hooks', sw('agent.hooks_enabled', '启用 .localagent/hooks.json 生命周期钩子')));
     pane.appendChild(F('细粒度权限规则', sw('agent.granular_permissions', '加载 .localagent/settings.json 的 allow/ask/deny 规则')));
+    pane.appendChild(F('摘要外部模型端点（可选）', txt('agent.compact_endpoint', { wide: true, ph: '例如 http://127.0.0.1:11434/v1/chat/completions' }), '留空则由当前主模型做上下文压缩；填写后可路由到轻量副模型接口。'));
+    pane.appendChild(F('摘要外部模型名（可选）', txt('agent.compact_model', { wide: true, ph: '例如 qwen2.5:1.5b' })));
     pane.appendChild(F('追加系统提示', txt('agent.system_prompt_extra', { area: true, rows: 5 }), '写入你的偏好或规则，例如“回答用中文”“改文件前先说明计划”。会放进系统提示的末尾。', 'stack'));
   }
 
@@ -307,6 +312,49 @@
     pane.appendChild(sec('提示注入防护'));
     pane.appendChild(F('污染追踪', sw('security.taint_tracking', '读取网页/文档后强制确认写入与命令'), '网页、搜索结果、Office/PDF 与上传文件里可能藏有“给模型的指令”。开启后，读过它们的会话里任何修改都需你点头。'));
     pane.appendChild(F('屏蔽远程图片', sw('security.block_remote_images', '不加载回答里的外链图片'), '避免通过图片 URL 把数据带出去。'));
+
+    pane.appendChild(sec('工作区权限规则与 Hooks'));
+    var rhBox = el('div', { class: 'rules-grid' });
+    function loadRulesHooks() {
+      var q = (LA.S.cur && LA.S.cur.id) ? ('?session_id=' + encodeURIComponent(LA.S.cur.id)) : '';
+      Promise.all([LA.get('/api/permissions' + q), LA.get('/api/hooks' + q)]).then(function (arr) {
+        LA.clear(rhBox);
+        var rules = (arr[0] && arr[0].rules) || {};
+        var hooks = (arr[1] && arr[1].hooks) || {};
+        var rSec = el('div', { class: 'rule-sec' });
+        var rTotal = 0;
+        ['deny', 'ask', 'allow'].forEach(function (act) {
+          var list = rules[act] || [];
+          rTotal += list.length;
+          if (!list.length) return;
+          var grp = el('div', { class: 'rule-grp' }, el('span', { class: 'rule-act ' + act, text: act.toUpperCase() }));
+          list.forEach(function (item) { grp.appendChild(el('code', { class: 'rule-pill', text: item })); });
+          rSec.appendChild(grp);
+        });
+        if (!rTotal) rSec.appendChild(el('div', { class: 'hint2', text: '未配置工作区细粒度规则（可在 .localagent/settings.json 中配置）。' }));
+        rhBox.appendChild(rSec);
+        var hSec = el('div', { class: 'hook-list' });
+        var hTotal = 0;
+        Object.keys(hooks).forEach(function (ev) {
+          (hooks[ev] || []).forEach(function (h) {
+            hTotal++;
+            hSec.appendChild(el('div', { class: 'hook-row' },
+              el('span', { class: 'pal-tag', text: ev }),
+              el('code', { text: h.matcher || '*' }),
+              el('span', { class: 'muted', text: h.command || '' })));
+          });
+        });
+        if (!hTotal) hSec.appendChild(el('div', { class: 'hint2', text: '未配置生命周期 Hooks（可在 .localagent/hooks.json 中配置）。' }));
+        rhBox.appendChild(hSec);
+      }).catch(function () {
+        LA.clear(rhBox);
+        rhBox.appendChild(el('div', { class: 'hint2', text: '无法加载规则与 Hooks 状态。' }));
+      });
+    }
+    pane.appendChild(el('div', { class: 'toolbar' }, btn('刷新规则与 Hooks', loadRulesHooks)));
+    pane.appendChild(rhBox);
+    loadRulesHooks();
+
     pane.appendChild(sec('审计日志'));
     var out = el('div');
     pane.appendChild(el('div', { class: 'toolbar' },
