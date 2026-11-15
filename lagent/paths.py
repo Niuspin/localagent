@@ -55,6 +55,15 @@ def data_root() -> Path:
 
 CODE_DIR = code_dir()
 ROOT = data_root()
+DATA_SUBDIRS = ("sessions", "outputs", "swarms", "missions", "artifacts", "webcache")
+
+
+def data_dir(*parts: str, root: Path = ROOT) -> Path:
+    """返回 data/ 下的子目录或文件路径。"""
+    p = root / "data"
+    for part in parts:
+        p = p / part
+    return p
 
 
 def ensure_dirs(root: Path = ROOT) -> list[str]:
@@ -65,4 +74,10 @@ def ensure_dirs(root: Path = ROOT) -> list[str]:
             (root / name).mkdir(parents=True, exist_ok=True)
         except OSError:
             failed.append(name)
+    if "data" not in failed:
+        for sub in DATA_SUBDIRS:
+            try:
+                (root / "data" / sub).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                failed.append(f"data/{sub}")
     return failed

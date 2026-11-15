@@ -85,7 +85,7 @@
 - `GET /api/sessions/{sid}/export`: 导出 Markdown 格式对话记录。
 
 ### `GET /api/runs/{rid}/events`（单次运行 SSE）与 `POST /api/runs/{rid}/cancel`
-推送实时运行事件：
+推送实时运行事件（M0 起所有事件负载统一注入元数据 `{ts, kind, run_id, agent_id, swarm_id, mission_id}`）：
 - `thinking_delta` / `thinking_end`
 - `text_delta` / `assistant_done`
 - `tool_start` / `tool_output_delta` / `subagent_step` / `tool_result`
@@ -95,7 +95,12 @@
 - `notice` / `run_end`: `{"status": "done" | "cancelled" | "error", "stats": dict, ...}`
 
 ### `GET /api/events`（全局 SSE）
-实时推送跨页面状态事件：`engine`、`config`、`mcp`、`hub`、`state`、`notice`。
+实时推送跨页面状态事件：`engine`、`config`、`mcp`、`hub`、`state`、`notice`（统一注入 `{ts, kind, run_id, agent_id, swarm_id, mission_id}`）。
+
+### `GET /api/artifacts` / `GET /api/artifacts/{aid}/meta` / `GET /api/artifacts/{aid}`
+- `GET /api/artifacts?session_id=...&kind=...&limit=200`: 列出 SQLite 索引的会话产物摘要（返回 `{"artifacts": [...]}`，不包含宿主绝对路径）。
+- `GET /api/artifacts/{aid}/meta`: 返回单个产物元数据与安全下载链接 `download_url`。
+- `GET /api/artifacts/{aid}`: 安全下载原始产物文件（强制附带 `Content-Disposition: attachment` 与 `X-Content-Type-Options: nosniff`）。
 
 ---
 

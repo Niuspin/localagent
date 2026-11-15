@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -26,9 +26,11 @@ from starlette.routing import Route
 from . import __version__, appwindow, gguf, hub as hub_mod, hw
 from .paths import FROZEN
 from . import security as sec
+from .artifacts import ArtifactStore
 from .commands import list_commands
 from .config import BIN_DIR, CODE_DIR, DATA_DIR, MODELS_DIR, ROOT, SKILLS_DIR, WEB_DIR, Config
 from .engine import Engine, EngineError
+from .events import enrich_event
 from .hooks import HookManager
 from .journal import Journal, atomic_write
 from .loop import Agent
@@ -71,6 +73,8 @@ class State:
         self.journal = Journal(data)
         self.outputs = OutputStore(data / "outputs")
         self.outputs.sweep({m["id"] for m in self.store.list()})      # 清掉已删除会话遗留的输出
+        self.artifacts = ArtifactStore(data / "artifacts")
+        self.artifacts.sweep({m["id"] for m in self.store.list()})
         self.audit = sec.AuditLog(data / "audit.jsonl")
         self.memory = Memory(data / "memory.db")
         self.skills = Skills(root / "skills", CODE_DIR / "lagent" / "builtin_skills", data / "skills_state.json")
@@ -83,15 +87,16 @@ class State:
         self.hub = hub_mod.DownloadManager(root / "models", on_event=self.broadcast_threadsafe)
         self.agent = Agent(cfg=self.cfg, engine=self.engine, store=self.store, journal=self.journal, audit=self.audit, memory=self.memory,
                            skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp,
-                           outputs=self.outputs)
+                           outputs=self.outputs, artifacts=self.artifacts)
         self.root = root
         self.autostart = False
         self.exit_cb: Any = None        # 由启动器设置：请求整个应用退出（测试/纯服务模式下为 None）
 
     def broadcast(self, event: str, data: dict) -> None:
+        payload = enrich_event(event, data)
         for q in list(self.subs):
             try:
-                q.put_nowait((event, data))
+                q.put_nowait((event, payload))
             except asyncio.QueueFull:
                 pass
 
@@ -162,8 +167,10 @@ class Guard:
         async def send2(msg: dict) -> None:
             if msg["type"] == "http.response.start":
                 h = list(msg.get("headers", []))
-                h += [(b"content-security-policy", CSP.encode()), (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer"),
-                      (b"cross-origin-resource-policy", b"same-origin"), (b"x-frame-options", b"DENY")]
+                have = {k.lower() for k, _ in h}
+                extra = [(b"content-security-policy", CSP.encode()), (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer"),
+                         (b"cross-origin-resource-policy", b"same-origin"), (b"x-frame-options", b"DENY")]
+                h += [(k, v) for k, v in extra if k not in have]
                 msg = {**msg, "headers": h}
             await send(msg)
 
@@ -369,6 +376,7 @@ def make_app(st: State) -> Starlette:
             _jobs.stop_session(s.id)           # 会话没了，它启动的后台任务也一并终止
             st.agent.seen_files.pop(s.id, None)
             st.outputs.drop(s.id)
+            st.artifacts.drop_session(s.id)
             return J({"ok": True})
         if req.method == "PATCH":
             d = await jbody(req)
@@ -686,6 +694,42 @@ def make_app(st: State) -> Starlette:
             return J({"kind": "binary", "truncated": False, "size": size, "mime": mime})
         from .tools.files import decode_bytes
         return J({"kind": "text", "content": decode_bytes(raw)[0], "truncated": size > 200_000, "size": size, "mime": mime})
+
+    # ------------------------------------------------------------ 会话产物（ArtifactStore）
+    @route("/api/artifacts", ["GET"])
+    async def artifacts_list(req: Request) -> Response:
+        sid = req.query_params.get("session_id") or None
+        kind = req.query_params.get("kind") or None
+        limit = int(req.query_params.get("limit") or 200)
+        return J({"artifacts": [a.to_dict() for a in st.artifacts.list(sid, kind=kind, limit=limit)]})
+
+    @route("/api/artifacts/{aid}/meta", ["GET"])
+    async def artifact_meta(req: Request) -> Response:
+        art = st.artifacts.get(req.path_params["aid"])
+        if not art:
+            return bad("artifact 不存在", 404)
+        return J(art.to_dict())
+
+    @route("/api/artifacts/{aid}", ["GET"])
+    async def artifact_download(req: Request) -> Response:
+        art = st.artifacts.get(req.path_params["aid"])
+        if not art:
+            return bad("artifact 不存在", 404)
+        p = st.artifacts.resolve_path(art)
+        if not p or not p.is_file():
+            return bad("artifact 文件缺失", 404)
+        fname = p.name
+        ascii_name = re.sub(r"[^A-Za-z0-9._-]", "_", fname) or f"{art.id}.bin"
+        disp = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(fname, safe='')}"
+        return FileResponse(
+            p,
+            media_type=art.mime or "application/octet-stream",
+            headers={
+                "Content-Disposition": disp,
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+        )
 
     @route("/api/journal", ["GET"])
     async def journal(req: Request) -> Response:

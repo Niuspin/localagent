@@ -722,7 +722,7 @@ flowchart LR
 
 ## 13. 跟踪清单
 
-- [ ] M0 基础设施
+- [x] M0 基础设施
 - [ ] M1 Swarm 核心（A）
 - [ ] M2 Mission 运行时（B）
 - [ ] M3 多模态输入（C-in）

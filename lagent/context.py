@@ -12,6 +12,8 @@ import json
 import re
 from typing import Any, Awaitable, Callable
 
+from .parts import normalize_part, part_summary, parts_to_content
+
 _CJK = re.compile(r"[㐀-鿿぀-ヿ가-힯＀-￯]")
 API_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
 
@@ -26,14 +28,22 @@ def est_text(s: str) -> float:
 def est_msg(m: dict, image_tokens: int = 700) -> float:
     n = 6.0
     c = m.get("content")
+    if c is None and isinstance(m.get("parts"), list):
+        c = m["parts"]
     if isinstance(c, str):
         n += est_text(c)
     elif isinstance(c, list):
         for p in c:
-            if p.get("type") == "text":
+            if not isinstance(p, dict):
+                n += est_text(str(p))
+                continue
+            pt = p.get("type")
+            if pt == "text":
                 n += est_text(p.get("text", ""))
-            elif p.get("type") == "image_url":
+            elif pt in ("image_url", "image"):
                 n += image_tokens
+            else:
+                n += est_text(part_summary(normalize_part(p)))
     for tc in m.get("tool_calls") or []:
         f = tc.get("function", {})
         n += est_text(f.get("name", "")) + est_text(f.get("arguments", "")) + 8
@@ -60,9 +70,25 @@ class Meter:
             self.calib = 0.5 * self.calib + 0.5 * r
 
 
+def _api_content_for(m: dict) -> Any:
+    """确保发给服务端的 content 仅包含 OpenAI 兼容字符串或 text/image_url 分片。"""
+    c = m.get("content")
+    if c is None and isinstance(m.get("parts"), list):
+        return parts_to_content(m["parts"], vision=True)
+    if isinstance(c, list) and any(not isinstance(p, dict) or p.get("type") not in ("text", "image_url") for p in c):
+        return parts_to_content(c, vision=True)
+    return c
+
+
 def api_messages(history: list[dict]) -> list[dict]:
-    """去掉内部字段，只保留服务端认识的键。"""
-    return [{k: v for k, v in m.items() if k in API_KEYS} for m in history]
+    """去掉内部字段，只保留服务端认识的键，并自动降级多模态 parts。"""
+    out = []
+    for m in history:
+        item = {k: v for k, v in m.items() if k in API_KEYS}
+        if "content" in item or isinstance(m.get("parts"), list):
+            item["content"] = _api_content_for(m)
+        out.append(item)
+    return out
 
 
 def _pruned_tool_text(m: dict) -> str:
@@ -85,12 +111,14 @@ def project_api_messages(history: list[dict], prune_upto: int = 0, min_len: int 
     out: list[dict] = []
     for i, m in enumerate(history):
         item = {k: v for k, v in m.items() if k in API_KEYS}
+        c = _api_content_for(m)
+        if "content" in item or isinstance(m.get("parts"), list):
+            item["content"] = c
         if i < limit:
-            c = m.get("content")
             if m.get("role") == "tool" and isinstance(c, str) and len(c) > min_len and not m.get("_pruned"):
                 item["content"] = _pruned_tool_text(m)
-            elif i < img_cutoff and isinstance(c, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in c):
-                item["content"] = [p if p.get("type") != "image_url" else {"type": "text", "text": "[图片已省略]"} for p in c]
+            elif i < img_cutoff and isinstance(c, list) and any(isinstance(p, dict) and p.get("type") in ("image_url", "image") for p in c):
+                item["content"] = [p if p.get("type") not in ("image_url", "image") else {"type": "text", "text": "[图片已省略]"} for p in c]
         out.append(item)
     return out
 
@@ -157,8 +185,8 @@ def prune_old(history: list[dict], keep_recent_tools: int = 4, min_len: int = 50
     cutoff = starts[-2] if len(starts) >= 2 else 0
     for m in history[:cutoff]:
         c = m.get("content")
-        if isinstance(c, list) and any(p.get("type") == "image_url" for p in c):
-            m["content"] = [p if p.get("type") != "image_url" else {"type": "text", "text": "[图片已省略]"} for p in c]
+        if isinstance(c, list) and any(p.get("type") in ("image_url", "image") for p in c if isinstance(p, dict)):
+            m["content"] = [p if not isinstance(p, dict) or p.get("type") not in ("image_url", "image") else {"type": "text", "text": "[图片已省略]"} for p in c]
             saved += 50_000
     return saved
 
@@ -167,8 +195,10 @@ def render_for_summary(history: list[dict], limit_chars: int) -> str:
     lines = []
     for m in history:
         r, c = m.get("role"), m.get("content")
+        if c is None and isinstance(m.get("parts"), list):
+            c = m["parts"]
         if isinstance(c, list):
-            c = " ".join(p.get("text", "[图片]") if p.get("type") == "text" else "[图片]" for p in c)
+            c = " ".join(part_summary(normalize_part(p), omitted_image_text="[图片]") for p in c)
         c = c or ""
         if r == "user":
             lines.append("用户: " + c[:1500])

@@ -674,7 +674,17 @@ class AuditLog:
     def append(self, **fields: Any) -> None:
         with self._lock:
             self._seq += 1
-            body = {"ts": round(time.time(), 3), "seq": self._seq, **fields}
+            body = {
+                "ts": round(time.time(), 3),
+                "seq": self._seq,
+                "kind": fields.get("kind") or fields.get("event", ""),
+                "run_id": fields.get("run_id"),
+                "agent_id": fields.get("agent_id"),
+                "swarm_id": fields.get("swarm_id"),
+                "parent_id": fields.get("parent_id"),
+                "mission_id": fields.get("mission_id"),
+                **fields,
+            }
             e = {**body, "prev": self._last}
             e["hash"] = self._digest(self._last, body)
             with open(self.path, "a", encoding="utf-8") as f:

@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -22,8 +23,12 @@ WEB_DIR = CODE_DIR / "web"
 CONFIG_PATH = ROOT / "config.json"
 SECRETS_PATH = DATA_DIR / "secrets.json"
 
-SECRET_NAMES = ("brave", "google_cse", "google_cx", "tavily", "serper", "compact_api_key", "embed_api_key")
+SECRET_NAMES = (
+    "brave", "google_cse", "google_cx", "tavily", "serper",
+    "compact_api_key", "embed_api_key", "swarm_worker_api_key",
+)
 SEARCH_PROVIDERS = ("duckduckgo", "bing", "baidu", "yahoo", "brave", "google_cse", "searxng", "tavily", "serper")
+_ROLE_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 DEFAULTS: dict[str, Any] = {
     "workspace": "",
@@ -71,10 +76,60 @@ DEFAULTS: dict[str, Any] = {
     "search": {
         "providers": ["duckduckgo", "bing"], "mode": "merge", "max_results": 8,
         "proxy": "", "searxng_url": "", "region": "", "safe": "moderate",
+        "html_scrapers_ack": False,
         "keys": {n: False for n in SECRET_NAMES},
     },
     "web": {"timeout_s": 20, "max_bytes": 3_000_000, "max_chars": 12000},
-    "ui": {"theme": "auto", "font_size": 15},
+    "research": {
+        "mode": "off",
+        "user_agent": "LocalAgentResearch/0.2 (+local-desktop)",
+        "respect_robots": True,
+        "per_domain_rps": 0.5,
+        "per_domain_conc": 2,
+        "max_requests_per_task": 40,
+        "allow_domains": [],
+        "deny_domains": [],
+        "deny_categories": ["adult", "malware", "paywall_bypass"],
+        "cache_ttl_h": 24,
+        "cache_max_mb": 256,
+        "quote_max_chars": 400,
+        "pii_redact": True,
+        "reader_isolation": True,
+    },
+    "swarm": {
+        "enabled": True,
+        "max_agents": "auto",
+        "max_depth": 2,
+        "max_children": 4,
+        "default_budget": {"steps": 120, "wall_s": 600, "tokens": 500_000},
+        "merge_strategy": "queue",
+        "worktree_gc_hours": 24,
+        "role_limits": {"reviewer": 2, "researcher": 4, "coder": 4, "verifier": 2},
+        "worker_endpoint": "",
+        "worker_model": "",
+    },
+    "mission": {
+        "enabled": True,
+        "episode_max_steps": 25,
+        "heartbeat_s": 10,
+        "prevent_sleep": True,
+        "unattended_default": "attended",
+        "budget": {"wall_s": 14400, "tokens": 2_000_000, "steps": 400, "disk_mb": 2048},
+    },
+    "media": {
+        "subprocess_timeout_s": 30,
+        "max_pdf_pages": 50,
+        "max_archive_entries": 500,
+        "html_scripts_default": False,
+    },
+    "skills": {
+        "default_enabled_limit": 14,
+        "auto_route": True,
+    },
+    "ui": {
+        "theme": "auto", "font_size": 15,
+        "motion": "auto", "density": "comfortable", "code_ligatures": False,
+    },
 }
 
 
@@ -128,6 +183,22 @@ def _str_list(path: str, v: Any) -> list[str]:
     return [str(x) for x in v][:200]
 
 
+def _role_limits(path: str, v: Any) -> dict[str, int]:
+    if not isinstance(v, dict):
+        raise _bad(path, v, "(需要角色并发限制字典)")
+    out: dict[str, int] = {}
+    for k, val in list(v.items())[:32]:
+        role = str(k).strip().lower()
+        if not _ROLE_RE.match(role):
+            raise _bad(path, k, "(角色名仅限 lowercase a-z0-9_-)")
+        try:
+            n = int(val)
+        except (TypeError, ValueError):
+            raise _bad(path, val, f"(角色 {role} 上限需为整数)")
+        out[role] = max(1, min(8, n))
+    return out
+
+
 def _tensor_split(path: str, v: Any) -> str:
     s = str(v or "auto").strip()
     if not s or s.lower() == "auto":
@@ -168,7 +239,17 @@ SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "search.mode": _enum("merge", "first"),
     "search.safe": _enum("off", "moderate", "strict"),
     "search.providers": _providers,
+    "research.mode": _enum("off", "ask", "allowlist", "open"),
+    "research.allow_domains": _str_list,
+    "research.deny_domains": _str_list,
+    "research.deny_categories": _str_list,
+    "swarm.max_agents": _auto_int(1, 8),
+    "swarm.merge_strategy": _enum("queue", "manual"),
+    "swarm.role_limits": _role_limits,
+    "mission.unattended_default": _enum("attended", "unattended"),
     "ui.theme": _enum("auto", "light", "dark"),
+    "ui.motion": _enum("auto", "full", "reduced", "off"),
+    "ui.density": _enum("comfortable", "compact"),
 }
 
 RANGES: dict[str, tuple[float, float]] = {
@@ -185,7 +266,19 @@ RANGES: dict[str, tuple[float, float]] = {
     "security.command_timeout_s": (1, 3600), "security.max_file_mb": (1, 2048),
     "security.trash_retention_days": (0, 3650),
     "web.timeout_s": (3, 120), "web.max_bytes": (10_000, 50_000_000), "web.max_chars": (1000, 200_000),
-    "search.max_results": (1, 30), "ui.font_size": (12, 22),
+    "search.max_results": (1, 30),
+    "research.per_domain_rps": (0.1, 5.0), "research.per_domain_conc": (1, 4),
+    "research.max_requests_per_task": (1, 2000), "research.cache_ttl_h": (1, 720),
+    "research.cache_max_mb": (10, 4096), "research.quote_max_chars": (100, 2000),
+    "swarm.max_depth": (1, 3), "swarm.max_children": (1, 8), "swarm.worktree_gc_hours": (1, 720),
+    "swarm.default_budget.steps": (5, 1000), "swarm.default_budget.wall_s": (30, 86400),
+    "swarm.default_budget.tokens": (1000, 10_000_000),
+    "mission.episode_max_steps": (5, 100), "mission.heartbeat_s": (2, 120),
+    "mission.budget.wall_s": (60, 604_800), "mission.budget.tokens": (10_000, 50_000_000),
+    "mission.budget.steps": (10, 5000), "mission.budget.disk_mb": (64, 65536),
+    "media.subprocess_timeout_s": (5, 300), "media.max_pdf_pages": (1, 500), "media.max_archive_entries": (1, 5000),
+    "skills.default_enabled_limit": (1, 50),
+    "ui.font_size": (12, 22),
 }
 
 
@@ -220,7 +313,13 @@ def _merge(base: dict, inc: dict, prefix: str = "", strict: bool = True) -> None
         path = f"{prefix}{k}"
         if path == "search.keys":
             continue  # 密钥单独处理
-        if isinstance(base[k], dict):
+        if path in SPECIAL:
+            try:
+                base[k] = _coerce(path, base[k], v)
+            except ValueError:
+                if strict:
+                    raise
+        elif isinstance(base[k], dict):
             if not isinstance(v, dict):
                 if strict:
                     raise _bad(path, v)
@@ -311,6 +410,14 @@ class Config:
                                 new_secrets.pop(sk, None)
                             else:
                                 new_secrets[sk] = val.strip()
+            sw = clean_partial.get("swarm")
+            if isinstance(sw, dict) and "worker_api_key" in sw:
+                val = sw.pop("worker_api_key")
+                if isinstance(val, str):
+                    if val == "":
+                        new_secrets.pop("swarm_worker_api_key", None)
+                    else:
+                        new_secrets["swarm_worker_api_key"] = val.strip()
             _merge(new, clean_partial)
             keys = (partial.get("search") or {}).get("keys") if isinstance(partial.get("search"), dict) else None
             if keys is not None:
@@ -336,6 +443,8 @@ class Config:
             d.setdefault("agent", {})
             d["agent"]["compact_api_key"] = bool(self.secrets.get("compact_api_key"))
             d["agent"]["embed_api_key"] = bool(self.secrets.get("embed_api_key"))
+            d.setdefault("swarm", {})
+            d["swarm"]["worker_api_key"] = bool(self.secrets.get("swarm_worker_api_key"))
             return d
 
 

@@ -30,6 +30,7 @@ from . import toolcall, toolset
 from .commands import CommandContext, dispatch_command, resolve_context_mentions
 from .config import Config
 from .engine import Engine, EngineError
+from .events import enrich_event
 from .hooks import HookManager
 from .journal import Journal
 from .permissions import PermissionManager
@@ -48,9 +49,21 @@ NEW_TITLE = "新对话"
 
 # ====================================================================== 运行对象
 class Run:
-    def __init__(self, session_id: str):
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        agent_id: str = "main",
+        parent_id: str | None = None,
+        swarm_id: str | None = None,
+        mission_id: str | None = None,
+    ):
         self.id = uuid.uuid4().hex[:16]
         self.session_id = session_id
+        self.agent_id = agent_id or "main"
+        self.parent_id = parent_id
+        self.swarm_id = swarm_id
+        self.mission_id = mission_id
         self.events: list[tuple[int, str, dict]] = []
         self.cond = asyncio.Condition()
         self.finished = False
@@ -66,8 +79,25 @@ class Run:
         self.handles: dict[str, str] = {}         # 工具调用 id → 输出句柄（_exec_tool 写入，_loop 在记录 tool 消息时取走）
         self._loop = asyncio.get_running_loop()
 
+    def audit_ctx(self) -> dict[str, Any]:
+        return {
+            "run_id": self.id,
+            "agent_id": self.agent_id,
+            "parent_id": self.parent_id,
+            "swarm_id": self.swarm_id,
+            "mission_id": self.mission_id,
+        }
+
     def emit(self, event: str, data: dict) -> None:
-        self.events.append((len(self.events) + 1, event, data))
+        payload = enrich_event(
+            event,
+            data,
+            run_id=self.id,
+            agent_id=self.agent_id,
+            swarm_id=self.swarm_id,
+            mission_id=self.mission_id,
+        )
+        self.events.append((len(self.events) + 1, event, payload))
         self._loop.call_soon(lambda: asyncio.ensure_future(self._notify()))
 
     async def _notify(self) -> None:
@@ -156,10 +186,11 @@ def make_title(text: str, files_: list[str]) -> str:
 class Agent:
     def __init__(self, *, cfg: Config, engine: Engine, store: SessionStore, journal: Journal, audit: sec.AuditLog,
                  memory: Any, skills: Any, protected: list[Path], hidden: list[Path], notify: Any = None, mcp: Any = None,
-                 outputs: Any = None):
+                 outputs: Any = None, artifacts: Any = None):
         self.cfg, self.engine, self.store, self.journal, self.audit = cfg, engine, store, journal, audit
         self.memory, self.skills, self.mcp = memory, skills, mcp
         self.outputs = outputs                                # OutputStore | None：大输出落盘（见 outputs.py）
+        self.artifacts = artifacts                            # ArtifactStore | None：多媒体与结构化产物仓储（见 artifacts.py）
         self.protected, self.hidden = protected, hidden
         self.runs: dict[str, Run] = {}
         self.allow_keys: dict[str, set[str]] = {}
@@ -170,6 +201,11 @@ class Agent:
         self._sub_docs_seen: dict[str, set[str]] = {}         # sid → 已注入的子目录指令文件相对路径
         self.router = ModelRouter(self.cfg, self.engine)
         self.notify = notify or (lambda e, d: None)
+
+    @staticmethod
+    def _audit_ctx(run: Any) -> dict[str, Any]:
+        fn = getattr(run, "audit_ctx", None)
+        return fn() if callable(fn) else {}
 
     def _session_mode(self, sess: Session) -> str:
         pm = getattr(sess, "permission_mode", None)
@@ -204,7 +240,12 @@ class Agent:
 
     def start_run(self, sess: Session, text: str, images: list[str], files_: list[str], skills_: list[str]) -> Run:
         self._gc_runs()
-        run = Run(sess.id)
+        run = Run(
+            sess.id,
+            agent_id=getattr(sess, "agent_id", "main") or "main",
+            swarm_id=getattr(sess, "swarm_id", None),
+            mission_id=getattr(sess, "mission_id", None),
+        )
         self.runs[run.id] = run
         sess.active_run = run.id
         run.task = asyncio.create_task(self._execute(run, sess, text, images, files_, skills_))
@@ -385,7 +426,7 @@ class Agent:
                     run.emit("taint", {"tainted": True, "reason": "通过 @ 引入了不可信文件或文档"})
 
             mode = self._session_mode(sess)
-            self.audit.append(event="run", session=sess.id, workspace=ws, mode=mode)
+            self.audit.append(event="run", session=sess.id, workspace=ws, mode=mode, **self._audit_ctx(run))
             self._announce_project_doc(run, sess, ws)
             await self._append_user(run, sess, ctx, text, images, files_, skills_)
             self.store.save(sess)
@@ -420,7 +461,7 @@ class Agent:
             self.store.save(sess)
             stats = run.stats.nonzero()
             if stats:
-                self.audit.append(event="run_stats", session=sess.id, status=status, friction=run.stats.friction, **stats)
+                self.audit.append(event="run_stats", session=sess.id, status=status, friction=run.stats.friction, **stats, **self._audit_ctx(run))
             run.emit("run_end", {"status": status, **({"error": err} if err else {}), **({"stats": stats} if stats else {})})
             await run.finish()
 
@@ -456,7 +497,7 @@ class Agent:
         if doc is None or self._pi_seen.get(sess.id) == doc.digest:
             return
         self._pi_seen[sess.id] = doc.digest
-        self.audit.append(event="project_doc", session=sess.id, name=doc.name, sha=doc.digest, size=doc.size, warning=doc.warning)
+        self.audit.append(event="project_doc", session=sess.id, name=doc.name, sha=doc.digest, size=doc.size, warning=doc.warning, **self._audit_ctx(run))
         if doc.warning:
             run.emit("notice", {"level": "warn", "text": f"工作区里的 {doc.name} {doc.warning}，已忽略，没有加载。"})
         else:
@@ -479,7 +520,7 @@ class Agent:
             except asyncio.TimeoutError:
                 return "（用户未回答）"
         ctx = ToolCtx(cfg=self.cfg, guard=guard, journal=self.journal, session=st, audit=self.audit, vision=self.engine.vision,
-                       memory=self.memory, skills=self.skills, outputs=self.outputs, emit=run.emit, ask=ask, cancel=run.cancel_evt,
+                       memory=self.memory, skills=self.skills, outputs=self.outputs, artifacts=self.artifacts, emit=run.emit, ask=ask, cancel=run.cancel_evt,
                        sandbox_kind=sec.sandbox_info()["kind"])
         ctx.agent = self
         ctx.run = run
@@ -844,7 +885,7 @@ class Agent:
         def finish(status: str, content: str, meta: dict | None = None, dur: int = 0) -> None:
             blk.update(status=status, content=content[:4000], meta=meta or {}, duration_ms=dur, approval=None)
             run.emit("tool_result", {"id": tid, "name": name, "status": status, "content": content[:4000], "meta": meta or {}, "duration_ms": dur})
-            self.audit.append(event="tool", session=sess.id, tool=name, args=sec.summarize_args(args), status=status, tainted=st.tainted)
+            self.audit.append(event="tool", session=sess.id, tool=name, args=sec.summarize_args(args), status=status, tainted=st.tainted, **self._audit_ctx(run))
 
         if tool is None:
             blk["title"] = name
@@ -899,7 +940,7 @@ class Agent:
             pre_hook = await self._get_hook_mgr(ws_curr).run_pre_tool_use(name, args, call_ctx)
             if pre_hook.action == "deny":
                 finish("denied", f"被 PreToolUse 钩子拒绝: {pre_hook.reason}")
-                self.audit.append(event="hook_deny", session=sess.id, tool=name, reason=pre_hook.reason)
+                self.audit.append(event="hook_deny", session=sess.id, tool=name, reason=pre_hook.reason, **self._audit_ctx(run))
                 return f"拒绝: PreToolUse 钩子拒绝了此操作（{pre_hook.reason}）。", []
 
         # ---- 路径与敏感性
@@ -919,7 +960,7 @@ class Agent:
             why = sec.hard_deny_reason(command)
             if why:
                 finish("denied", f"命令被安全规则拒绝（{why}）")
-                self.audit.append(event="hard_deny", session=sess.id, reason=why, command=command[:200])
+                self.audit.append(event="hard_deny", session=sess.id, reason=why, command=command[:200], **self._audit_ctx(run))
                 return f"拒绝: 命令被安全规则禁止（{why}）。请换一种安全的做法。", []
         domain_ok = True
         if eff_kind == "net_fetch":
@@ -948,7 +989,7 @@ class Agent:
             decision = await self._ask(run, call_ctx, blk, tool, args, dec, tainted_eff)
             if decision == "deny":
                 finish("denied", "用户拒绝了此操作")
-                self.audit.append(event="denied", session=sess.id, tool=name, args=sec.summarize_args(args))
+                self.audit.append(event="denied", session=sess.id, tool=name, args=sec.summarize_args(args), **self._audit_ctx(run))
                 return "用户拒绝了此操作。不要重复尝试相同操作；请换个方式或询问用户想怎么做。", []
             if decision == "allow_session" and not sensitive and not tainted_eff and eff_kind in ("write", "exec", "mcp"):
                 st.allow_keys.add(dec.key)
@@ -980,7 +1021,7 @@ class Agent:
             st.tainted = True
             sess.tainted = True
             run.emit("taint", {"tainted": True, "reason": res.taint})
-            self.audit.append(event="taint", session=sess.id, reason=res.taint)
+            self.audit.append(event="taint", session=sess.id, reason=res.taint, **self._audit_ctx(run))
         text = res.content
         cap = self.engine.tuned().tool_cap
         if self.engine.ctx:
@@ -1316,7 +1357,14 @@ class Agent:
             sub_st.sub_mode = "auto_edit" if is_worker else ("verify" if mode == "verify" else "plan")
             sub_st.turn_id = parent_ctx.turn_id
             sub_st.tool_groups = set(parent_ctx.session.tool_groups)
-            sub_run = Run(sub_sid)
+            parent_run = getattr(parent_ctx, "run", None)
+            sub_run = Run(
+                sub_sid,
+                agent_id=f"sub:{sub_sid}",
+                parent_id=getattr(parent_run, "agent_id", "main") if parent_run else "main",
+                swarm_id=getattr(parent_run, "swarm_id", None) if parent_run else None,
+                mission_id=getattr(parent_run, "mission_id", None) if parent_run else None,
+            )
             sub_ctx = self._make_ctx(sub_run, sub_sess, sub_st, eff_ws)
             sub_ctx.agent = self
             sub_ctx.depth = sub_depth

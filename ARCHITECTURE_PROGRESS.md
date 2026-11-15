@@ -60,3 +60,16 @@
 | **跨平台零信任沙箱与可读性 Hook** | **已完成** | `security.py` 收紧 macOS `sandbox-exec` 为最小路径读白名单 + 敏感目录拒绝；新增 Windows Win32 `Job Object` 进程树与 UI 限权（`harden_windows_process` / `release_windows_job`）；`hooks.py` 支持 `tainted=True` 下仅执行显式 `read_only=True` 且经安全白名单校验的只读 Hook；`config.py` / `hooks.py` 热重载与 Bearer 鉴权就绪。 |
 | **Streamable HTTP / Resources / Prompts MCP** | **已完成** | `mcp/` 新增 `HttpMcpSession`（JSON + SSE + `Mcp-Session-Id`，严格不纳入本地容器豁免）、`Header` 密钥隔离、`$defs`/`$ref`/`anyOf`/`oneOf` Schema 适配、`roots/list`、Resources / Prompts 浏览读取 API 及 `mcp` 全局 SSE 热更新。 |
 | **Model Hub、ROCm 引导与扩展评测** | **已完成** | `lagent/hub.py` + `settings.js` 实现硬件匹配推荐、镜像切换与断点续传；`bootstrap.py` 支持 Linux AMD ROCm；`launcher.py` 支持 `--offline`；`appwindow.py` + `/api/fs/pick` 接入 OS 原生目录选择弹窗；`tests/eval/run_eval.py` 与 `tests/test_phase2_3.py` 覆盖多轮重构、自愈调试与红队防注入场景。 |
+
+---
+
+## v0.2.0 迭代进程追加记录
+
+> 完整跟踪看板见根目录 [ITERATION_PROGRESS.md](./ITERATION_PROGRESS.md)，总规划见 [ITERATION_PLAN_2026-11-15_2140.md](./ITERATION_PLAN_2026-11-15_2140.md)。
+
+### `[2026-11-15 22:05 +08:00]` M0 基础设施（已完成）
+- 完成 Session Schema v1 → v2 自动迁移、`parts` 多模态结构化与上下文降级、以及首次写回前 `.json.bak` 自动备份（`lagent/parts.py`、`lagent/sessions.py`、`lagent/context.py`）。
+- 完成统一运行/广播事件元数据结构 `{ts, kind, run_id, agent_id, swarm_id, mission_id}` 与 `AuditLog` 上下文字段扩展，保持 SSE `Last-Event-ID` 序号与审计哈希链校验兼容（`lagent/events.py`、`lagent/loop.py`、`lagent/server.py`、`lagent/security.py`）。
+- 完成 `ArtifactStore`（`data/artifacts/<sid>/` + SQLite WAL 索引、防路径穿越、配额淘汰与会话清理）及 `/api/artifacts` 只读安全下载接口（`lagent/artifacts.py`、`lagent/server.py`、`docs/API.md`）。
+- 补齐 `swarm` / `mission` / `media` / `research` / `skills` / `ui` 扩展配置校验与 `worker_api_key` 密钥隔离（`lagent/config.py`、`lagent/paths.py`），并建立 `THIRD_PARTY_LICENSES.md` 与 `tests/fixtures/` + `tests/test_m0_infra.py`。
+- 全量验证：`python -m pytest tests -q -p no:cacheprovider` -> `405 passed, 3 skipped`；前端 JS 语法检查通过。
