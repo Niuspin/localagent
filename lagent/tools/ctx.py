@@ -22,6 +22,8 @@ class SessionState:
     loaded_skills: set = field(default_factory=set)
     tool_groups: set = field(default_factory=set)       # 已加载的扩展工具组（见 toolset.py；会话内只增不减）
     seen: dict = field(default_factory=dict)            # 相对路径 → 内容 sha256：本会话读过/写过的文本文件（先读再改）
+    shell_cwd: str = ""                                 # 会话级终端当前相对工作目录
+    shell_env: dict = field(default_factory=dict)       # 会话级安全终端环境变量覆盖
 
 
 @dataclass

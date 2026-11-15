@@ -13,11 +13,17 @@
   P.pickWorkspace = function () {
     var cur = curWs(), path = cur, parent = '', sep = '/';
     var listBox = el('div', { class: 'browse-list' }), pathInp = el('input', { class: 'inp wide', placeholder: '输入或选择文件夹路径', spellcheck: false });
+    var sysBtn = btn('系统选择…', function () {
+      sysBtn.disabled = true;
+      LA.post('/api/fs/pick', { initial_dir: path || cur }).then(function (r) {
+        if (r && !r.cancelled && r.path) load(r.path);
+      }).catch(LA.fail).then(function () { sysBtn.disabled = false; });
+    }, 'ghost', '调起系统原生文件夹选择框');
     var err = el('div', { class: 'hint2', style: { color: 'var(--danger)', minHeight: '1.2em' } });
     var ok = el('button', { class: 'btn primary', type: 'button', text: '选择此文件夹' });
     var m = LA.modal({ title: '选择工作区', width: 560, body: [
       el('div', { class: 'hint2', text: 'Agent 只能读写这个文件夹内的文件，也只能在这里运行命令。不能选择磁盘根目录或用户主目录本身。' }),
-      pathInp, listBox, err], footer: [btn('取消', function () { m.close(); }), ok] });
+      el('div', { class: 'toolbar' }, pathInp, sysBtn), listBox, err], footer: [btn('取消', function () { m.close(); }), ok] });
     function load(p) {
       LA.get('/api/fs/browse?path=' + encodeURIComponent(p || '')).then(function (r) {
         path = r.path; parent = r.parent; sep = r.sep || '/'; pathInp.value = r.path || '';
@@ -173,10 +179,13 @@
 
   function drawChanges() {
     var gHead = el('div', { class: 'dr-sec', style: { display: 'none' } }), gBox = el('div');
+    var cpHead = el('div', { class: 'dr-sec', style: { display: 'none' } }), cpBox = el('div');
     var jBox = el('div'), tBox = el('div');
     drawBody.append(
       gHead,
       gBox,
+      cpHead,
+      cpBox,
       el('div', { class: 'dr-sec' }, el('span', { text: '本会话的文件变更' })),
       jBox,
       el('div', { class: 'dr-sec' }, el('span', { text: '回收站' }),
@@ -219,6 +228,20 @@
             diffBtn
           );
           gBox.append(row, diffPane);
+        });
+      }).catch(function () {});
+    }
+    if (sid()) {
+      LA.get('/api/sessions/' + encodeURIComponent(sid()) + '/checkpoints').then(function (cps) {
+        if (!cps || !cps.length) return;
+        cpHead.style.display = '';
+        cpHead.append(el('span', { text: '按回合快照' }), el('span', { class: 'hint2', text: cps.length + ' 轮' }));
+        cps.slice(0, 12).forEach(function (cp) {
+          cpBox.appendChild(el('div', { class: 'jr-item', title: (cp.files || []).join(', ') },
+            el('span', { class: 'badge', text: 'T' + cp.turn_id }),
+            el('span', { class: 'tx', text: (cp.files || []).slice(0, 3).join(', ') + ((cp.files || []).length > 3 ? ' 等' + cp.files.length + '个' : '') }),
+            el('span', { class: 'tm', text: LA.fmtTime(cp.ts) })
+          ));
         });
       }).catch(function () {});
     }

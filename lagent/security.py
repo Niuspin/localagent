@@ -372,9 +372,105 @@ def sandbox_info() -> dict:
     if _probe_bwrap():
         return {"available": True, "kind": "bwrap", "note": "bubblewrap：仅工作区可写，主目录/密钥不可见，默认断网"}
     if sys.platform == "darwin" and shutil.which("sandbox-exec"):
-        return {"available": True, "kind": "sandbox-exec", "note": "macOS sandbox-exec：仅工作区可写，默认禁止联网（该后端未经充分测试）"}
-    why = "Windows 无内置轻量沙箱" if IS_WIN else "未安装 bubblewrap（apt install bubblewrap）或用户命名空间被禁用"
-    return {"available": False, "kind": "none", "note": f"无 OS 级沙箱（{why}）：所有命令都需要人工审批，且不会被自动放行"}
+        return {"available": True, "kind": "sandbox-exec", "note": "macOS sandbox-exec：仅工作区及系统白名单可读、工作区可写，默认禁止联网"}
+    if IS_WIN:
+        return {"available": False, "kind": "none", "hardening": "win32-job",
+                "note": "无文件系统沙箱（Windows 已启用 Job Object 进程上限与剪贴板/UI 隔离；命令仍需审批）"}
+    return {"available": False, "kind": "none",
+            "note": "无 OS 级沙箱（未安装 bubblewrap（apt install bubblewrap）或用户命名空间被禁用）：所有命令都需要人工审批，且不会被自动放行"}
+
+
+_WIN_JOBS: dict[int, int] = {}
+_WIN_JOBS_LOCK = threading.Lock()
+
+
+def harden_windows_process(pid: int) -> bool:
+    """Windows 纵深防御：将子进程纳入匿名 Win32 Job Object，启用退随关闭、并发子进程数上限及基础 UI/剪贴板隔离。"""
+    if not IS_WIN or not pid:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes as wt
+
+        class _IO(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_uint64) for n in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+            )]
+
+        class _BasicLimit(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wt.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wt.DWORD),
+                ("Affinity", ctypes.c_size_t), ("PriorityClass", wt.DWORD), ("SchedulingClass", wt.DWORD),
+            ]
+
+        class _ExtLimit(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimit), ("IoInfo", _IO),
+                ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        class _UiLimit(ctypes.Structure):
+            _fields_ = [("UIRestrictionsClass", wt.DWORD)]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wt.HANDLE
+        k32.OpenProcess.restype = wt.HANDLE
+        k32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+        k32.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
+        k32.CloseHandle.argtypes = [wt.HANDLE]
+
+        hjob = k32.CreateJobObjectW(None, None)
+        if not hjob:
+            return False
+        ext = _ExtLimit()
+        ext.BasicLimitInformation.LimitFlags = 0x2000 | 0x0008  # KILL_ON_JOB_CLOSE | ACTIVE_PROCESS
+        ext.BasicLimitInformation.ActiveProcessLimit = 64
+        ui = _UiLimit(0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0040 | 0x0080)
+        hproc = k32.OpenProcess(0x0100 | 0x0001, False, int(pid))
+        if not hproc:
+            k32.CloseHandle(hjob)
+            return False
+        try:
+            k32.SetInformationJobObject(hjob, 9, ctypes.byref(ext), ctypes.sizeof(ext))
+            k32.SetInformationJobObject(hjob, 4, ctypes.byref(ui), ctypes.sizeof(ui))
+            if not k32.AssignProcessToJobObject(hjob, hproc):
+                k32.CloseHandle(hjob)
+                return False
+        finally:
+            k32.CloseHandle(hproc)
+        with _WIN_JOBS_LOCK:
+            old = _WIN_JOBS.pop(int(pid), None)
+            _WIN_JOBS[int(pid)] = int(hjob)
+        if old:
+            k32.CloseHandle(wt.HANDLE(old))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def release_windows_job(pid: int) -> None:
+    """关闭子进程关联的 Job Handle（进程结束后调用，触发 KILL_ON_JOB_CLOSE 清理残余孙进程）。"""
+    if not IS_WIN or not pid:
+        return
+    with _WIN_JOBS_LOCK:
+        hjob = _WIN_JOBS.pop(int(pid), None)
+    if hjob:
+        try:
+            import ctypes
+            from ctypes import wintypes as wt
+            k32 = ctypes.WinDLL("kernel32", use_last_error=False)
+            k32.CloseHandle.argtypes = [wt.HANDLE]
+            k32.CloseHandle(wt.HANDLE(hjob))
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _sbpl_esc(s: str) -> str:
+    return str(s).replace("\\", "\\\\").replace('"', '\\"')
 
 
 _SAFE_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ", "SYSTEMROOT", "COMSPEC", "PATHEXT", "WINDIR",
@@ -418,13 +514,23 @@ def wrap_in_sandbox(argv: list[str], workspace: Path, allow_net: bool, home: Pat
         return a + argv, "bwrap"
     if sys.platform == "darwin" and shutil.which("sandbox-exec"):
         h = os.path.expanduser("~")
-        deny = " ".join(f'(subpath "{h}/{d}")' for d in (".ssh", ".aws", ".gnupg", ".kube", ".config", ".docker", "Library/Keychains"))
+        sh = sandbox_home or str(home)
+        ro_sys = ("/System", "/usr", "/bin", "/sbin", "/Library", "/Applications", "/opt",
+                  "/etc", "/private/etc", "/private/var/db", "/private/var/folders", "/private/tmp", "/tmp", "/dev")
+        ro_paths = [*ro_sys, str(workspace), sh, *(str(d) for d in extra_ro), *(str(d) for d in extra_rw)]
+        rw_paths = [str(workspace), sh, "/private/tmp", "/private/var/folders", *(str(d) for d in extra_rw)]
+        ro_rules = " ".join(f'(subpath "{_sbpl_esc(p)}")' for p in ro_paths if p)
+        rw_rules = " ".join(f'(subpath "{_sbpl_esc(p)}")' for p in rw_paths if p)
+        deny_subs = " ".join(
+            f'(subpath "{_sbpl_esc(h)}/{d}")'
+            for d in (".ssh", ".aws", ".gnupg", ".kube", ".config", ".docker", ".localagent", "Library/Keychains")
+        )
         prof = ("(version 1)(deny default)(allow process-exec)(allow process-fork)(allow signal (target self))"
-                "(allow sysctl-read)(allow mach-lookup)(allow ipc-posix-shm)(allow file-read*)"
-                f"(deny file-read* {deny})"
-                f'(allow file-write* (subpath "{workspace}") ' + " ".join(f'(subpath "{d}")' for d in extra_rw) +
-                f' (subpath "/private/tmp") (subpath "/private/var/folders") (subpath "{home}")'
-                ' (literal "/dev/null") (literal "/dev/tty"))' + ("(allow network*)" if allow_net else "(deny network*)"))
+                "(allow sysctl-read)(allow mach-lookup)(allow ipc-posix-shm)"
+                f'(allow file-read-metadata) (allow file-read* (literal "/") {ro_rules})'
+                f"(deny file-read* {deny_subs})"
+                f'(allow file-write* {rw_rules} (literal "/dev/null") (literal "/dev/tty"))'
+                + ("(allow network*)" if allow_net else "(deny network*)"))
         return ["sandbox-exec", "-p", prof] + argv, "sandbox-exec"
     return argv, "none"
 

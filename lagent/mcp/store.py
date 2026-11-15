@@ -18,6 +18,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .. import security as sec
 from ..journal import atomic_write
@@ -31,7 +32,7 @@ MASK = "••••••"
 @dataclass
 class ServerConfig:
     name: str
-    command: list[str]
+    command: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
     sandbox: str = "auto"
@@ -41,12 +42,17 @@ class ServerConfig:
     trust_results: bool = False
     timeout_s: int = 120
     idle_s: int = 600
+    transport: str = "stdio"          # stdio | http
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
 
     def public(self) -> dict:
         d = asdict(self)
         d["env_keys"] = sorted(self.env)
         d.pop("env")
-        d["command_line"] = shlex.join(self.command) if not sec.IS_WIN else " ".join(self.command)
+        d["header_keys"] = sorted(self.headers)
+        d.pop("headers")
+        d["command_line"] = (shlex.join(self.command) if not sec.IS_WIN else " ".join(self.command)) if self.command else ""
         return d
 
 
@@ -123,10 +129,31 @@ class McpStore:
                          enabled=base.enabled if base else True, sandbox=base.sandbox if base else "auto",
                          network=base.network if base else False, workspace=base.workspace if base else False,
                          readonly_paths=list(base.readonly_paths) if base else [], trust_results=base.trust_results if base else False,
-                         timeout_s=base.timeout_s if base else 120, idle_s=base.idle_s if base else 600)
+                         timeout_s=base.timeout_s if base else 120, idle_s=base.idle_s if base else 600,
+                         transport=base.transport if base else "stdio", url=base.url if base else "",
+                         headers=dict(base.headers) if base else {})
+        if "transport" in patch:
+            tr = str(patch["transport"] or "").strip().lower()
+            if tr not in ("stdio", "http"):
+                raise ValueError("transport 只能是 stdio 或 http")
+            c.transport = tr
+        elif "url" in patch and patch["url"] and "command" not in patch and not c.command:
+            c.transport = "http"
+        if "url" in patch:
+            u = str(patch["url"] or "").strip()
+            if u:
+                sp = urlsplit(u)
+                if sp.scheme not in ("http", "https") or not sp.hostname or sp.username or sp.password or len(u) > 2000 or any(ch.isspace() for ch in u):
+                    raise ValueError("HTTP MCP URL 不合法（需为 http:// 或 https://，且不含空格或内嵌凭据）")
+            c.url = u
+        if "headers" in patch:
+            c.headers = self._headers(patch["headers"], c.headers)
         if "command" in patch:
-            c.command = parse_command(patch["command"])
-        if not c.command:
+            c.command = parse_command(patch["command"]) if patch["command"] else []
+        if c.transport == "http":
+            if not c.url:
+                raise ValueError("HTTP 传输模式需要提供服务器 url")
+        elif not c.command:
             raise ValueError("需要提供启动命令 command")
         if "enabled" in patch:
             c.enabled = _bool("enabled", patch["enabled"])
@@ -146,6 +173,26 @@ class McpStore:
         if "readonly_paths" in patch:
             c.readonly_paths = self._paths(patch["readonly_paths"])
         return c
+
+    @staticmethod
+    def _headers(v: Any, old: dict[str, str]) -> dict[str, str]:
+        if not isinstance(v, dict):
+            raise ValueError("headers 需要是对象")
+        out: dict[str, str] = {}
+        for k, val in v.items():
+            ks = str(k).strip()
+            if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", ks):
+                raise ValueError(f"HTTP 请求头名称不合法: {k!r}")
+            if val is None or val == MASK:
+                if ks in old:
+                    out[ks] = old[ks]
+                continue
+            if not isinstance(val, str) or len(val) > 4000 or any(c in val for c in ("\r", "\n", "\x00")):
+                raise ValueError(f"HTTP 请求头 {ks} 的值不合法")
+            out[ks] = val
+        if len(out) > 30:
+            raise ValueError("HTTP 请求头数量过多")
+        return out
 
     @staticmethod
     def _env(v: Any, old: dict[str, str]) -> dict[str, str]:

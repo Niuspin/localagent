@@ -177,15 +177,19 @@ async def delegate_task(ctx: ToolCtx, a: dict) -> ToolResult:
     if depth >= 1:
         return err("子代理不能再派生子代理（已达到最大嵌套深度 1）")
 
-    mode = a.get("mode") if a.get("mode") in ("explore", "plan", "verify") else "explore"
-    max_steps = max(1, min(int(a.get("max_steps") or 8), 12))
+    mode = a.get("mode") if a.get("mode") in ("explore", "plan", "verify", "worker") else "explore"
+    max_steps = max(1, min(int(a.get("max_steps") or 8), 16))
+    apply_changes = bool(a.get("apply", True)) if mode == "worker" else False
 
     if ctx.emit:
         ctx.emit("notice", {"level": "info", "text": f"[子代理:{mode}] 开始处理任务: {prompt[:60]}…"})
 
     agent = getattr(ctx, "agent", None)
     if agent and hasattr(agent, "run_subagent"):
-        res = await agent.run_subagent(ctx, prompt=prompt, mode=mode, max_steps=max_steps)
+        try:
+            res = await agent.run_subagent(ctx, prompt=prompt, mode=mode, max_steps=max_steps, apply_changes=apply_changes)
+        except TypeError:
+            res = await agent.run_subagent(ctx, prompt=prompt, mode=mode, max_steps=max_steps)
         if ctx.emit:
             ctx.emit("notice", {"level": "info", "text": f"[子代理:{mode}] 子任务执行完毕"})
         return ToolResult(res)
@@ -197,6 +201,13 @@ async def delegate_task(ctx: ToolCtx, a: dict) -> ToolResult:
     return ToolResult(f"[子代理调研总结 · 模式={mode}]\n已针对任务「{prompt}」完成初步探索，未发现异常。")
 
 
+async def delegate_preview(ctx: ToolCtx, a: dict) -> dict | None:
+    if a.get("mode") != "worker":
+        return None
+    apply_str = "并在完成后将改动合并回工作区（记录快照可撤销）" if a.get("apply", True) else "完成后仅返回统一 diff（不改主工作区）"
+    return {"kind": "text", "text": f"模式: worker（独立 Git Worktree 沙箱分支）\n动作: 在隔离工作树执行代码修改/测试，{apply_str}。\n\n任务:\n{a.get('prompt', '')}"}
+
+
 if "delegate_task" not in toolset.EXT_GROUPS.get("extras", ()):
     toolset.EXT_GROUPS["extras"] = (*toolset.EXT_GROUPS["extras"], "delegate_task", "spawn_agent")
     toolset._OF["delegate_task"] = "extras"
@@ -205,14 +216,17 @@ if "delegate_task" not in toolset.EXT_GROUPS.get("extras", ()):
 for name in ("delegate_task", "spawn_agent"):
     register(Tool(
         name,
-        "派生一个专注的只读子代理（Subagent）去调研代码、制定方案或执行验证。子代理独立运行，完成后返回精简摘要报告。",
+        "派生独立子代理（Subagent）执行调研（explore/plan/verify）或在隔离 Git Worktree 中并行改动代码（worker）。完成后返回摘要或补丁。",
         obj({
             "prompt": P("string", "子任务的具体指令或调研问题"),
-            "mode": P("string", "运行模式：explore（只读调研，默认）、plan（方案规划）、verify（检查验证）", enum=["explore", "plan", "verify"]),
-            "max_steps": P("integer", "子代理最大执行步数（1-12，默认 8）"),
+            "mode": P("string", "运行模式：explore（只读调研，默认）、plan（方案规划）、verify（检查验证）、worker（Git Worktree 隔离编码并生成补丁）",
+                      enum=["explore", "plan", "verify", "worker"]),
+            "max_steps": P("integer", "子代理最大执行步数（1-16，默认 8）"),
+            "apply": P("boolean", "worker 模式下完成后是否将干净改动写回主工作区（默认 true）"),
         }, ["prompt"]),
         delegate_task,
         "read",
         group="extras",
-        title=lambda a: f"子代理任务: {a.get('prompt', '')[:40]}",
+        title=lambda a: f"子代理({a.get('mode') or 'explore'}): {a.get('prompt', '')[:40]}",
+        preview=delegate_preview,
     ))

@@ -61,6 +61,19 @@
   }
   function sec(title) { return el('h4', { text: title }); }
   function btn(text, fn, cls) { return el('button', { class: 'btn sm ' + (cls || ''), text: text, on: { click: fn } }); }
+  function secretField(label, path, tabName, hint) {
+    var isSet = !!LA.cfg(path, false);
+    var i = el('input', { class: 'inp', type: 'password', autocomplete: 'off', placeholder: isSet ? '已设置（留空保持不变）' : '未设置', spellcheck: false });
+    i.addEventListener('change', function () {
+      if (!i.value.trim()) return;
+      LA.cfgSet(path, i.value.trim(), { immediate: true });
+      i.value = '';
+      LA.flushConfig().then(function () { show(tabName); });
+    });
+    var ctl = [i];
+    if (isSet) ctl.push(btn('清除', function () { LA.cfgSet(path, '', { immediate: true }); LA.flushConfig().then(function () { show(tabName); }); }, 'ghost'));
+    return F(label, ctl, hint);
+  }
   function banner(kind, text, action) { return el('div', { class: 'banner ' + kind }, el('span', { text: text }), action || null); }
 
   function later(fn, ms) { var t = setInterval(fn, ms); timers.push(t); return t; }
@@ -255,11 +268,77 @@
     adv.appendChild(F('显存预留 (MB)', num('engine.vram_reserve_mb', { min: 0, step: 128 })));
     adv.appendChild(F('并发推理槽位 (-np)', num('engine.slots', { min: 1, max: 8 }), '并行请求槽位数，默认 1 专注单任务最大上下文；多任务可调为 2~4。'));
     adv.appendChild(F('推理思考格式', sel('engine.reasoning_format', [['auto', '自动'], ['deepseek', 'deepseek'], ['none', 'none（不拆分标签）']]), '控制 llama-server 的 --reasoning-format 参数。'));
+    adv.appendChild(F('多卡权重拆分 (--tensor-split)', txt('engine.tensor_split', { ph: 'auto 或 24,16' }), '多 GPU 环境下按显存比例权重拆分，例如 24,16。'));
+    adv.appendChild(F('多卡拆分模式 (--split-mode)', sel('engine.split_mode', [['auto', '自动'], ['layer', '按层 (layer)'], ['row', '按张量行 (row)'], ['none', '单卡 (none)']]) ));
     adv.appendChild(F('投机解码低命中降级', sw('engine.auto_disable_bad_spec', '当 Draft 接受率过低时自动关闭投机解码')));
     var extra = el('input', { class: 'inp wide', value: (LA.cfg('engine.extra_args', []) || []).join(' '), placeholder: '例如 --no-mmap --cache-reuse 256', spellcheck: false });
     extra.addEventListener('change', function () { LA.cfgSet('engine.extra_args', extra.value.trim() ? extra.value.trim().split(/\s+/) : []); });
     adv.appendChild(F('额外参数', extra, '--host / --port / --api-key / -m 等安全相关参数会被拒绝。'));
     pane.appendChild(adv);
+
+    pane.appendChild(sec('模型 Hub（硬件推荐与断点下载）'));
+    var mirrorSel = el('select', { class: 'inp' },
+      el('option', { value: 'official', text: '官方源 (huggingface.co)' }),
+      el('option', { value: 'hf-mirror', text: '国内镜像 (hf-mirror.com)' })
+    );
+    var hubBox = el('div', { class: 'hub-list' }, el('div', { class: 'hint2', text: '正在匹配硬件推荐模型…' }));
+    var FIT_LABEL = { best: '最佳适配', good: '流畅可用', cpu_slow: 'CPU 混合', too_large: '超出显存' };
+    var hubData = null;
+    function renderHub() {
+      if (!hubBox.isConnected || !hubData) return;
+      LA.clear(hubBox);
+      if (hubData.offline) hubBox.appendChild(banner('info', '当前处于离线模式（--offline），仅展示推荐清单，已禁用在线下载。'));
+      var dlMap = {};
+      (hubData.downloads || []).forEach(function (d) { dlMap[d.file] = d; });
+      (hubData.models || []).forEach(function (m) {
+        var dl = dlMap[m.file];
+        var right = [];
+        if (m.installed || (dl && dl.status === 'done')) {
+          right.push(el('span', { class: 'badge moe', text: '已就绪' }));
+        } else if (dl && dl.status === 'downloading') {
+          right.push(el('span', { class: 'hint2', text: (dl.pct || 0) + '%' }));
+          right.push(btn('暂停', function () { LA.post('/api/hub/downloads/' + dl.id + '/cancel').then(loadHub).catch(LA.fail); }, 'ghost'));
+        } else if (!hubData.offline) {
+          var bText = dl && dl.status === 'cancelled' ? '继续下载' : '下载 GGUF';
+          right.push(btn(bText, function () {
+            LA.post('/api/hub/download', { id: m.id, mirror: mirrorSel.value }).then(loadHub).catch(LA.fail);
+          }, 'primary'));
+        }
+        var row = el('div', { class: 'hub-row' },
+          el('div', { class: 'hub-meta' },
+            el('b', { text: m.name }),
+            el('span', { class: 'badge', text: FIT_LABEL[m.fit] || m.fit }),
+            el('small', { text: m.size_gb + ' GB · 建议显存 ' + m.vram_min_gb + ' GB · ' + (m.tags || []).join(' / ') }),
+            dl && dl.error ? el('div', { class: 'mcp-err', text: dl.error }) : null
+          ),
+          el('div', { class: 'toolbar' }, right)
+        );
+        hubBox.appendChild(row);
+      });
+    }
+    function loadHub() {
+      LA.get('/api/hub/recommend').then(function (r) { hubData = r; renderHub(); }).catch(function () {
+        if (hubBox.isConnected) { LA.clear(hubBox); hubBox.appendChild(el('div', { class: 'hint2', text: '无法获取推荐清单。' })); }
+      });
+    }
+    if (!LA._hubBound) {
+      LA._hubBound = true;
+      LA.bus.on('hub', function (job) {
+        if (LA._hubCur && LA._hubCur.isConnected && hubData) {
+          var list = hubData.downloads || [];
+          var found = false;
+          for (var i = 0; i < list.length; i++) { if (list[i].id === job.id) { list[i] = job; found = true; break; } }
+          if (!found) list.push(job);
+          hubData.downloads = list;
+          LA._hubRedraw && LA._hubRedraw();
+        }
+      });
+    }
+    LA._hubCur = hubBox;
+    LA._hubRedraw = renderHub;
+    pane.appendChild(F('下载源镜像', [mirrorSel, btn('刷新推荐', loadHub, 'ghost')], '支持 HTTP Range 断点续传，临时 .part 保留在 models/。'));
+    pane.appendChild(hubBox);
+    loadHub();
 
     pane.appendChild(sec('日志'));
     pane.appendChild(logBox);
@@ -273,6 +352,7 @@
   function tabGen() {
     pane.appendChild(sec('采样'));
     pane.appendChild(F('思考模式', sel('generation.thinking', [['auto', '自动（模型默认）'], ['on', '开启'], ['off', '关闭']]), '推理模型会先“想”再答：更准但更慢。关闭可明显加快简单任务。'));
+    pane.appendChild(F('思考预算 (reasoning_budget)', num('generation.reasoning_budget', { min: -1, max: 32768, step: 256 }), '-1 = 不限制；0 = 禁用思考；正数 = 思考阶段 Token 上限。'));
     pane.appendChild(F('temperature', num('generation.temperature', { float: true, step: 0.05, min: 0, max: 2 })));
     pane.appendChild(F('top_p', num('generation.top_p', { float: true, step: 0.05, min: 0, max: 1 })));
     pane.appendChild(F('top_k', num('generation.top_k', { min: 0 })));
@@ -290,8 +370,16 @@
     pane.appendChild(F('子代理步数上限', num('agent.subagent_max_steps', { min: 1, max: 30 }), 'delegate_task 只读子代理的最大推理步数。'));
     pane.appendChild(F('工作区 Hooks', sw('agent.hooks_enabled', '启用 .localagent/hooks.json 生命周期钩子')));
     pane.appendChild(F('细粒度权限规则', sw('agent.granular_permissions', '加载 .localagent/settings.json 的 allow/ask/deny 规则')));
+    pane.appendChild(F('超长输出落盘 (offload_outputs)', sw('agent.offload_outputs', '将超长工具输出保存为临时文件按需读取，避免撑爆上下文')));
+    pane.appendChild(F('编辑后自动检查', sw('agent.verify_after_edit', '修改代码后自动触发工作区验证提示或命令')));
+    pane.appendChild(F('编辑后验证命令', txt('agent.verify_command', { wide: true, ph: '例如 pytest -q 或 ruff check .' }), '配合“编辑后自动检查”使用，留空仅运行语法诊断。'));
+    pane.appendChild(F('摘要外部协议', sel('agent.compact_provider', [['auto', '自动探测'], ['openai', 'OpenAI /chat/completions'], ['anthropic', 'Anthropic /v1/messages']])));
     pane.appendChild(F('摘要外部模型端点（可选）', txt('agent.compact_endpoint', { wide: true, ph: '例如 http://127.0.0.1:11434/v1/chat/completions' }), '留空则由当前主模型做上下文压缩；填写后可路由到轻量副模型接口。'));
     pane.appendChild(F('摘要外部模型名（可选）', txt('agent.compact_model', { wide: true, ph: '例如 qwen2.5:1.5b' })));
+    pane.appendChild(secretField('摘要外部 API Key', 'agent.compact_api_key', 'gen', '单独保存在 data/secrets.json，从不回显。'));
+    pane.appendChild(F('向量嵌入端点（可选）', txt('agent.embed_endpoint', { wide: true, ph: '留空使用本地内置哈希向量 + BM25 混合检索' }), '可填 OpenAI /v1/embeddings 兼容接口提升长记忆检索质量。'));
+    pane.appendChild(F('向量嵌入模型名', txt('agent.embed_model', { wide: true, ph: '例如 text-embedding-3-small' })));
+    pane.appendChild(secretField('向量嵌入 API Key', 'agent.embed_api_key', 'gen'));
     pane.appendChild(F('追加系统提示', txt('agent.system_prompt_extra', { area: true, rows: 5 }), '写入你的偏好或规则，例如“回答用中文”“改文件前先说明计划”。会放进系统提示的末尾。', 'stack'));
   }
 

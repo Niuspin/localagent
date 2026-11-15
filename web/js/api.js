@@ -73,7 +73,20 @@
 
   /* ---------- 状态刷新 ---------- */
   LA.refreshState = function () {
-    return LA.get('/api/state').then(function (s) { LA.S.state = s; LA.bus.emit('state', s); return s; });
+    var q = LA.S.cur ? ('?session_id=' + encodeURIComponent(LA.S.cur.id)) : '';
+    return LA.get('/api/state' + q).then(function (s) { LA.S.state = s; LA.bus.emit('state', s); return s; });
+  };
+  LA.setSessionMode = function (mode) {
+    if (LA.S.cur && LA.S.cur.id) {
+      return LA.patch('/api/sessions/' + LA.S.cur.id, { permission_mode: mode || '' }).then(function (v) {
+        if (LA.S.cur && LA.S.cur.id === v.id) LA.S.cur.permission_mode = v.permission_mode;
+        if (LA.S.state) LA.S.state.permission_mode = v.permission_mode || LA.cfg('agent.permission_mode', 'ask');
+        LA.bus.emit('sessionmeta', v);
+        return v;
+      }).catch(LA.fail);
+    }
+    LA.cfgSet('agent.permission_mode', mode || 'ask', { immediate: true });
+    return Promise.resolve();
   };
   LA.refreshConfig = function () {
     return LA.get('/api/config').then(function (r) { LA.S.config = r.config; LA.bus.emit('config', r.config); return r.config; });

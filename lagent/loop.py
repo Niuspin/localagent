@@ -171,6 +171,12 @@ class Agent:
         self.router = ModelRouter(self.cfg, self.engine)
         self.notify = notify or (lambda e, d: None)
 
+    def _session_mode(self, sess: Session) -> str:
+        pm = getattr(sess, "permission_mode", None)
+        if pm in ("ask", "auto_edit", "plan", "auto"):
+            return pm
+        return self.cfg.get("agent", "permission_mode", default="ask")
+
     def _get_perm_mgr(self, ws: str) -> PermissionManager:
         mgr = self._perm_mgrs.get(ws)
         if mgr is None:
@@ -299,7 +305,9 @@ class Agent:
         if sess.title == NEW_TITLE and cfg.get("agent", "auto_title", default=True):
             sess.title = make_title(text, files_)
         st = SessionState(sess.id, sess.tainted, sess.nonce, sess.todos, set(sess.user_domains),
-                          self.allow_keys.setdefault(sess.id, set()))
+                          self.allow_keys.setdefault(sess.id, set()),
+                          shell_cwd=getattr(sess, "shell_cwd", ""),
+                          shell_env=dict(getattr(sess, "shell_env", {}) or {}))
         st.turn_id = run.id
         st.depth = 0
         for u in _URL_RE.findall(text):
@@ -342,6 +350,7 @@ class Agent:
                     if cmd_res.action == "clear":
                         sess.history.clear()
                         sess.ui.clear()
+                        sess.kv_prune_upto = 0
                     elif cmd_res.action == "compact":
                         sess.history.append({"role": "user", "content": text})
                         sess.history.append({"role": "assistant", "content": cmd_res.text})
@@ -352,6 +361,7 @@ class Agent:
                     elif cmd_res.action == "set_mode":
                         mode_val = cmd_res.data.get("mode")
                         if mode_val:
+                            sess.permission_mode = mode_val
                             cfg.set("agent", "permission_mode", mode_val)
                         self.notify("config", {"config": cfg.public()})
                         sess.history.append({"role": "user", "content": text})
@@ -374,7 +384,7 @@ class Agent:
                     sess.tainted = True
                     run.emit("taint", {"tainted": True, "reason": "通过 @ 引入了不可信文件或文档"})
 
-            mode = cfg.get("agent", "permission_mode", default="ask")
+            mode = self._session_mode(sess)
             self.audit.append(event="run", session=sess.id, workspace=ws, mode=mode)
             self._announce_project_doc(run, sess, ws)
             await self._append_user(run, sess, ctx, text, images, files_, skills_)
@@ -392,8 +402,12 @@ class Agent:
                     await self._get_hook_mgr(ws).run_stop(ctx)
                 except Exception:  # noqa: BLE001
                     pass
+            if status == "done" and not sess.tainted and self.memory is not None and not getattr(st, "depth", 0):
+                self._schedule_distill(sess, text, ui_ast)
             sess.tainted, sess.todos, sess.user_domains = st.tainted, st.todos, sorted(st.user_domains)[:200]
             sess.tool_groups = sorted(st.tool_groups)
+            sess.shell_cwd = getattr(st, "shell_cwd", "")
+            sess.shell_env = dict(getattr(st, "shell_env", {}) or {})
             ui_ast["status"] = "cancelled" if status == "cancelled" else ("error" if status == "error" else "done")
             ui_ast["error"] = err
             for b in ui_ast["blocks"]:
@@ -409,6 +423,30 @@ class Agent:
                 self.audit.append(event="run_stats", session=sess.id, status=status, friction=run.stats.friction, **stats)
             run.emit("run_end", {"status": status, **({"error": err} if err else {}), **({"stats": stats} if stats else {})})
             await run.finish()
+
+    def _schedule_distill(self, sess: Session, user_text: str, ui_ast: dict) -> None:
+        """回合结束后的轻量情节记忆提炼（零额外模型请求，安全标记 trusted=False 供确认/低噪检索）。"""
+        blocks = ui_ast.get("blocks") or []
+        tools_used = [b.get("name") for b in blocks if b.get("type") == "tool" and b.get("status") == "ok"]
+        writes = [b.get("args", {}).get("path") for b in blocks if b.get("type") == "tool" and b.get("name") in ("write_file", "edit_file") and b.get("args", {}).get("path")]
+        if not writes and len(tools_used) < 3:
+            return
+        reply = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+        goal = re.sub(r"\s+", " ", (user_text or "").strip())[:140]
+        outcome = re.sub(r"\s+", " ", reply)[:180]
+        files_s = ", ".join(dict.fromkeys(str(x) for x in writes[:5]))
+        ep_text = f"任务「{goal}」" + (f" 修改文件: {files_s}" if files_s else f" 调用工具 {len(tools_used)} 次") + (f" · 结论: {outcome}" if outcome else "")
+        try:
+            item = self.memory.add(ep_text[:600], kind="episode", tags=["auto-episode"], scope="workspace" if sess.workspace else "global",
+                                   workspace=sess.workspace or "", source="agent", trusted=False)
+            if (self.cfg.get("agent", "embed_endpoint", default="") or "").strip():
+                async def _vec_upd() -> None:
+                    vecs = await self.router.embed([item["text"]])
+                    if vecs:
+                        self.memory.set_vector(item["id"], vecs[0], self.cfg.get("agent", "embed_model", default="embedding") or "embedding")
+                asyncio.create_task(_vec_upd())
+        except Exception:  # noqa: BLE001
+            pass
 
     def _announce_project_doc(self, run: Run, sess: Session, ws: str) -> None:
         """第一次加载（或内容变化）项目指令时，告诉用户并记入审计日志；被判可疑则说明已忽略。"""
@@ -461,7 +499,18 @@ class Agent:
                 parts += f"\n\n（技能 {name} 不可用）"
         if self.memory and self.cfg.get("agent", "memory_auto_recall", default=True):
             k = self.engine.tuned().recall_k
-            block, ids = self.memory.recall_block(text, sess.workspace or "", k)
+            qvec = None
+            if k > 0 and (self.cfg.get("agent", "embed_endpoint", default="") or "").strip():
+                try:
+                    vecs = await asyncio.wait_for(self.router.embed([text]), 3.0)
+                    if vecs:
+                        qvec = vecs[0]
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                block, ids = self.memory.recall_block(text, sess.workspace or "", k, query_vec=qvec)
+            except TypeError:
+                block, ids = self.memory.recall_block(text, sess.workspace or "", k)
             if block:
                 parts += f"\n\n<memory>\n{block}\n</memory>"
                 self.memory.touch(ids)
@@ -516,9 +565,9 @@ class Agent:
         for step in range(1, max_steps + 1):
             run.emit("step_start", {"step": step})
             run.stats.steps = step
-            mode = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else cfg.get("agent", "permission_mode", default="ask")
+            mode = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else self._session_mode(sess)
             ws = sess.workspace or cfg.get("workspace", default="")
-            if self.outputs is not None and "outputs" not in st.tool_groups and any(m.get("_pruned") and m.get("_out") for m in sess.history):
+            if self.outputs is not None and "outputs" not in st.tool_groups and any((m.get("_pruned") or i < getattr(sess, "kv_prune_upto", 0)) and m.get("_out") for i, m in enumerate(sess.history)):
                 self._ensure_outputs_group(sess, st)       # 历史里已有“可取回”的占位（上一轮或更早精简的）
             tools = self.tools_for(mode, bool(ws), st.tool_groups)
             schemas = [t.schema() for t in tools]
@@ -561,8 +610,11 @@ class Agent:
                 tps = res["tps"]
                 if tps:
                     self.engine.record_tps(tps)
-                ui["usage"] = {**usage_sum, "tps": round(tps, 1) if tps else None}
-                run.emit("usage", {**usage_sum, "ctx": cx, "used": used, "pct": sess.usage["pct"], "tps": round(tps, 1) if tps else 0})
+                cache_hit = round(float(getattr(self.engine, "cache_hit_rate", 0.0) or 0.0), 3)
+                ttft_ms = int(res.get("ttft_ms") or getattr(getattr(self.engine, "telemetry", None), "ttft_ms", 0) or 0)
+                ui["usage"] = {**usage_sum, "tps": round(tps, 1) if tps else None, "cache_hit_rate": cache_hit, "ttft_ms": ttft_ms}
+                run.emit("usage", {**usage_sum, "ctx": cx, "used": used, "pct": sess.usage["pct"],
+                                   "tps": round(tps, 1) if tps else 0, "cache_hit_rate": cache_hit, "ttft_ms": ttft_ms})
             msg: dict = {"role": "assistant", "content": res["content"]}
             tcs = res["tool_calls"]
             if tcs:
@@ -647,12 +699,15 @@ class Agent:
         return out
 
     def _body(self, sess: Session, mode: str, ws: str, schemas: list[dict], gen: dict, nothink: bool, force_tool: bool = False) -> dict:
-        msgs = [{"role": "system", "content": self.system_prompt(sess, mode, ws)}] + C.api_messages(sess.history)
+        msgs = [{"role": "system", "content": self.system_prompt(sess, mode, ws)}] + C.project_api_messages(sess.history, getattr(sess, "kv_prune_upto", 0))
         b: dict[str, Any] = {"model": "local", "messages": msgs, "stream": True, "stream_options": {"include_usage": True},
                              "temperature": gen["temperature"], "top_p": gen["top_p"], "top_k": gen["top_k"], "min_p": gen["min_p"],
                              "max_tokens": gen["max_tokens"], "cache_prompt": True}
         if gen.get("presence_penalty"):
             b["presence_penalty"] = gen["presence_penalty"]
+        rb = int(gen.get("reasoning_budget", -1))
+        if rb >= 0 and not nothink:
+            b["reasoning_budget"] = rb
         if schemas:
             b["tools"] = schemas
             b["tool_choice"] = "required" if force_tool else "auto"
@@ -666,15 +721,19 @@ class Agent:
         content, reasoning = "", ""
         tcs: dict[int, dict] = {}
         finish, usage, tps = "", {}, 0.0
+        req_t0 = time.monotonic()
+        ttft_ms = 0
         split = ThinkSplitter()
         think_t0 = None
         think_blk: dict | None = None
         text_blk: dict | None = None
 
         def add_think(s: str) -> None:
-            nonlocal think_blk, think_t0, reasoning
+            nonlocal think_blk, think_t0, reasoning, ttft_ms
             if not s:
                 return
+            if not ttft_ms:
+                ttft_ms = int((time.monotonic() - req_t0) * 1000)
             if think_blk is None:
                 think_blk = {"type": "thinking", "text": "", "ms": 0}
                 ui["blocks"].append(think_blk)
@@ -685,9 +744,11 @@ class Agent:
             run.emit("thinking_delta", {"text": s})
 
         def add_text(s: str) -> None:
-            nonlocal text_blk, content
+            nonlocal text_blk, content, ttft_ms
             if not s:
                 return
+            if not ttft_ms:
+                ttft_ms = int((time.monotonic() - req_t0) * 1000)
             if text_blk is None:
                 text_blk = {"type": "text", "text": ""}
                 ui["blocks"].append(text_blk)
@@ -744,7 +805,7 @@ class Agent:
             if not c["id"]:
                 c["id"] = "call_" + uuid.uuid4().hex[:10]
         return {"content": content, "reasoning": reasoning, "tool_calls": calls, "finish": finish or ("tool_calls" if calls else "stop"),
-                "usage": usage, "tps": tps}
+                "usage": usage, "tps": tps, "ttft_ms": ttft_ms}
 
     # ------------------------------------------------------------ 工具执行
     async def _exec_tool(self, run: Run, sess: Session, st: SessionState, ctx: ToolCtx, ui: dict, tc: dict,
@@ -791,7 +852,7 @@ class Agent:
             stats.bump("unknown_tool")
             finish("error", f"未知工具 {name}")
             ws_now = sess.workspace or self.cfg.get("workspace", default="")
-            avail = [t.name for t in self.tools_for(self.cfg.get("agent", "permission_mode", default="ask"), bool(ws_now), st.tool_groups)]
+            avail = [t.name for t in self.tools_for(self._session_mode(sess), bool(ws_now), st.tool_groups)]
             near = toolcall.suggest(name, avail)
             return (f"错误: 没有名为 {name} 的工具。" + (f"你是不是想用 {' / '.join(near)}？" if near else "")
                     + f"当前可用工具: {', '.join(avail)}（其余低频工具用 load_tools 加载）"), []
@@ -842,17 +903,18 @@ class Agent:
                 return f"拒绝: PreToolUse 钩子拒绝了此操作（{pre_hook.reason}）。", []
 
         # ---- 路径与敏感性
-        mode = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else self.cfg.get("agent", "permission_mode", default="ask")
+        mode = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else self._session_mode(sess)
+        eff_kind = "write" if (name in ("delegate_task", "spawn_agent") and args.get("mode") == "worker") else tool.kind
         sensitive = None
         try:
             for pa in tool.path_args:
                 if args.get(pa):
-                    p = call_ctx.guard.resolve(args[pa], write=tool.kind in ("write", "delete"))
+                    p = call_ctx.guard.resolve(args[pa], write=eff_kind in ("write", "delete"))
                     sensitive = sensitive or sec.sensitive_reason(call_ctx.guard.rel(p))
         except sec.SecurityError as e:
             finish("error", f"安全限制: {e}")
             return f"安全限制: {e}", []
-        command = args.get("command") if tool.kind == "exec" else None
+        command = args.get("command") if eff_kind == "exec" else None
         if command:
             why = sec.hard_deny_reason(command)
             if why:
@@ -860,11 +922,11 @@ class Agent:
                 self.audit.append(event="hard_deny", session=sess.id, reason=why, command=command[:200])
                 return f"拒绝: 命令被安全规则禁止（{why}）。请换一种安全的做法。", []
         domain_ok = True
-        if tool.kind == "net_fetch":
+        if eff_kind == "net_fetch":
             u = urlsplit(args.get("url", "") if "://" in args.get("url", "") else "https://" + args.get("url", ""))
             domain_ok = (net.domain_of(u.geturl()) in st.user_domains) and len(u.query) <= 200 and not u.username
         sandboxed = call_ctx.sandbox_kind != "none" and self.cfg.get("security", "command_sandbox", default="auto") == "auto"
-        if tool.kind == "mcp":      # MCP 服务器是否“被隔离”看它自己的沙箱与联网设置，而不是命令沙箱
+        if eff_kind == "mcp":      # MCP 服务器是否“被隔离”看它自己的沙箱与联网设置，而不是命令沙箱
             sandboxed = bool(self.mcp is not None and self.mcp.contained(str(tool.extra.get("server", ""))))
         tainted_eff = st.tainted and bool(self.cfg.get("security", "taint_tracking", default=True))
 
@@ -872,12 +934,12 @@ class Agent:
         custom_dec = None
         if ws_curr:
             perm_mgr = self._get_perm_mgr(ws_curr)
-            custom_dec = perm_mgr.evaluate(kind=tool.kind, name=name, args=args, tainted=tainted_eff,
+            custom_dec = perm_mgr.evaluate(kind=eff_kind, name=name, args=args, tainted=tainted_eff,
                                            sensitive=sensitive, command=command, sandboxed=sandboxed)
         if custom_dec is not None:
             dec = custom_dec
         else:
-            dec = sec.Policy.decide(kind=tool.kind, name=name, mode=mode, tainted=tainted_eff, allow_keys=st.allow_keys, sensitive=sensitive,
+            dec = sec.Policy.decide(kind=eff_kind, name=name, mode=mode, tainted=tainted_eff, allow_keys=st.allow_keys, sensitive=sensitive,
                                     command=command, sandboxed=sandboxed, domain_ok=domain_ok)
         if dec.action == "deny":
             finish("denied", dec.reason)
@@ -888,7 +950,7 @@ class Agent:
                 finish("denied", "用户拒绝了此操作")
                 self.audit.append(event="denied", session=sess.id, tool=name, args=sec.summarize_args(args))
                 return "用户拒绝了此操作。不要重复尝试相同操作；请换个方式或询问用户想怎么做。", []
-            if decision == "allow_session" and not sensitive and not tainted_eff and tool.kind in ("write", "exec", "mcp"):
+            if decision == "allow_session" and not sensitive and not tainted_eff and eff_kind in ("write", "exec", "mcp"):
                 st.allow_keys.add(dec.key)
         # ---- 执行
         t0 = time.time()
@@ -1062,13 +1124,13 @@ class Agent:
 
         def est() -> int:
             sysmsg = [{"role": "system", "content": self.system_prompt(sess, mode, ws)}]
-            return meter.estimate(sysmsg + C.api_messages(sess.history), schemas)
+            return meter.estimate(sysmsg + C.project_api_messages(sess.history, getattr(sess, "kv_prune_upto", 0)), schemas)
 
         e = est()
         if e > 0.72 * usable() and getattr(eng, "status", "") == "ready" and callable(getattr(eng, "tokenize", None)):
             try:
                 sysmsg = [{"role": "system", "content": self.system_prompt(sess, mode, ws)}]
-                blob = "\n".join(str(m.get("content") or "") for m in sysmsg + C.api_messages(sess.history))
+                blob = "\n".join(str(m.get("content") or "") for m in sysmsg + C.project_api_messages(sess.history, getattr(sess, "kv_prune_upto", 0)))
                 if schemas:
                     blob += "\n" + json.dumps(schemas, ensure_ascii=False)
                 real_n = await eng.tokenize(blob)
@@ -1080,10 +1142,13 @@ class Agent:
                 pass
         sess.usage.update({"ctx": eng.ctx, "used": e, "pct": round(100 * e / max(1, eng.ctx), 1)})
         if e > 0.70 * usable():
-            saved = C.prune_old(sess.history, keep_recent_tools=prof.keep_recent_tools)
-            if saved:
+            prev_u = getattr(sess, "kv_prune_upto", 0)
+            new_u, saved = C.advance_prune_watermark(sess.history, prev_u, keep_recent_tools=prof.keep_recent_tools)
+            if new_u > prev_u or saved:
+                sess.kv_prune_upto = new_u
                 e = est()
-                run.emit("context_event", {"kind": "pruned", "detail": f"已精简较早的工具输出（≈{saved // 1000}K 字符）"})
+                if saved:
+                    run.emit("context_event", {"kind": "pruned", "detail": f"已精简较早的工具输出（≈{saved // 1000}K 字符，保留 KV 前缀）"})
         if e > 0.85 * usable():
             can_grow = bool(cfg.get("engine", "ctx_auto_grow", default=True)) and eng.ctx < eng.ctx_cap
             if not prof.grow_first:          # 大模型重载要几分钟：先压缩，压不下来再扩容
@@ -1115,6 +1180,7 @@ class Agent:
         if e > 0.97 * usable():
             n = C.hard_trim(sess.history, int(0.8 * usable()), meter)
             if n:
+                sess.kv_prune_upto = 0
                 for m in sess.ui:
                     m["hist_index"] = None
                 run.emit("context_event", {"kind": "trimmed", "detail": f"上下文已满，丢弃了最早的 {n} 条消息"})
@@ -1142,6 +1208,7 @@ class Agent:
         if len(keep) >= before or not summ:
             return False
         sess.history, sess.summary = keep, summ
+        sess.kv_prune_upto = 0
         for m in sess.ui:
             m["hist_index"] = None
         if run:
@@ -1150,9 +1217,11 @@ class Agent:
         return True
 
     async def _force_shrink(self, run: Run, sess: Session, meter: C.Meter, ws: str) -> None:
-        C.prune_old(sess.history, keep_recent_tools=2, min_len=200)
+        new_u, _saved = C.advance_prune_watermark(sess.history, getattr(sess, "kv_prune_upto", 0), keep_recent_tools=2, min_len=200)
+        sess.kv_prune_upto = new_u
         if not await self._compact(run, sess):
             C.hard_trim(sess.history, int(0.6 * self.engine.ctx), meter)
+            sess.kv_prune_upto = 0
             for m in sess.ui:
                 m["hist_index"] = None
 
@@ -1163,84 +1232,175 @@ class Agent:
         return sess.summary or ""
 
     # ------------------------------------------------------------ 子代理
-    async def run_subagent(self, parent_ctx: ToolCtx, prompt: str, mode: str = "explore", max_steps: int = 8) -> str:
-        """运行专注的只读子代理循环（Claude Code Task/Subagent 模式）。"""
+    @staticmethod
+    def _git_cmd(cwd: Path, *args: str, timeout: float = 30.0) -> tuple[int, str, str]:
+        import subprocess
+        kw: dict[str, Any] = {"creationflags": 0x08000000} if sec.IS_WIN else {}
+        r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, **kw)
+        return r.returncode, r.stdout or "", r.stderr or ""
+
+    def _apply_worktree(self, wt_dir: Path, ws_dir: Path, sid: str, turn_id: str) -> tuple[list[str], str]:
+        from .journal import sha256_bytes
+        rc, status_out, _ = self._git_cmd(wt_dir, "status", "--porcelain", "-uall")
+        if rc != 0 or not status_out.strip():
+            return [], ""
+        _, diff_out, _ = self._git_cmd(wt_dir, "diff", "HEAD")
+        changed: list[str] = []
+        guard_ws = sec.PathGuard(ws_dir, protected=self.protected, hidden=self.hidden)
+        for ln in status_out.splitlines():
+            if len(ln) < 4:
+                continue
+            st_code = ln[:2]
+            rel_path = ln[3:].strip().strip('"').split(" -> ")[-1]
+            src_p = wt_dir / rel_path
+            try:
+                dst_p = guard_ws.resolve(rel_path, write=True)
+            except sec.SecurityError:
+                continue
+            if "D" in st_code and not src_p.exists():
+                if dst_p.exists():
+                    if self.journal:
+                        tid = self.journal.trash(dst_p, sid)
+                        self.journal.record(sid, op="delete", path=dst_p, summary=f"[worktree] 删除 {rel_path}",
+                                            extra={"trash_id": tid, "turn_id": turn_id})
+                    else:
+                        dst_p.unlink()
+                    changed.append(f"D {rel_path}")
+            elif src_p.is_file():
+                data = src_p.read_bytes()
+                existed = dst_p.is_file()
+                snap = self.journal.snapshot(dst_p) if (existed and self.journal) else None
+                dst_p.parent.mkdir(parents=True, exist_ok=True)
+                from .journal import atomic_write
+                atomic_write(dst_p, data)
+                if self.journal:
+                    self.journal.record(sid, op="edit" if existed else "write", path=dst_p,
+                                        summary=f"[worktree] {'更新' if existed else '新增'} {rel_path}",
+                                        snap=snap, existed=existed, after=sha256_bytes(data), extra={"turn_id": turn_id})
+                changed.append(("M " if existed else "A ") + rel_path)
+        return changed, diff_out
+
+    async def run_subagent(self, parent_ctx: ToolCtx, prompt: str, mode: str = "explore", max_steps: int = 8, apply_changes: bool = True) -> str:
+        """运行独立子代理循环（explore / plan / verify 为只读；worker 在隔离 Git Worktree 中运行并安全合并补丁）。"""
         sub_depth = getattr(parent_ctx, "depth", 0) + 1
         if sub_depth > 1:
             return "错误: 子代理不能再派生子代理（已达到最大嵌套深度 1）"
 
-        ws = parent_ctx.guard.ws if (parent_ctx.guard and hasattr(parent_ctx.guard, "ws")) else ""
+        ws = str(parent_ctx.guard.ws if (parent_ctx.guard and hasattr(parent_ctx.guard, "ws")) else "")
         sub_sid = f"{parent_ctx.sid}_sub_{uuid.uuid4().hex[:6]}"
-        sub_sess = Session(sub_sid, title=f"子代理: {prompt[:30]}", workspace=str(ws))
-        sub_st = SessionState(sub_sid, tainted=parent_ctx.session.tainted, nonce=parent_ctx.session.nonce,
-                              todos=[], user_domains=set(parent_ctx.session.user_domains),
-                              allow_keys=set())
-        sub_st.depth = sub_depth
-        sub_st.sub_mode = "verify" if mode == "verify" else "plan"
-        sub_st.turn_id = parent_ctx.turn_id
-        sub_st.tool_groups = set(parent_ctx.session.tool_groups)
-        sub_run = Run(sub_sid)
-        sub_ctx = self._make_ctx(sub_run, sub_sess, sub_st, str(ws))
-        sub_ctx.agent = self
-        sub_ctx.depth = sub_depth
-        sub_ctx.turn_id = parent_ctx.turn_id
-        sub_ctx.approval_run = getattr(parent_ctx, "run", None)
-        if parent_ctx.ask:
-            sub_ctx.ask = parent_ctx.ask
+        is_worker = mode == "worker"
+        wt_dir: Path | None = None
+        eff_ws = ws
 
-        if parent_ctx.emit:
-            orig_emit = sub_run.emit
-            parent_tid = getattr(parent_ctx, "tool_call_id", "")
-            def forwarded_emit(ev: str, data: dict) -> None:
-                orig_emit(ev, data)
-                if ev == "notice":
-                    parent_ctx.emit("notice", data)
-                elif ev == "tool_start":
-                    title = data.get("title") or data.get("name", "")
-                    parent_ctx.emit("subagent_step", {
-                        "tool_id": parent_tid,
-                        "phase": "start",
-                        "call_id": data.get("id", ""),
-                        "name": data.get("name", ""),
-                        "title": title,
-                    })
-                    parent_ctx.emit("notice", {"level": "info", "text": f"[子代理] 调用工具: {title}"})
-                elif ev == "tool_result":
-                    parent_ctx.emit("subagent_step", {
-                        "tool_id": parent_tid,
-                        "phase": "done",
-                        "call_id": data.get("id", ""),
-                        "name": data.get("name", ""),
-                        "status": data.get("status", "ok"),
-                        "duration_ms": data.get("duration_ms", 0),
-                    })
-            sub_run.emit = forwarded_emit  # type: ignore
+        if is_worker:
+            if not ws:
+                return "错误: worker 模式需要已打开 Git 工作区。"
+            rc, top, _ = self._git_cmd(Path(ws), "rev-parse", "--show-toplevel")
+            if rc != 0 or not top.strip():
+                return "错误: worker 隔离模式要求工作区是 Git 仓库（请先 git init 或改用主代理）。"
+            wt_root = self.store.dir.parent / "worktrees"
+            wt_root.mkdir(parents=True, exist_ok=True)
+            wt_dir = wt_root / sub_sid
+            rc_w, _out_w, err_w = self._git_cmd(Path(ws), "worktree", "add", "--detach", str(wt_dir), "HEAD")
+            if rc_w != 0:
+                return f"错误: 创建隔离 Git Worktree 失败: {err_w.strip()}"
+            eff_ws = str(wt_dir)
 
-        role_desc = (
-            "你是主代理派生的验证子代理，可使用只读工具与测试/检查命令进行验证（禁止修改或删除文件）。"
-            if sub_st.sub_mode == "verify"
-            else "你是主代理派生的独立只读子代理。请专注调研并输出结构化的简明结论，指出核心发现、关键代码行号或具体建议。"
-        )
-        sub_text = (
-            f"【子代理任务 · 模式={mode}】\n"
-            f"目标: {prompt}\n\n"
-            f"{role_desc}"
-        )
-        await self._append_user(sub_run, sub_sess, sub_ctx, sub_text, [], [], [])
-        sub_ui: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant", "ts": time.time(), "status": "running", "error": None,
-                        "blocks": []}
-        bounded_steps = max(1, min(max_steps, 12))
         try:
-            await self._loop(sub_run, sub_sess, sub_st, sub_ctx, sub_ui, max_steps_override=bounded_steps)
-        except Exception as e:  # noqa: BLE001
-            return f"子代理执行遇到错误: {e}"
+            sub_sess = Session(sub_sid, workspace=eff_ws)
+            sub_sess.title = f"子代理: {prompt[:30]}"
+            sub_st = SessionState(sub_sid, tainted=parent_ctx.session.tainted, nonce=parent_ctx.session.nonce,
+                                  todos=[], user_domains=set(parent_ctx.session.user_domains),
+                                  allow_keys=set())
+            sub_st.depth = sub_depth
+            sub_st.sub_mode = "auto_edit" if is_worker else ("verify" if mode == "verify" else "plan")
+            sub_st.turn_id = parent_ctx.turn_id
+            sub_st.tool_groups = set(parent_ctx.session.tool_groups)
+            sub_run = Run(sub_sid)
+            sub_ctx = self._make_ctx(sub_run, sub_sess, sub_st, eff_ws)
+            sub_ctx.agent = self
+            sub_ctx.depth = sub_depth
+            sub_ctx.turn_id = parent_ctx.turn_id
+            sub_ctx.approval_run = getattr(parent_ctx, "run", None)
+            if parent_ctx.ask:
+                sub_ctx.ask = parent_ctx.ask
 
-        texts = [b["text"] for b in sub_ui.get("blocks", []) if b.get("type") == "text" and b.get("text")]
-        summary = "\n\n".join(texts).strip()
-        if not summary:
-            t_blocks = [b.get("content", "") for b in sub_ui.get("blocks", []) if b.get("type") == "tool" and b.get("content")]
-            summary = "\n".join(t_blocks)[-2000:] or "子代理未返回文本总结。"
-        return f"[子代理报告 · 模式={mode} · 步数={sub_run.stats.steps}]\n" + summary
+            if parent_ctx.emit:
+                orig_emit = sub_run.emit
+                parent_tid = getattr(parent_ctx, "tool_call_id", "")
+                def forwarded_emit(ev: str, data: dict) -> None:
+                    orig_emit(ev, data)
+                    if ev == "notice":
+                        parent_ctx.emit("notice", data)
+                    elif ev == "tool_start":
+                        title = data.get("title") or data.get("name", "")
+                        parent_ctx.emit("subagent_step", {
+                            "tool_id": parent_tid,
+                            "phase": "start",
+                            "call_id": data.get("id", ""),
+                            "name": data.get("name", ""),
+                            "title": title,
+                        })
+                        parent_ctx.emit("notice", {"level": "info", "text": f"[子代理] 调用工具: {title}"})
+                    elif ev == "tool_result":
+                        parent_ctx.emit("subagent_step", {
+                            "tool_id": parent_tid,
+                            "phase": "done",
+                            "call_id": data.get("id", ""),
+                            "name": data.get("name", ""),
+                            "status": data.get("status", "ok"),
+                            "duration_ms": data.get("duration_ms", 0),
+                        })
+                sub_run.emit = forwarded_emit  # type: ignore
+
+            role_desc = (
+                "你是运行在独立 Git Worktree 沙箱里的 worker 子代理，可以读写编辑文件并运行检查，完成后简洁汇报改了什么与检查结果。"
+                if is_worker
+                else (
+                    "你是主代理派生的验证子代理，可使用只读工具与测试/检查命令进行验证（禁止修改或删除文件）。"
+                    if sub_st.sub_mode == "verify"
+                    else "你是主代理派生的独立只读子代理。请专注调研并输出结构化的简明结论，指出核心发现、关键代码行号或具体建议。"
+                )
+            )
+            sub_text = (
+                f"【子代理任务 · 模式={mode}】\n"
+                f"目标: {prompt}\n\n"
+                f"{role_desc}"
+            )
+            await self._append_user(sub_run, sub_sess, sub_ctx, sub_text, [], [], [])
+            sub_ui: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant", "ts": time.time(), "status": "running", "error": None,
+                            "blocks": []}
+            bounded_steps = max(1, min(max_steps, 16))
+            try:
+                await self._loop(sub_run, sub_sess, sub_st, sub_ctx, sub_ui, max_steps_override=bounded_steps)
+            except Exception as e:  # noqa: BLE001
+                return f"子代理执行遇到错误: {e}"
+
+            texts = [b["text"] for b in sub_ui.get("blocks", []) if b.get("type") == "text" and b.get("text")]
+            summary = "\n\n".join(texts).strip()
+            if not summary:
+                t_blocks = [b.get("content", "") for b in sub_ui.get("blocks", []) if b.get("type") == "tool" and b.get("content")]
+                summary = "\n".join(t_blocks)[-2000:] or "子代理未返回文本总结。"
+
+            extra_patch = ""
+            if is_worker and wt_dir and ws:
+                if apply_changes:
+                    changed, diff_out = self._apply_worktree(wt_dir, Path(ws), parent_ctx.sid, parent_ctx.turn_id)
+                    if changed:
+                        extra_patch = "\n\n[Worktree 已合并文件]\n" + "\n".join(f"- {c}" for c in changed)
+                        if diff_out:
+                            extra_patch += "\n\n```diff\n" + diff_out[:3000] + "\n```"
+                    else:
+                        extra_patch = "\n\n[Worktree] 未产生文件修改。"
+                else:
+                    _, st_o, _ = self._git_cmd(wt_dir, "status", "--short")
+                    _, d_o, _ = self._git_cmd(wt_dir, "diff", "HEAD")
+                    extra_patch = f"\n\n[Worktree 预览（未写回主工作区）]\n{st_o}\n{d_o[:3000]}"
+
+            return f"[子代理报告 · 模式={mode} · 步数={sub_run.stats.steps}]\n" + summary + extra_patch
+        finally:
+            if wt_dir is not None and ws:
+                self._git_cmd(Path(ws), "worktree", "remove", "--force", str(wt_dir))
 
     # ------------------------------------------------------------ 回退/重新生成
     def truncate(self, sess: Session, from_index: int) -> None:
@@ -1261,6 +1421,7 @@ class Agent:
         has_legacy_no_tid = not removed_tids and not any(u.get("turn_id") for u in sess.ui[:from_index])
         del sess.history[hi:]
         del sess.ui[from_index:]
+        sess.kv_prune_upto = min(getattr(sess, "kv_prune_upto", 0), len(sess.history))
         self._repair_history(sess)
         if self.journal:
             try:

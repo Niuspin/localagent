@@ -28,9 +28,11 @@ class RpcClosed(Exception):
 
 
 class StdioRpc:
-    def __init__(self, proc: asyncio.subprocess.Process, *, on_notification: Callable[[str, dict], None] | None = None):
+    def __init__(self, proc: asyncio.subprocess.Process, *, on_notification: Callable[[str, dict], None] | None = None,
+                 roots_fn: Callable[[], list[dict]] | None = None):
         self.proc = proc
         self._on_note = on_notification
+        self._roots_fn = roots_fn
         self._next = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._wlock = asyncio.Lock()
@@ -85,10 +87,16 @@ class StdioRpc:
             self._fail_all()
 
     async def _dispatch(self, m: dict) -> None:
-        if "method" in m and "id" in m:                       # 服务器发来的请求：我们没有声明任何客户端能力
+        if "method" in m and "id" in m:                       # 服务器发来的请求：处理 ping 与 roots/list
             method = m["method"]
             if method == "ping":
                 await self._send({"jsonrpc": "2.0", "id": m["id"], "result": {}})
+            elif method == "roots/list" and self._roots_fn is not None:
+                try:
+                    roots = self._roots_fn()
+                except Exception:  # noqa: BLE001
+                    roots = []
+                await self._send({"jsonrpc": "2.0", "id": m["id"], "result": {"roots": roots}})
             else:
                 await self._send({"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": f"Method not found: {method}"}})
         elif "method" in m:

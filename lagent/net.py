@@ -9,6 +9,7 @@ import re
 import socket
 import ssl
 import threading
+import time
 import zlib
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
@@ -258,24 +259,100 @@ async def fetch(url: str, **kw: Any) -> Response:
     return await asyncio.to_thread(fetch_sync, url, **kw)
 
 
-# ---------------------------------------------------------------- 本地 llama-server 通信
-def _local_request(host: str, port: int, method: str, path: str, body: Any, headers: dict, timeout: float) -> tuple[int, Any]:
-    conn = http.client.HTTPConnection(host, port, timeout=timeout)
-    try:
-        h = {"Accept": "application/json", **headers}
-        data = None
-        if body is not None:
-            data = json.dumps(body).encode()
-            h["Content-Type"] = "application/json"
-        conn.request(method, path, body=data, headers=h)
-        r = conn.getresponse()
-        raw = r.read(20_000_000)
+# ---------------------------------------------------------------- 连接池与本地通信
+class _ConnPool:
+    """轻量级线程安全 HTTP Keep-Alive 连接池，用于复用本地引擎和 MCP HTTP 短连接。"""
+
+    def __init__(self, max_per_key: int = 4, ttl_s: float = 45.0):
+        self._max = max_per_key
+        self._ttl = ttl_s
+        self._lock = threading.Lock()
+        self._idle: dict[tuple, list[tuple[http.client.HTTPConnection, float]]] = {}
+
+    def take(self, key: tuple) -> http.client.HTTPConnection | None:
+        now = time.monotonic()
+        with self._lock:
+            lst = self._idle.get(key)
+            while lst:
+                conn, ts = lst.pop()
+                if now - ts <= self._ttl and conn.sock is not None:
+                    return conn
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return None
+
+    def put(self, key: tuple, conn: http.client.HTTPConnection) -> None:
+        if conn.sock is None:
+            return
+        now = time.monotonic()
+        with self._lock:
+            lst = self._idle.setdefault(key, [])
+            # 清理过期连接
+            lst[:] = [(c, t) for c, t in lst if now - t <= self._ttl and c.sock is not None]
+            if len(lst) < self._max:
+                lst.append((conn, now))
+                return
         try:
-            return r.status, json.loads(raw)
-        except ValueError:
-            return r.status, raw.decode("utf-8", "replace")
-    finally:
-        conn.close()
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def close_all(self) -> None:
+        with self._lock:
+            all_conns = [c for lst in self._idle.values() for c, _ in lst]
+            self._idle.clear()
+        for c in all_conns:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+_POOL = _ConnPool()
+
+
+def _local_request(host: str, port: int, method: str, path: str, body: Any, headers: dict, timeout: float) -> tuple[int, Any]:
+    key = ("local", host, port)
+    h = {"Accept": "application/json", "Connection": "keep-alive", **headers}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        h["Content-Type"] = "application/json"
+
+    for attempt in range(2):
+        conn = _POOL.take(key)
+        reused = conn is not None
+        if conn is None:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        elif conn.sock is not None:
+            conn.timeout = timeout
+            conn.sock.settimeout(timeout)
+        keep = False
+        try:
+            conn.request(method, path, body=data, headers=h)
+            r = conn.getresponse()
+            raw = r.read(20_000_000)
+            keep = not r.will_close
+            try:
+                return r.status, json.loads(raw)
+            except ValueError:
+                return r.status, raw.decode("utf-8", "replace")
+        except (http.client.RemoteDisconnected, http.client.BadStatusLine, BrokenPipeError, ConnectionResetError):
+            keep = False
+            if reused and attempt == 0:
+                continue
+            raise
+        finally:
+            if keep:
+                _POOL.put(key, conn)
+            else:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+    raise NetError("本地连接重试失败")
 
 
 async def local_json(host: str, port: int, method: str, path: str, body: Any = None,

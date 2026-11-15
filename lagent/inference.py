@@ -391,6 +391,7 @@ class InferenceAdvisor:
         threads = self.advise_threads(gen_threads=gen_threads)
         cache_reuse = self.advise_cache_reuse()
         mem_lock = self.advise_memory_lock(n_cpu_moe=n_cpu_moe)
+        multi_gpu = self.advise_multi_gpu()
 
         return {
             "spec": spec,
@@ -398,8 +399,103 @@ class InferenceAdvisor:
             "threads": threads,
             "cache_reuse": cache_reuse,
             "memory_lock": mem_lock,
+            "multi_gpu": multi_gpu,
             "kv_budget": budget,
         }
+
+    def advise_multi_gpu(self) -> dict:
+        """多 GPU 张量切分调度：按各卡剩余可用显存比例生成 --tensor-split 与 --split-mode。"""
+        gpus = self.hw.get("gpus") or []
+        if len(gpus) <= 1:
+            return {"enabled": False, "tensor_split": "", "split_mode": "none", "flags": []}
+        raw = str(self.cfg.get("tensor_split", "auto") or "auto").strip()
+        split_mode = str(self.cfg.get("split_mode", "layer") or "layer").lower()
+        if split_mode == "auto":
+            split_mode = "layer"
+        if raw.lower() == "auto":
+            free_vals = [max(0.1, float(g.get("free_gb") or g.get("vram_gb") or 1.0)) for g in gpus]
+            total = sum(free_vals) or 1.0
+            ints = [max(1, round(v / total * 100)) for v in free_vals]
+            tensor_split = ",".join(str(x) for x in ints)
+        else:
+            tensor_split = raw
+        flags: list[str] = []
+        if tensor_split:
+            if self.has_flag("--tensor-split"):
+                flags += ["--tensor-split", tensor_split]
+            elif self.has_flag("-ts"):
+                flags += ["-ts", tensor_split]
+        if split_mode != "none" and self.has_flag("--split-mode"):
+            flags += ["--split-mode", split_mode]
+        return {"enabled": bool(flags), "tensor_split": tensor_split, "split_mode": split_mode, "flags": flags}
+
+
+def schema_to_gbnf(schema: dict) -> str:
+    """将常见 JSON Schema 转为轻量 llama.cpp GBNF 语法（用于小模型结构化输出兜底）。"""
+    rules: list[str] = []
+    seen: dict[str, int] = {}
+
+    def add_rule(name: str, body: str) -> str:
+        if name not in seen:
+            seen[name] = len(rules)
+            rules.append(f"{name} ::= {body}")
+        return name
+
+    def compile_node(node: dict, hint: str = "node") -> str:
+        t = node.get("type")
+        if "enum" in node and isinstance(node["enum"], list) and node["enum"]:
+            alts = " | ".join(
+                f'"\\"{str(v).replace(chr(34), chr(92) + chr(34))}\\""' if isinstance(v, str) else f'"{str(v).lower() if isinstance(v, bool) else v}"'
+                for v in node["enum"]
+            )
+            return add_rule(f"r-{hint}-{len(seen)}", alts)
+        if t == "string":
+            return "json-string"
+        if t == "integer":
+            return "json-int"
+        if t == "number":
+            return "json-number"
+        if t == "boolean":
+            return "json-bool"
+        if t == "null":
+            return '"null"'
+        if t == "array":
+            item_rule = compile_node(node.get("items") or {"type": "string"}, f"{hint}-item")
+            rname = f"arr-{hint}-{len(seen)}"
+            return add_rule(rname, f'"[" ws ({item_rule} ("," ws {item_rule})*)? "]" ws')
+        if t == "object" or isinstance(node.get("properties"), dict):
+            props = node.get("properties") or {}
+            if not props:
+                return "json-obj"
+            req = set(node.get("required") or [])
+            parts: list[str] = ['"{" ws']
+            keys = list(props.keys())
+            for idx, k in enumerate(keys):
+                val_rule = compile_node(props[k], f"{hint}-{idx}")
+                k_esc = str(k).replace('"', '\\"')
+                sep = '"," ws ' if idx < len(keys) - 1 else ""
+                field_expr = f'"\\"{k_esc}\\":" ws {val_rule}'
+                if keys and idx < len(keys) - 1:
+                    parts.append(f"({field_expr} {sep})" if k in req else f"({field_expr} {sep})?")
+                else:
+                    parts.append(field_expr if k in req else f"({field_expr})?")
+            parts.append('"}" ws')
+            return add_rule(f"obj-{hint}-{len(seen)}", " ".join(parts))
+        return "json-value"
+
+    root_ref = compile_node(schema or {}, "root")
+    base = [
+        f"root ::= ws {root_ref}",
+        'ws ::= [ \\t\\n\\r]*',
+        'json-string ::= "\\"" ([^"\\\\] | "\\\\" .)* "\\"" ws',
+        'json-int ::= "-"? ("0" | [1-9] [0-9]*) ws',
+        'json-number ::= "-"? ("0" | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)? ws',
+        'json-bool ::= ("true" | "false") ws',
+        'json-obj ::= "{" ws (json-string ":" ws json-value ("," ws json-string ":" ws json-value)*)? "}" ws',
+        'json-arr ::= "[" ws (json-value ("," ws json-value)*)? "]" ws',
+        'json-value ::= json-string | json-number | json-bool | "null" ws | json-obj | json-arr',
+    ]
+    return "\n".join([base[0]] + rules + base[1:]) + "\n"
 
 
 def advise(

@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from array import array
+import hashlib
 import json
 import math
 import re
@@ -19,6 +21,35 @@ from typing import Any
 KINDS = ("fact", "preference", "project", "episode")
 _CJK = re.compile(r"[㐀-鿿぀-ヿ가-힯]")
 _WORD = re.compile(r"[A-Za-z0-9_]{2,}")
+
+
+def local_embed(text: str, dim: int = 128) -> list[float]:
+    """零依赖确定性局部特征哈希向量（支持中英混合词元与字符 3-gram，用于离线稠密检索回退）。"""
+    vec = [0.0] * dim
+    feats = tokens(text)
+    s = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    if len(s) >= 3:
+        feats = feats + [s[i:i + 3] for i in range(min(400, len(s) - 2))]
+    for f in feats:
+        d = hashlib.blake2b(f.encode("utf-8"), digest_size=4).digest()
+        h = int.from_bytes(d, "little")
+        idx = h % dim
+        sign = 1.0 if ((h >> 8) & 1) else -1.0
+        vec[idx] += sign
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm > 0:
+        inv = 1.0 / norm
+        return [v * inv for v in vec]
+    return vec
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if (na > 0 and nb > 0) else 0.0
 
 
 def tokens(text: str) -> list[str]:
@@ -65,6 +96,18 @@ class Memory:
         todo = self.db.execute("SELECT id,text FROM memories WHERE norm=''").fetchall()
         if todo:
             self.db.executemany("UPDATE memories SET norm=? WHERE id=?", [(self._norm(r["text"]), r["id"]) for r in todo])
+        self.db.execute("""CREATE TABLE IF NOT EXISTS mem_vectors(
+            id TEXT PRIMARY KEY, dim INTEGER NOT NULL, model TEXT NOT NULL DEFAULT 'local-hash',
+            vec BLOB NOT NULL)""")
+        vec_missing = self.db.execute(
+            "SELECT m.id, m.text, m.tags FROM memories m LEFT JOIN mem_vectors v ON m.id=v.id WHERE v.id IS NULL"
+        ).fetchall()
+        if vec_missing:
+            rows_v = []
+            for r in vec_missing:
+                blob = array("f", local_embed(r["text"] + " " + " ".join(json.loads(r["tags"])))).tobytes()
+                rows_v.append((r["id"], 128, "local-hash", blob))
+            self.db.executemany("INSERT OR REPLACE INTO mem_vectors(id,dim,model,vec) VALUES(?,?,?,?)", rows_v)
 
     # ------------------------------------------------------------ 全文索引（FTS5，可缺省）
     # 存的是 tokens() 的结果（拉丁词 + 中日韩 bigram，空格分隔），所以中文双字词也能命中；
@@ -88,9 +131,23 @@ class Memory:
         self.db.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
         self.db.execute("INSERT INTO mem_fts(id,toks) VALUES(?,?)", (mid, " ".join(tokens(text + " " + " ".join(tags)))))
 
+    def _vec_put(self, mid: str, text: str, tags: list[str], vec: list[float] | None = None, model: str = "local-hash") -> None:
+        v = vec if vec else local_embed(text + " " + " ".join(tags))
+        blob = array("f", [float(x) for x in v]).tobytes()
+        self.db.execute("INSERT OR REPLACE INTO mem_vectors(id,dim,model,vec) VALUES(?,?,?,?)", (mid, len(v), model, blob))
+
+    def set_vector(self, mid: str, vec: list[float], model: str = "embedding") -> None:
+        if not vec:
+            return
+        with self._lock:
+            blob = array("f", [float(x) for x in vec]).tobytes()
+            self.db.execute("INSERT OR REPLACE INTO mem_vectors(id,dim,model,vec) VALUES(?,?,?,?)", (mid, len(vec), model, blob))
+            self.db.commit()
+
     def _fts_drop(self, mid: str) -> None:
         if self.fts:
             self.db.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
+        self.db.execute("DELETE FROM mem_vectors WHERE id=?", (mid,))
 
     def _candidates(self, qt: set[str], limit: int = 300) -> list[str] | None:
         """返回按 bm25 排序的候选 id；索引不可用或查询无有效词时返回 None（调用方回退全表）。"""
@@ -147,6 +204,7 @@ class Memory:
                             (mid, text, kind, json.dumps(tag_list, ensure_ascii=False), scope, ws, source, int(trusted), int(pinned), now, now, n))
             if self.fts:
                 self._fts_put(mid, text, tag_list)
+            self._vec_put(mid, text, tag_list)
             if _commit:
                 self.db.commit()
             return self.get(mid)  # type: ignore[return-value]
@@ -183,6 +241,9 @@ class Memory:
                 if self.fts and ("text" in f or "tags" in f):
                     row = self.db.execute("SELECT text,tags FROM memories WHERE id=?", (mid,)).fetchone()
                     self._fts_put(mid, row["text"], json.loads(row["tags"]))
+                if "text" in f or "tags" in f:
+                    row = self.db.execute("SELECT text,tags FROM memories WHERE id=?", (mid,)).fetchone()
+                    self._vec_put(mid, row["text"], json.loads(row["tags"]))
                 self.db.commit()
             return self.get(mid)  # type: ignore[return-value]
 
@@ -250,23 +311,87 @@ class Memory:
             s *= 1.5
         return s
 
-    def search(self, q: str, k: int = 6, workspace: str = "", kind: str = "") -> list[dict]:
-        """只返回可信记忆；全局 + 当前工作区。先用 FTS5 圈出候选再打分；无索引时回退全表。"""
+    def _vec_candidates(self, qvec: list[float], dim: int, limit: int = 100, *,
+                        workspace: str = "", kind: str = "", model_filter: str = "") -> dict[str, float]:
+        if not qvec:
+            return {}
+        with self._lock:
+            sql = ("SELECT m.id, v.vec FROM mem_vectors v JOIN memories m ON v.id=m.id "
+                   "WHERE m.trusted=1 AND v.dim=? AND (m.scope='global' OR m.workspace=?)")
+            args: list[Any] = [dim, workspace]
+            if kind:
+                sql += " AND m.kind=?"
+                args.append(kind)
+            if model_filter:
+                sql += " AND v.model=?"
+                args.append(model_filter)
+            rows = self.db.execute(sql + " LIMIT 2000", args).fetchall()
+        sims: dict[str, float] = {}
+        for r in rows:
+            a = array("f")
+            a.frombytes(r["vec"])
+            sim = _cosine(qvec, list(a))
+            if sim > 0.20:
+                sims[r["id"]] = sim
+        if len(sims) > limit:
+            top = sorted(sims.items(), key=lambda x: -x[1])[:limit]
+            return dict(top)
+        return sims
+
+    def search(self, q: str, k: int = 6, workspace: str = "", kind: str = "",
+               query_vec: list[float] | None = None) -> list[dict]:
+        """混合检索（FTS5/BM25 词法 + 稠密/哈希余弦向量 + RRF 融合）：只返回可信记忆。"""
         qt = set(tokens(q))
         cand = self._candidates(qt)
+        local_q = local_embed(q) if q.strip() else []
+        vec_sims = self._vec_candidates(
+            query_vec if query_vec else local_q,
+            len(query_vec) if query_vec else 128,
+            limit=80,
+            workspace=workspace,
+            kind=kind,
+            model_filter="" if query_vec else "local-hash",
+        )
+        all_ids: list[str] = []
         if cand is not None:
-            rows = self._trusted_by_ids(cand, kind)
+            seen_c = set(cand)
+            all_ids = list(cand)
+            for vid, sim in vec_sims.items():
+                if vid not in seen_c and sim >= (0.45 if query_vec else 0.38):
+                    seen_c.add(vid)
+                    all_ids.append(vid)
+            rows = self._trusted_by_ids(all_ids, kind)
         else:
             rows, _ = self.list(kind=kind, limit=5000)
-        sc = []
+
+        lex_pairs: list[tuple[float, dict]] = []
+        vec_pairs: list[tuple[float, dict]] = []
+        row_by_id: dict[str, dict] = {}
+        min_cos = 0.45 if query_vec else 0.38
         for m in rows:
             if m["scope"] == "workspace" and m["workspace"] != workspace:
                 continue
-            s = self._score(qt, m)
-            if s > 0:
-                sc.append((s, m))
-        sc.sort(key=lambda x: -x[0])
-        return [m for _s, m in sc[:k]]
+            row_by_id[m["id"]] = m
+            ls = self._score(qt, m)
+            if ls > 0:
+                lex_pairs.append((ls, m))
+            vs = vec_sims.get(m["id"], 0.0)
+            if vs >= min_cos:
+                vec_pairs.append((vs, m))
+
+        lex_pairs.sort(key=lambda x: -x[0])
+        vec_pairs.sort(key=lambda x: -x[0])
+        rrf: dict[str, float] = {}
+        for rank, (ls, m) in enumerate(lex_pairs, 1):
+            rrf[m["id"]] = rrf.get(m["id"], 0.0) + (1.0 / (60.0 + rank)) + min(ls, 5.0) * 0.005
+        for rank, (vs, m) in enumerate(vec_pairs, 1):
+            rrf[m["id"]] = rrf.get(m["id"], 0.0) + (0.85 / (60.0 + rank)) + vs * 0.01
+        for mid, base in list(rrf.items()):
+            m = row_by_id[mid]
+            if m.get("pinned"):
+                rrf[mid] = base * 1.25
+        ranked = sorted(rrf.items(), key=lambda x: -x[1])
+        return [row_by_id[mid] for mid, _ in ranked[:k]]
 
     def _trusted_by_ids(self, ids: list[str], kind: str = "") -> list[dict]:
         if not ids:
@@ -282,10 +407,11 @@ class Memory:
                                  "ORDER BY updated DESC LIMIT ?", (workspace, limit)).fetchall()
             return [self._row(r) for r in rs]
 
-    def recall_block(self, query: str, workspace: str, k: int = 6, max_chars: int = 1800) -> tuple[str, list[str]]:
+    def recall_block(self, query: str, workspace: str, k: int = 6, max_chars: int = 1800,
+                     query_vec: list[float] | None = None) -> tuple[str, list[str]]:
         """生成注入系统提示的记忆块 + 命中的 id。置顶记忆总是包含。"""
         pinned = self._pinned(workspace)
-        hits = self.search(query, k, workspace) if k > 0 else []
+        hits = self.search(query, k, workspace, query_vec=query_vec) if k > 0 else []
         seen, picked = set(), []
         for m in pinned + hits:
             if m["id"] not in seen:

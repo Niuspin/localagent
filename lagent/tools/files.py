@@ -6,6 +6,7 @@ import base64
 import codecs
 import difflib
 import fnmatch
+import hashlib
 import io
 import json
 import os
@@ -25,6 +26,11 @@ from .base import P, Tool, ToolResult, clip, obj, register
 from .ctx import ToolCtx
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".idea", ".vscode", ".mypy_cache", ".pytest_cache", "dist", "build", ".next", "target"}
+_UNSAFE_SHELL_ENV = re.compile(
+    r"^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.*|PYTHONPATH|PYTHONHOME|NODE_OPTIONS|RUBYOPT|PERL5OPT|BASH_ENV|ENV|ZDOTDIR|PATH|HOME|USERPROFILE|APPDATA|LOCALAPPDATA)$",
+    re.I,
+)
+_SECRET_SHELL_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)", re.I)
 IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 OFFICE_EXT = {".docx", ".xlsx", ".xlsm", ".pptx", ".pdf"}
 MAX_READ_CHARS = 40000
@@ -32,6 +38,11 @@ MAX_READ_CHARS = 40000
 
 def err(msg: str) -> ToolResult:
     return ToolResult(msg, error=True)
+
+
+def line_digest(line: str) -> str:
+    """为单行文本生成 4 位稳定内容哈希（用于 hash/行号 锚定精确编辑）。"""
+    return hashlib.blake2b(line.rstrip("\r\n").encode("utf-8"), digest_size=2).hexdigest()
 
 
 # ------------------------------------------------------------------ 文本编码
@@ -208,12 +219,13 @@ async def read_file(ctx: ToolCtx, a: dict) -> ToolResult:
     total = len(lines)
     off = max(1, int(a.get("offset") or 1))
     lim = int(a.get("limit") or 2000)
+    with_anchors = bool(a.get("anchors"))
     chunk = lines[off - 1: off - 1 + lim]
     out, used = [], 0
     for i, ln in enumerate(chunk, off):
         if len(ln) > 2000:
             ln = ln[:2000] + "…(行过长已截断)"
-        s = f"{i:>6}\t{ln}"
+        s = f"{i:>6}#{line_digest(ln)}\t{ln}" if with_anchors else f"{i:>6}\t{ln}"
         used += len(s) + 1
         if used > MAX_READ_CHARS:
             out.append(f"…[输出过长，已截止到第 {i - 1} 行；用 offset={i} 继续读取]")
@@ -251,9 +263,10 @@ def _read_image(ctx: ToolCtx, p: Path, size: int) -> ToolResult:
 
 
 register(Tool(
-    "read_file", "读取工作区内的文件。文本带行号返回，支持 offset/limit 分段；也能读 docx/xlsx/pptx/pdf（提取文本）和图片（需多模态模型）。",
+    "read_file", "读取工作区内的文件。文本带行号返回，支持 offset/limit 分段（设 anchors=true 可输出行哈希用于精确编辑）；也能读 docx/xlsx/pptx/pdf 和图片。",
     obj({"path": P("string", "相对工作区的路径"), "offset": P("integer", "起始行号(从1开始)"),
-         "limit": P("integer", "最多读取行数，默认 2000")}, ["path"]),
+         "limit": P("integer", "最多读取行数，默认 2000"),
+         "anchors": P("boolean", "是否在行号旁显示 4 位内容校验哈希")}, ["path"]),
     read_file, "read", title=lambda a: f"读取 {a.get('path', '')}", path_args=("path",)))
 
 
@@ -347,15 +360,23 @@ def _reindent_edit(text: str, old: str, new: str) -> str | None:
     return "\n".join(t_lines)
 
 
-def _apply_edit(text: str, old: str, new: str, replace_all: bool) -> tuple[str | None, str]:
+def _apply_edit(text: str, old: str, new: str, replace_all: bool,
+                start_line: int | None = None, line_hash: str | None = None) -> tuple[str | None, str]:
     if old == new:
         return None, "old_string 与 new_string 相同，无需修改"
+    t_lines = text.split("\n")
+    if start_line is not None:
+        sl = int(start_line)
+        if sl < 1 or sl > len(t_lines):
+            return None, f"start_line={sl} 超出文件行数范围 (1..{len(t_lines)})"
+        if line_hash and line_digest(t_lines[sl - 1]) != str(line_hash).strip().lower():
+            return None, f"第 {sl} 行校验哈希不匹配（文件内容已变化），请先重新 read_file"
     cnt = text.count(old)
     if cnt == 0:
         # 容错：忽略行尾空白差异
         norm = lambda s: "\n".join(x.rstrip() for x in s.split("\n"))  # noqa: E731
         if old and norm(old) in norm(text) and norm(text).count(norm(old)) == 1:
-            t_lines, o_lines = text.split("\n"), old.split("\n")
+            o_lines = old.split("\n")
             for i in range(len(t_lines) - len(o_lines) + 1):
                 if all(t_lines[i + j].rstrip() == o_lines[j].rstrip() for j in range(len(o_lines))):
                     t_lines[i:i + len(o_lines)] = new.split("\n")
@@ -366,16 +387,31 @@ def _apply_edit(text: str, old: str, new: str, replace_all: bool) -> tuple[str |
             if fixed is not None:
                 return fixed, "ok(缩进已按文件原样对齐)"
         first = next((ln.strip() for ln in old.split("\n") if ln.strip()), "")
-        near = difflib.get_close_matches(first, [ln.strip() for ln in text.split("\n")], n=3, cutoff=0.6) if first else []
+        near = difflib.get_close_matches(first, [ln.strip() for ln in t_lines], n=3, cutoff=0.6) if first else []
         hint = ("；文件中最相似的行: " + " | ".join(repr(x[:80]) for x in near)) if near else ""
         return None, f"在文件中找不到 old_string（需逐字符匹配，含缩进和换行）。请先 read_file 确认原文{hint}"
     if cnt > 1 and not replace_all:
-        return None, f"old_string 出现了 {cnt} 次，不唯一。请包含更多上下文使其唯一，或设置 replace_all=true"
+        if start_line is not None:
+            # 用 start_line 定位最接近的唯一匹配位置
+            sl_idx = int(start_line) - 1
+            offsets: list[int] = []
+            pos = 0
+            while True:
+                idx = text.find(old, pos)
+                if idx < 0:
+                    break
+                offsets.append(idx)
+                pos = idx + 1
+            best = min(offsets, key=lambda o: abs(text[:o].count("\n") - sl_idx))
+            best_line = text[:best].count("\n")
+            if abs(best_line - sl_idx) <= 5:
+                return text[:best] + new + text[best + len(old):], "ok(按行号锚定)"
+        return None, f"old_string 出现了 {cnt} 次，不唯一。请包含更多上下文、传 start_line 锚定，或设置 replace_all=true"
     return text.replace(old, new) if replace_all else text.replace(old, new, 1), "ok"
 
 
 def _apply_edits_args(text: str, a: dict) -> tuple[str | None, str]:
-    """支持单次 old_string/new_string 替换，以及 edits 数组的原子顺序批量替换。"""
+    """支持单次 old_string/new_string 替换，以及 edits 数组的原子顺序批量替换（含可选 start_line/line_hash 锚点）。"""
     edits = a.get("edits")
     if edits is not None:
         if not isinstance(edits, list) or not edits:
@@ -384,14 +420,20 @@ def _apply_edits_args(text: str, a: dict) -> tuple[str | None, str]:
         for idx, op in enumerate(edits, 1):
             if not isinstance(op, dict) or "old_string" not in op or "new_string" not in op:
                 return None, f"edits[{idx}] 缺少 old_string 或 new_string"
-            nxt, why = _apply_edit(cur, str(op["old_string"]), str(op["new_string"]), bool(op.get("replace_all")))
+            nxt, why = _apply_edit(
+                cur, str(op["old_string"]), str(op["new_string"]), bool(op.get("replace_all")),
+                start_line=op.get("start_line"), line_hash=op.get("line_hash"),
+            )
             if nxt is None:
                 return None, f"第 {idx} 处编辑失败: {why}"
             cur = nxt
         return cur, f"ok({len(edits)} 处修改)"
     if "old_string" not in a or "new_string" not in a:
         return None, "缺少 old_string / new_string（或提供 edits 数组）"
-    return _apply_edit(text, str(a["old_string"]), str(a["new_string"]), bool(a.get("replace_all")))
+    return _apply_edit(
+        text, str(a["old_string"]), str(a["new_string"]), bool(a.get("replace_all")),
+        start_line=a.get("start_line"), line_hash=a.get("line_hash"),
+    )
 
 
 async def edit_file(ctx: ToolCtx, a: dict) -> ToolResult:
@@ -429,17 +471,98 @@ async def edit_preview(ctx: ToolCtx, a: dict) -> dict | None:
 
 
 register(Tool(
-    "edit_file", "对已有文本文件做精确字符串替换（支持单次 old_string/new_string，或传 edits 数组按顺序原子应用多处修改）。修改前先 read_file。",
+    "edit_file", "对已有文本文件做精确字符串替换（支持单次 old_string/new_string，或传 edits 数组按顺序原子应用多处修改；可选 start_line/line_hash 精确锚定）。修改前先 read_file。",
     obj({"path": P("string", "文件路径"),
          "old_string": P("string", "要被替换的原文（逐字符，含缩进）"),
          "new_string": P("string", "替换后的文本"),
          "replace_all": P("boolean", "替换所有出现处，默认 false"),
+         "start_line": P("integer", "可选起始行号锚点（用于消除重复片段歧义）"),
+         "line_hash": P("string", "可选 4 位行哈希校验（需与 read_file(anchors=true) 输出一致）"),
          "edits": {"type": "array", "description": "多处按顺序替换列表（全成功才写入，与单次替换二选一）",
                    "items": obj({"old_string": P("string", "原文"), "new_string": P("string", "新文本"),
-                                 "replace_all": P("boolean", "替换所有出现处")}, ["old_string", "new_string"])}},
+                                 "replace_all": P("boolean", "替换所有出现处"),
+                                 "start_line": P("integer", "起始行号"), "line_hash": P("string", "行哈希")}, ["old_string", "new_string"])}},
         ["path"]),
     edit_file, "write", title=lambda a: f"编辑 {a.get('path', '')}", preview=edit_preview, path_args=("path",),
     precheck=_edit_precheck))
+
+
+def _run_diagnostics_sync(ctx: ToolCtx, target_rel: str) -> ToolResult:
+    p = ctx.guard.resolve(target_rel or ".")
+    issues: list[str] = []
+    exts_py = []
+    exts_js = []
+    files_to_check: list[Path] = []
+    if p.is_file():
+        files_to_check = [p]
+    elif p.is_dir():
+        for d, _dns, fns in _walk(p, 4):
+            for fn in fns:
+                fp = d / fn
+                if fp.suffix.lower() in (".py", ".json", ".js", ".mjs", ".cjs", ".ts", ".tsx"):
+                    files_to_check.append(fp)
+                    if len(files_to_check) >= 40:
+                        break
+            if len(files_to_check) >= 40:
+                break
+    else:
+        return err(f"路径不存在: {target_rel}")
+
+    for fp in files_to_check:
+        rel = ctx.guard.rel(fp)
+        ext = fp.suffix.lower()
+        try:
+            raw = fp.read_bytes()
+        except OSError:
+            continue
+        if ext == ".py":
+            exts_py.append(fp)
+            try:
+                compile(decode_bytes(raw)[0], rel, "exec")
+            except SyntaxError as e:
+                issues.append(f"{rel}:{e.lineno or '?'}: SyntaxError {e.msg}")
+        elif ext == ".json":
+            try:
+                json.loads(decode_bytes(raw)[0])
+            except json.JSONDecodeError as e:
+                issues.append(f"{rel}:{e.lineno}:{e.colno}: JSONError {e.msg}")
+        elif ext in (".js", ".mjs", ".cjs"):
+            exts_js.append(fp)
+
+    kw: dict[str, Any] = {"creationflags": 0x08000000} if sec.IS_WIN else {}
+    ruff = shutil.which("ruff")
+    if ruff and exts_py:
+        try:
+            r = subprocess.run([ruff, "check", "--quiet", "--output-format", "concise", *[str(x) for x in exts_py[:20]]],
+                               cwd=str(ctx.guard.ws), capture_output=True, text=True, timeout=4, **kw)
+            for ln in (r.stdout or "").splitlines()[:30]:
+                if ln.strip():
+                    issues.append(ln.strip())
+        except Exception:  # noqa: BLE001
+            pass
+    node = shutil.which("node")
+    if node and exts_js:
+        for fp in exts_js[:10]:
+            try:
+                r = subprocess.run([node, "--check", str(fp)], cwd=str(ctx.guard.ws), capture_output=True, text=True, timeout=2, **kw)
+                if r.returncode != 0:
+                    msg = (r.stderr or r.stdout or "syntax error").strip().splitlines()[0]
+                    issues.append(f"{ctx.guard.rel(fp)}: {msg}")
+            except Exception:  # noqa: BLE001
+                pass
+    if not issues:
+        return ToolResult(f"诊断完成（检查 {len(files_to_check)} 个文件）：未发现语法或静态检查错误。")
+    return ToolResult("发现以下诊断问题:\n" + "\n".join(issues[:40]))
+
+
+async def code_diagnostics(ctx: ToolCtx, a: dict) -> ToolResult:
+    return await asyncio.to_thread(_run_diagnostics_sync, ctx, str(a.get("path") or "."))
+
+
+register(Tool(
+    "code_diagnostics", "运行轻量代码静态/语法诊断（Python 语法/ruff、JSON、JS 语法检查），定位编辑后的错误位置。",
+    obj({"path": P("string", "相对文件或目录路径，默认 '.'")}, []),
+    code_diagnostics, "read", group="extras", title=lambda a: f"代码诊断 {a.get('path') or '.'}", path_args=("path",)))
 
 
 async def repo_map(ctx: ToolCtx, a: dict) -> ToolResult:
@@ -794,6 +917,15 @@ def prepare_exec(ctx: ToolCtx, cmd: str, cwd_arg: str | None = None) -> Prepared
         cwd = ctx.guard.resolve(cwd_arg)
         if not cwd.is_dir():
             raise ValueError("cwd 不是目录")
+    elif getattr(ctx.session, "shell_cwd", ""):
+        try:
+            saved_cwd = ctx.guard.resolve(ctx.session.shell_cwd)
+            if saved_cwd.is_dir():
+                cwd = saved_cwd
+            else:
+                ctx.session.shell_cwd = ""
+        except sec.SecurityError:
+            ctx.session.shell_cwd = ""
     home = ctx.journal.dir / "cmdhome"
     home.mkdir(parents=True, exist_ok=True)
     mode = ctx.cfg.get("security", "command_sandbox", default="auto")
@@ -802,12 +934,60 @@ def prepare_exec(ctx: ToolCtx, cmd: str, cwd_arg: str | None = None) -> Prepared
     if mode == "auto":
         argv, kind = sec.wrap_in_sandbox(argv, ctx.guard.ws, allow_net, home)
     env = sec.clean_env(str(home))
+    for k, v in (getattr(ctx.session, "shell_env", None) or {}).items():
+        if isinstance(k, str) and not _UNSAFE_SHELL_ENV.match(k) and not _SECRET_SHELL_ENV.search(k):
+            env[k] = str(v)
     kw: dict[str, Any] = {}
     if sec.IS_WIN:
         kw["creationflags"] = 0x08000000 | 0x00000200  # NO_WINDOW | NEW_PROCESS_GROUP
     else:
         kw["start_new_session"] = True
     return Prepared(argv, env, kw, cwd, mode, kind, allow_net)
+
+
+def _update_shell_state(ctx: ToolCtx, cmd: str, base_cwd: Path) -> None:
+    """在命令成功退出后追踪会话级 cd / export / unset / Set-Location 状态（严格限制在工作区内）。"""
+    import shlex
+    parts = [p.strip() for p in re.split(r"\s*(?:&&|;|\n)\s*", cmd) if p.strip()]
+    cur = base_cwd
+    for p in parts:
+        # 追踪 cd / Set-Location
+        m_cd = re.match(r"^(?:cd|pushd|Set-Location)\s+(.+)$", p, re.I)
+        if m_cd:
+            raw_dir = m_cd.group(1).strip()
+            try:
+                toks = shlex.split(raw_dir)
+                tgt = toks[0] if toks else raw_dir
+            except ValueError:
+                tgt = raw_dir.strip("\"'")
+            if tgt in ("~", "-", "") or tgt.startswith("-"):
+                continue
+            try:
+                cand = Path(tgt) if Path(tgt).is_absolute() else (cur / tgt)
+                resolved = ctx.guard.resolve(str(cand))
+                if resolved.is_dir():
+                    cur = resolved
+                    rel = ctx.guard.rel(cur)
+                    ctx.session.shell_cwd = "" if rel == "." else rel
+            except sec.SecurityError:
+                pass
+            continue
+        # 追踪 export KEY=VAL / $env:KEY="VAL"
+        m_exp = re.match(r"^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", p)
+        if m_exp:
+            k, v = m_exp.group(1), m_exp.group(2).strip().strip("\"'")
+            if not _UNSAFE_SHELL_ENV.match(k) and not _SECRET_SHELL_ENV.search(k):
+                ctx.session.shell_env[k] = v
+            continue
+        m_ps = re.match(r"^\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$", p, re.I)
+        if m_ps:
+            k, v = m_ps.group(1), m_ps.group(2).strip().strip("\"'")
+            if not _UNSAFE_SHELL_ENV.match(k) and not _SECRET_SHELL_ENV.search(k):
+                ctx.session.shell_env[k] = v
+            continue
+        m_uns = re.match(r"^unset\s+([A-Za-z_][A-Za-z0-9_]*)$", p)
+        if m_uns:
+            ctx.session.shell_env.pop(m_uns.group(1), None)
 
 
 def kill_tree(proc: Any) -> None:
@@ -844,6 +1024,8 @@ async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
                                                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **pr.kw)
     except OSError as e:
         return err(f"无法启动命令: {e}")
+    if proc.pid:
+        sec.harden_windows_process(proc.pid)
     buf = bytearray()
     cap = 400_000
     pending_delta = bytearray()
@@ -903,6 +1085,8 @@ async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
     finally:
         if proc.returncode is None:
             kill()
+        if proc.pid:
+            sec.release_windows_job(proc.pid)
             try:
                 await asyncio.wait_for(proc.wait(), 5)
             except asyncio.TimeoutError:
@@ -924,6 +1108,8 @@ async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
     if cancelled:
         return ToolResult(f"{text}\n[已取消]", error=True, meta={"sandbox": tag})
     code = proc.returncode
+    if code == 0 and not a.get("cwd"):
+        _update_shell_state(ctx, cmd, pr.cwd)
     body = (text or "(无输出)") + (f"\n[退出码 {code}]" if code else "")
     if kind == "bwrap" and not allow_net and code and re.search(r"resolve|network|connect|unreachable", text, re.I):
         body += "\n[提示: 沙箱默认断网。如确需联网命令，请用户在 设置→安全 中开启“允许命令联网”]"
@@ -936,7 +1122,8 @@ async def command_preview(ctx: ToolCtx, a: dict) -> dict | None:
     mode = ctx.cfg.get("security", "command_sandbox", default="auto")
     sb = f"沙箱: {info['kind']}（{'可联网' if net else '断网'}）" if info["available"] and mode == "auto" else "⚠ 无沙箱：命令将以你的用户权限直接运行"
     bg = "\n方式: 后台运行（不等待结束，可用 job_output 查看、job_stop 终止）" if a.get("background") else ""
-    return {"kind": "command", "text": f"{a.get('command', '')}\n\n工作目录: {a.get('cwd') or '.'}{bg}\n{sb}"}
+    cur_cwd = a.get("cwd") or getattr(ctx.session, "shell_cwd", "") or "."
+    return {"kind": "command", "text": f"{a.get('command', '')}\n\n工作目录: {cur_cwd}{bg}\n{sb}"}
 
 
 register(Tool(

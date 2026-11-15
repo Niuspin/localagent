@@ -179,6 +179,7 @@
   };
 
   /* ---------------------------------------------------------------- 会话渲染 */
+  var CHAT_WINDOW = 32;
   LA.chat.renderSession = function (view, opts) {
     opts = opts || {};
     LA.clear(col);
@@ -187,7 +188,43 @@
     if (!msgs.length && !view.active_run) { LA.chat.renderEmpty(); return; }
     var wrap = el('div', { class: 'msgs', id: 'msgs' });
     col.appendChild(wrap);
-    msgs.forEach(function (m, i) { wrap.appendChild(m.role === 'user' ? renderUser(m, i) : new AstView(m, i).el); });
+    var start = Math.max(0, msgs.length - CHAT_WINDOW);
+    var moreBar = null;
+    function renderSlice(fromIdx, toIdx, beforeNode) {
+      var frag = document.createDocumentFragment();
+      for (var i = fromIdx; i < toIdx; i++) {
+        var m = msgs[i];
+        frag.appendChild(m.role === 'user' ? renderUser(m, i) : new AstView(m, i).el);
+      }
+      if (beforeNode) wrap.insertBefore(frag, beforeNode);
+      else wrap.appendChild(frag);
+    }
+    if (start > 0) {
+      moreBar = el('div', { class: 'msg-more-bar' });
+      function updateMoreBar() {
+        LA.clear(moreBar);
+        if (start <= 0) { moreBar.remove(); return; }
+        var step = Math.min(start, CHAT_WINDOW);
+        moreBar.appendChild(el('button', {
+          class: 'btn sm ghost',
+          type: 'button',
+          text: '显示更早 ' + step + ' 条消息（共隐藏 ' + start + ' 条）',
+          on: {
+            click: function () {
+              var prevH = scrollEl.scrollHeight;
+              var nextStart = Math.max(0, start - CHAT_WINDOW);
+              renderSlice(nextStart, start, moreBar.nextSibling);
+              start = nextStart;
+              updateMoreBar();
+              scrollEl.scrollTop += Math.max(0, scrollEl.scrollHeight - prevH);
+            }
+          }
+        }));
+      }
+      wrap.appendChild(moreBar);
+      updateMoreBar();
+    }
+    renderSlice(start, msgs.length, null);
     stick = true;
     requestAnimationFrame(function () { scrollEl.scrollTop = scrollEl.scrollHeight; });
   };
@@ -280,8 +317,14 @@
       var outPill = el('span', { class: 'u-pill', text: '输出 ' + LA.fmtN(u.completion_tokens) });
       this.usageEl.append(inPill, outPill);
       if (u.tps) {
-        var tpsPill = el('span', { class: 'u-pill tps', text: u.tps + ' tok/s' });
-        this.usageEl.appendChild(tpsPill);
+        this.usageEl.appendChild(el('span', { class: 'u-pill tps', text: u.tps + ' tok/s' }));
+      }
+      if (u.ttft_ms) {
+        var ttft = u.ttft_ms >= 1000 ? (u.ttft_ms / 1000).toFixed(1) + 's' : u.ttft_ms + 'ms';
+        this.usageEl.appendChild(el('span', { class: 'u-pill', text: '首字 ' + ttft }));
+      }
+      if (u.cache_hit_rate != null && u.cache_hit_rate > 0) {
+        this.usageEl.appendChild(el('span', { class: 'u-pill kv', text: 'KV 缓存 ' + Math.round(u.cache_hit_rate * 100) + '%' }));
       }
     }
     LA.clear(this.acts);
@@ -334,20 +377,23 @@
     return v;
   }
 
-  function splitStableMarkdown(src) {
-    var lines = src.split('\n'), fence = null, safeCut = -1;
-    for (var i = 0; i < lines.length - 1; i++) {
-      var trimmed = lines[i].trim();
+  function splitMarkdownBlocks(src) {
+    var lines = String(src || '').split('\n'), fence = null, cur = [], out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i], trimmed = ln.trim();
       var fm = /^(```+|~~~+)/.exec(trimmed);
       if (fm) {
         if (!fence) fence = fm[1][0];
         else if (trimmed[0] === fence && /^[`~]+\s*$/.test(trimmed)) fence = null;
+        cur.push(ln);
       } else if (!fence && trimmed === '') {
-        safeCut = i + 1;
+        if (cur.length) { out.push(cur.join('\n')); cur = []; }
+      } else {
+        cur.push(ln);
       }
     }
-    if (safeCut <= 0) return { stable: '', tail: src };
-    return { stable: lines.slice(0, safeCut).join('\n'), tail: lines.slice(safeCut).join('\n') };
+    if (cur.length) out.push(cur.join('\n'));
+    return out;
   }
 
   function linkifyWorkspacePaths(rootEl) {
@@ -374,33 +420,50 @@
 
   function mkText(b) {
     var d = el('div', { class: 'md' });
-    var stableEl = null, tailEl = null, lastStable = '', lastTail = '', lastRendered = null;
+    var stableWrap = null, tailEl = null, blockNodes = [], lastTail = '', lastRendered = null, linkifiedFinal = false;
     var v = { el: d, type: 'text', b: b };
     v.update = function () {
       var txt = b.text || '';
-      if (b.live && txt.length > 240) {
-        var sp = splitStableMarkdown(txt);
-        if (!stableEl) {
+      if (b.live || stableWrap) {
+        if (!stableWrap) {
           LA.clear(d);
-          stableEl = el('div', { class: 'md-stable' });
+          stableWrap = el('div', { class: 'md-stable' });
           tailEl = el('div', { class: 'md-tail' });
-          d.append(stableEl, tailEl);
+          d.append(stableWrap, tailEl);
         }
-        if (sp.stable !== lastStable) {
-          lastStable = sp.stable;
-          stableEl.innerHTML = sp.stable ? LA.renderMarkdown(sp.stable) : '';
+        var chunks = splitMarkdownBlocks(txt);
+        var committed = b.live ? (chunks.length > 1 ? chunks.slice(0, -1) : []) : chunks;
+        var tail = b.live ? (chunks[chunks.length - 1] || '') : '';
+        var common = 0;
+        while (common < blockNodes.length && common < committed.length && blockNodes[common]._raw === committed[common]) {
+          common++;
         }
-        if (sp.tail !== lastTail) {
-          lastTail = sp.tail;
-          tailEl.innerHTML = sp.tail ? LA.renderMarkdown(sp.tail) : '';
+        while (blockNodes.length > common) {
+          var popNode = blockNodes.pop();
+          popNode.remove();
         }
-      } else {
-        if (stableEl || lastRendered !== txt) {
-          stableEl = tailEl = null; lastStable = ''; lastTail = '';
-          lastRendered = txt;
-          d.innerHTML = LA.renderMarkdown(txt);
-          if (!b.live) linkifyWorkspacePaths(d);
+        for (var j = common; j < committed.length; j++) {
+          var blk = el('div', { class: 'md-blk', html: LA.renderMarkdown(committed[j]) });
+          blk._raw = committed[j];
+          if (!b.live) linkifyWorkspacePaths(blk);
+          stableWrap.appendChild(blk);
+          blockNodes.push(blk);
         }
+        if (tail !== lastTail) {
+          lastTail = tail;
+          tailEl.innerHTML = tail ? LA.renderMarkdown(tail) : '';
+        }
+        if (!b.live) {
+          if (tailEl) { tailEl.remove(); tailEl = null; }
+          if (!linkifiedFinal) {
+            linkifiedFinal = true;
+            for (var k = 0; k < common; k++) linkifyWorkspacePaths(blockNodes[k]);
+          }
+        }
+      } else if (lastRendered !== txt) {
+        lastRendered = txt;
+        d.innerHTML = LA.renderMarkdown(txt);
+        linkifyWorkspacePaths(d);
       }
       d.classList.toggle('cursor', !!b.live);
     };
@@ -496,14 +559,31 @@
       if (meta.undo_id) chips.appendChild(el('button', { class: 'btn sm', html: icon('undo', 13) + ' 撤销操作', on: { click: function (e) { e.stopPropagation(); undo(meta.undo_id, chips); } } }));
       if (chips.childNodes.length) body.appendChild(chips);
 
-      // 审批卡片
+      // 审批卡片与拒绝后引导
       if (b.approval) {
         if (apId !== b.approval.approval_id) {
           LA.clear(apBox);
           apBox.appendChild(approvalCard(b));
           apId = b.approval.approval_id;
         }
-      } else if (apId) {
+      } else if (s === 'denied') {
+        apId = null;
+        LA.clear(apBox);
+        var denyActs = [el('span', { class: 'hint2', text: '操作已被拒绝 · ' }),
+          el('button', { class: 'btn sm', type: 'button', text: '重述替代方案', on: { click: function () {
+            if (LA.composer && LA.composer.setText) {
+              LA.composer.setText('请不要执行刚才被拒绝的操作（' + (b.title || b.name) + '），改用只读排查或更安全的方案：');
+              LA.composer.focus();
+            }
+          } } })];
+        var effMode = (LA.S.cur && LA.S.cur.permission_mode) || LA.cfg('agent.permission_mode', 'ask');
+        if (effMode === 'ask' && LA.setSessionMode) {
+          denyActs.push(el('button', { class: 'btn sm ghost', type: 'button', text: '本会话改为自动编辑', on: { click: function () {
+            LA.setSessionMode('auto_edit').then(function () { LA.toast('当前会话已切换为“自动编辑”模式', 'ok'); });
+          } } }));
+        }
+        apBox.appendChild(el('div', { class: 'deny-actions' }, denyActs));
+      } else if (apId || apBox.childNodes.length) {
         LA.clear(apBox);
         apId = null;
       }
@@ -638,6 +718,24 @@
     }
     function sched(v) { schedule(v.b.__k || (v.b.__k = 'b' + Math.random()), function () { v.update(); }); }
     function findTool(id) { for (var i = view.views.length - 1; i >= 0; i--) { var v = view.views[i]; if (v.type === 'tool' && v.b.id === id) return v; } return null; }
+    var apQueueBar = null;
+    function syncApQueue() {
+      var pending = view.views.filter(function (v) { return v.type === 'tool' && v.b.status === 'pending_approval'; });
+      if (pending.length >= 2) {
+        if (!apQueueBar) {
+          apQueueBar = el('div', { class: 'ap-queue-bar' });
+          view.el.insertBefore(apQueueBar, view.usageEl);
+        }
+        LA.clear(apQueueBar);
+        apQueueBar.appendChild(el('span', { text: '审批队列：当前有 ' + pending.length + ' 个操作等待确认' }));
+        apQueueBar.appendChild(el('button', { class: 'btn sm primary', type: 'button', text: '跳至下一项', on: { click: function () {
+          pending[0].el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } } }));
+      } else if (apQueueBar) {
+        apQueueBar.remove();
+        apQueueBar = null;
+      }
+    }
 
     var H = {
       thinking_delta: function (d) {
@@ -682,23 +780,23 @@
       approval_request: function (d) {
         var v = findTool(d.tool_id); if (!v) return;
         v.b.status = 'pending_approval'; v.b.approval = { approval_id: d.approval_id, reason: d.reason, risk: d.risk, preview: d.preview, tainted: d.tainted };
-        v.update(); LA.chat.scrollToBottom(true);
+        v.update(); syncApQueue(); LA.chat.scrollToBottom(true);
         if (document.hidden && 'Notification' in window && Notification.permission === 'granted') { try { new Notification('LocalAgent 需要你确认', { body: d.title }); } catch (e) {} }
         document.title = '⏸ 需要确认 · LocalAgent';
       },
       approval_resolved: function (d) {
-        var v = findTool(d.tool_id); if (!v) return; v.b.approval = null; v.b.status = d.decision === 'deny' ? 'denied' : 'running'; v.update();
+        var v = findTool(d.tool_id); if (!v) return; v.b.approval = null; v.b.status = d.decision === 'deny' ? 'denied' : 'running'; v.update(); syncApQueue();
         document.title = 'LocalAgent';
       },
       tool_result: function (d) {
         var v = findTool(d.id); if (!v) return;
-        v.b.status = d.status; v.b.content = d.content; v.b.live_output = ''; v.b.meta = d.meta || {}; v.b.duration_ms = d.duration_ms; v.b.approval = null; v.update();
+        v.b.status = d.status; v.b.content = d.content; v.b.live_output = ''; v.b.meta = d.meta || {}; v.b.duration_ms = d.duration_ms; v.b.approval = null; v.update(); syncApQueue();
         if ((d.meta && (d.meta.path || d.meta.undo_id)) || d.name === 'run_command') LA.bus.emit('fschanged');
       },
       question: function (d) { endBlocks(); view.toolsWrap = null; view.lastType = 'note'; view.body.appendChild(questionCard(d, view)); LA.chat.scrollToBottom(true); },
       todo_update: function (d) { LA.S.cur.todos = d.items; view.setTodos(d.items); LA.bus.emit('todos', d.items); },
       usage: function (d) {
-        model.usage = { prompt_tokens: d.prompt_tokens, completion_tokens: d.completion_tokens, tps: d.tps };
+        model.usage = { prompt_tokens: d.prompt_tokens, completion_tokens: d.completion_tokens, tps: d.tps, cache_hit_rate: d.cache_hit_rate, ttft_ms: d.ttft_ms };
         view.renderFooter(); LA.S.cur.context = { ctx: d.ctx, used: d.used, pct: d.pct }; LA.bus.emit('context', LA.S.cur.context);
       },
       context_event: function (d) { endBlocks(); view.addNote(d.detail, d.kind === 'trimmed'); if (d.kind === 'grow_done') LA.refreshState(); },

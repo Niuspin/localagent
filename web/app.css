@@ -1927,3 +1927,27 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
   margin-right: 8px; font-weight: 600;
 }
 .math-block code { font-family: var(--mono, monospace); font-size: .9em; white-space: pre-wrap; background: none; padding: 0; }
+
+/* ---------- 会话级权限、审批队列、拒绝引导、Hub 模型卡片、长会话折叠 ---------- */
+.pill.sess-ov { border-color: var(--accent); color: var(--accent); font-weight: 500; }
+.u-pill.kv { border-color: var(--accent); color: var(--accent); }
+.msg-more-bar { display: flex; justify-content: center; padding: 6px 0 12px; }
+.ap-queue-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 8px 0 4px; padding: 8px 12px; border-radius: 10px;
+  border: 1px solid var(--accent); background: var(--accent-soft, rgba(201, 100, 66, 0.08));
+  font-size: 13px;
+}
+.deny-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 12px; border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+.hub-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.hub-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+.hub-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+.hub-meta small { width: 100%; color: var(--muted); font-size: 12px; }

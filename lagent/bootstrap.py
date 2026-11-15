@@ -313,6 +313,11 @@ def select_release_assets(
                             selected.append(cudart12)
                         return rel, selected
 
+                if hw_info.get("has_amd"):
+                    rocm = _find_asset(assets, r"^llama-.*-bin-ubuntu-rocm.*-x64\.tar\.gz$")
+                    if rocm:
+                        return rel, [rocm]
+
                 vulkan = _find_asset(assets, r"^llama-.*-bin-ubuntu-vulkan-x64\.tar\.gz$")
                 if vulkan:
                     return rel, [vulkan]

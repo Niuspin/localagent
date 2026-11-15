@@ -23,7 +23,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import __version__, gguf, hw
+from . import __version__, appwindow, gguf, hub as hub_mod, hw
 from .paths import FROZEN
 from . import security as sec
 from .commands import list_commands
@@ -33,6 +33,8 @@ from .hooks import HookManager
 from .journal import Journal, atomic_write
 from .loop import Agent
 from .mcp import McpManager
+from .mcp.launch import LaunchError
+from .mcp.session import McpError
 from .memory import Memory
 from .outputs import OutputStore
 from .permissions import PermissionManager
@@ -76,7 +78,9 @@ class State:
         if FROZEN:      # 打包运行：程序本体（exe 与其资源目录）同样只读
             protected += [Path(sys.executable), CODE_DIR]
         hidden = [data]
-        self.mcp = McpManager(data, self.audit)
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self.mcp = McpManager(data, self.audit, on_change=lambda _n, v: self.broadcast("mcp", {"server": v}))
+        self.hub = hub_mod.DownloadManager(root / "models", on_event=self.broadcast_threadsafe)
         self.agent = Agent(cfg=self.cfg, engine=self.engine, store=self.store, journal=self.journal, audit=self.audit, memory=self.memory,
                            skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp,
                            outputs=self.outputs)
@@ -90,6 +94,18 @@ class State:
                 q.put_nowait((event, data))
             except asyncio.QueueFull:
                 pass
+
+    def broadcast_threadsafe(self, event: str, data: dict) -> None:
+        if self._loop is None or self._loop.is_closed():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self._loop:
+            self.broadcast(event, data)
+        else:
+            self._loop.call_soon_threadsafe(self.broadcast, event, data)
 
     def workspace_of(self, sid: str | None) -> str:
         if sid:
@@ -174,13 +190,11 @@ def make_app(st: State) -> Starlette:
             async def handler(req: Request) -> Response:
                 try:
                     return await fn(req)
-                except (ValueError, sec.SecurityError, json.JSONDecodeError) as e:
+                except (ValueError, sec.SecurityError, json.JSONDecodeError, McpError, LaunchError) as e:
                     return bad(str(e))
                 except KeyError as e:
                     return bad(str(e.args[0]) if e.args else "不存在", 404)
-                except PermissionError as e:
-                    return bad(str(e), 409)
-                except EngineError as e:
+                except (PermissionError, FileExistsError, EngineError) as e:
                     return bad(str(e), 409)
             R.append(Route(path, handler, methods=methods))
             return fn
@@ -200,9 +214,12 @@ def make_app(st: State) -> Starlette:
         models, mms = await asyncio.to_thread(models_view)
         sid = req.query_params.get("session_id")
         sess = st.store.get(sid) if sid else None
+        global_mode = st.cfg.get("agent", "permission_mode")
+        eff_mode = (getattr(sess, "permission_mode", "") if sess else "") or global_mode
         return J({"version": __version__, "workspace": st.workspace_of(sid), "engine": st.engine.state(), "models": models,
                   "mmprojs": mms, "hw": await asyncio.to_thread(hw.detect), "sandbox": sec.sandbox_info(),
-                  "permission_mode": st.cfg.get("agent", "permission_mode"),
+                  "permission_mode": eff_mode, "global_permission_mode": global_mode,
+                  "offline": os.environ.get("LOCALAGENT_OFFLINE") == "1",
                   "tainted": bool(sess.tainted) if sess else False})
 
     @route("/api/config", ["GET", "PATCH"])
@@ -361,7 +378,13 @@ def make_app(st: State) -> Starlette:
                 s.pinned = bool(d["pinned"])
             if "workspace" in d:
                 s.workspace = str(sec.validate_workspace(d["workspace"])) if d["workspace"] else ""
+            if "permission_mode" in d:
+                pm = str(d["permission_mode"] or "").strip()
+                if pm and pm not in ("ask", "auto_edit", "plan", "auto"):
+                    raise ValueError("permission_mode 只能是 ask / auto_edit / plan / auto 或空字符串")
+                s.permission_mode = pm or None
             st.store.save(s)
+            st.broadcast("state", {"session_id": s.id, "permission_mode": s.permission_mode or st.cfg.get("agent", "permission_mode")})
         return J(s.view())
 
     @route("/api/sessions/{sid}/messages", ["POST"])
@@ -527,6 +550,15 @@ def make_app(st: State) -> Starlette:
         return J({"path": ws, "exists": bool(ws) and Path(ws).is_dir(), "journal_count": st.journal.count(sid) if sid else 0,
                   "trash_count": len(st.journal.list_trash())})
 
+    @route("/api/fs/pick", ["POST"])
+    async def fs_pick(req: Request) -> Response:
+        d = await jbody(req)
+        init = str(d.get("initial_dir") or st.cfg.get("workspace", default="") or "")
+        picked = await asyncio.to_thread(appwindow.pick_folder, init)
+        if not picked:
+            return J({"path": None, "cancelled": True})
+        return J({"path": str(sec.validate_workspace(picked)), "cancelled": False})
+
     @route("/api/fs/browse", ["GET"])
     async def browse(req: Request) -> Response:
         raw = req.query_params.get("path", "")
@@ -663,6 +695,12 @@ def make_app(st: State) -> Starlette:
         ws = st.workspace_of(sid)
         return J(st.journal.entries(sid, Path(os.path.realpath(ws)) if ws else None))
 
+    @route("/api/sessions/{sid}/checkpoints", ["GET"])
+    async def checkpoints(req: Request) -> Response:
+        s = sess_or_404(req)
+        ws = st.workspace_of(s.id)
+        return J(st.journal.checkpoints(s.id, Path(os.path.realpath(ws)) if ws else None))
+
     @route("/api/journal/{jid}/undo", ["POST"])
     async def undo(req: Request) -> Response:
         d = await jbody(req)
@@ -764,6 +802,84 @@ def make_app(st: State) -> Starlette:
         await st.mcp.stop(name)
         return J(st.mcp.view(name))
 
+    @route("/api/mcp/{name}/resources", ["GET"])
+    async def mcp_resources(req: Request) -> Response:
+        name = req.path_params["name"]
+        if st.mcp.store.get(name) is None:
+            raise KeyError("服务器不存在")
+        if req.query_params.get("refresh") in ("1", "true"):
+            await st.mcp.refresh_tools(name, st.workspace_of(req.query_params.get("session_id")))
+        return J({"resources": st.mcp.view(name).get("resources", [])})
+
+    @route("/api/mcp/{name}/resources/read", ["POST"])
+    async def mcp_resource_read(req: Request) -> Response:
+        name = req.path_params["name"]
+        if st.mcp.store.get(name) is None:
+            raise KeyError("服务器不存在")
+        d = await jbody(req)
+        uri = str(d.get("uri") or "").strip()
+        if not uri:
+            raise ValueError("缺少 uri")
+        return J(await st.mcp.read_resource(name, uri, st.workspace_of(d.get("session_id"))))
+
+    @route("/api/mcp/{name}/prompts", ["GET"])
+    async def mcp_prompts(req: Request) -> Response:
+        name = req.path_params["name"]
+        if st.mcp.store.get(name) is None:
+            raise KeyError("服务器不存在")
+        if req.query_params.get("refresh") in ("1", "true"):
+            await st.mcp.refresh_tools(name, st.workspace_of(req.query_params.get("session_id")))
+        return J({"prompts": st.mcp.view(name).get("prompts", [])})
+
+    @route("/api/mcp/{name}/prompts/get", ["POST"])
+    async def mcp_prompt_get(req: Request) -> Response:
+        name = req.path_params["name"]
+        if st.mcp.store.get(name) is None:
+            raise KeyError("服务器不存在")
+        d = await jbody(req)
+        pname = str(d.get("name") or "").strip()
+        if not pname:
+            raise ValueError("缺少提示词名称 name")
+        args = d.get("arguments") if isinstance(d.get("arguments"), dict) else None
+        return J(await st.mcp.get_prompt(name, pname, args, st.workspace_of(d.get("session_id"))))
+
+    # ------------------------------------------------------------ 模型 Hub
+    @route("/api/hub/recommend", ["GET"])
+    async def hub_recommend(req: Request) -> Response:
+        hw_info = await asyncio.to_thread(hw.detect)
+        rec = await asyncio.to_thread(hub_mod.recommend_models, hw_info, st.root / "models")
+        return J({**rec, "downloads": st.hub.status(), "offline": os.environ.get("LOCALAGENT_OFFLINE") == "1"})
+
+    @route("/api/hub/downloads", ["GET"])
+    async def hub_downloads(req: Request) -> Response:
+        return J({"downloads": st.hub.status()})
+
+    @route("/api/hub/download", ["POST"])
+    async def hub_download(req: Request) -> Response:
+        d = await jbody(req)
+        url = str(d.get("url") or "").strip()
+        filename = str(d.get("filename") or "").strip()
+        sha = str(d.get("sha256") or "").strip()
+        if d.get("id"):
+            entry = next((x for x in hub_mod.CATALOG if x["id"] == d["id"]), None)
+            if not entry:
+                raise KeyError("未知的推荐模型 ID")
+            url = url or entry["url"]
+            filename = filename or entry["file"]
+        if not url or not filename:
+            raise ValueError("需要提供 url 和 filename（或推荐模型 id）")
+        mirror = str(d.get("mirror") or ("hf-mirror" if st.cfg.get("search", "safe", default="") == "" else "official"))
+        if d.get("mirror") in ("official", "hf-mirror"):
+            mirror = d["mirror"]
+        proxy = str(st.cfg.get("engine", "proxy", default="") or d.get("proxy") or "").strip()
+        job = st.hub.start_download(url, filename, mirror=mirror, expected_sha256=sha, proxy=proxy)
+        st.audit.append(event="hub_download", file=job["file"], url=job["url"])
+        return J(job)
+
+    @route("/api/hub/downloads/{tid}/cancel", ["POST"])
+    async def hub_cancel(req: Request) -> Response:
+        return J({"ok": st.hub.cancel(req.path_params["tid"])})
+
     # ------------------------------------------------------------ 记忆
     @route("/api/memory", ["GET", "POST"])
     async def memory(req: Request) -> Response:
@@ -864,6 +980,7 @@ def make_app(st: State) -> Starlette:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):
+        st._loop = asyncio.get_running_loop()
         await asyncio.to_thread(st.engine.probe)
         await asyncio.to_thread(st.journal.purge, int(st.cfg.get("security", "trash_retention_days", default=14)))
         if st.autostart:
@@ -872,6 +989,7 @@ def make_app(st: State) -> Starlette:
         try:
             yield
         finally:
+            st.hub.cancel_all()
             await st.mcp.stop_all()
             await st.engine.stop()
 

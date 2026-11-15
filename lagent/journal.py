@@ -200,6 +200,42 @@ class Journal:
     def count(self, sid: str) -> int:
         return len(self._read(self._file(sid)))
 
+    def checkpoints(self, sid: str, ws: Path | None = None) -> list[dict]:
+        """按 turn_id 聚合检查点列表（用于时光机分回合检查与回退）。"""
+        groups: dict[str, dict] = {}
+        order: list[str] = []
+        for e in self._read(self._file(sid)):
+            tid = str((e.get("extra") or {}).get("turn_id") or f"entry:{e['id']}")
+            p = e["path"]
+            try:
+                disp = Path(p).relative_to(ws).as_posix() if ws else p
+            except ValueError:
+                disp = p
+            can = (not e["undone"]) and (not e.get("no_undo")) and (
+                e["op"] in ("delete", "move", "copy", "mkdir") or bool(e.get("snap")) or not e["existed"])
+            g = groups.get(tid)
+            if g is None:
+                g = {
+                    "turn_id": tid,
+                    "ts": e["ts"],
+                    "ops": 0,
+                    "undone": True,
+                    "can_undo": False,
+                    "files": [],
+                    "summary": e.get("summary", ""),
+                }
+                groups[tid] = g
+                order.append(tid)
+            g["ops"] += 1
+            g["ts"] = max(g["ts"], e["ts"])
+            if not e["undone"]:
+                g["undone"] = False
+            if can:
+                g["can_undo"] = True
+            if disp not in g["files"] and len(g["files"]) < 20:
+                g["files"].append(disp)
+        return [groups[tid] for tid in reversed(order)]
+
     def undo(self, entry_id: str, force: bool = False) -> dict:
         m = _ID_RE.match(entry_id)
         if not m:

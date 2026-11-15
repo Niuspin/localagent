@@ -65,6 +65,73 @@ def api_messages(history: list[dict]) -> list[dict]:
     return [{k: v for k, v in m.items() if k in API_KEYS} for m in history]
 
 
+def _pruned_tool_text(m: dict) -> str:
+    c = str(m.get("content") or "")
+    head = c[:260].replace("\n", " ")
+    hid = m.get("_out")
+    if hid:
+        return (f"[旧工具结果已省略以节省上下文（原 {len(c)} 字符，完整内容已保存为 {hid}）。开头: {head}…  "
+                f"需要时调用 read_tool_output(id=\"{hid}\")，可加 contains 关键词查找；无需重新执行原工具]")
+    return f"[旧工具结果已省略以节省上下文（原 {len(c)} 字符）。开头: {head}…  需要时请重新调用工具获取]"
+
+
+def project_api_messages(history: list[dict], prune_upto: int = 0, min_len: int = 500) -> list[dict]:
+    """Append-Only KV 缓存友好的消息投影：不修改原始 history，仅对单调边界 prune_upto 之前的超长工具结果/旧图片生成稳定占位。"""
+    if prune_upto <= 0:
+        return api_messages(history)
+    limit = min(prune_upto, len(history))
+    starts = turn_starts(history)
+    img_cutoff = min(limit, starts[-2] if len(starts) >= 2 else 0)
+    out: list[dict] = []
+    for i, m in enumerate(history):
+        item = {k: v for k, v in m.items() if k in API_KEYS}
+        if i < limit:
+            c = m.get("content")
+            if m.get("role") == "tool" and isinstance(c, str) and len(c) > min_len and not m.get("_pruned"):
+                item["content"] = _pruned_tool_text(m)
+            elif i < img_cutoff and isinstance(c, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in c):
+                item["content"] = [p if p.get("type") != "image_url" else {"type": "text", "text": "[图片已省略]"} for p in c]
+        out.append(item)
+    return out
+
+
+def advance_prune_watermark(
+    history: list[dict],
+    prev_upto: int = 0,
+    keep_recent_tools: int = 4,
+    min_len: int = 500,
+    block_step: int = 4,
+) -> tuple[int, int]:
+    """单调推进 KV 裁剪水位线，尽量以回合/块为单位推进以最大化 Prefix Cache 命中率。返回 (new_upto, saved_chars)。"""
+    tool_idx = [i for i, m in enumerate(history) if m.get("role") == "tool"]
+    if not tool_idx:
+        return prev_upto, 0
+    keep_slice = tool_idx[:-keep_recent_tools] if keep_recent_tools else tool_idx
+    if not keep_slice:
+        return prev_upto, 0
+    # 默认推进到保留窗口之前（尽量对齐到最近一个回合起点或保留块边界，减少高频滑动）
+    max_cand = keep_slice[-1] + 1
+    if max_cand <= prev_upto:
+        return prev_upto, 0
+    # 至少跨越一定数量的工具消息或推进到回合边界，保证已经裁剪的前缀之后长一段维持不变
+    eligible = [i for i in keep_slice if i >= prev_upto and isinstance(history[i].get("content"), str) and len(history[i]["content"]) > min_len]
+    if not eligible and len(turn_starts(history)) < 3:
+        return prev_upto, 0
+    new_upto = max_cand
+    if block_step > 1 and len(keep_slice) >= prev_upto:
+        # 对齐到较大的块台阶或回合边（如果恰好跨过）
+        starts = [s for s in turn_starts(history) if prev_upto < s <= max_cand]
+        if starts:
+            new_upto = starts[-1] if max_cand - starts[-1] < block_step else max_cand
+    saved = 0
+    for i in range(prev_upto, min(new_upto, len(history))):
+        m = history[i]
+        c = m.get("content")
+        if m.get("role") == "tool" and isinstance(c, str) and len(c) > min_len and not m.get("_pruned"):
+            saved += max(0, len(c) - len(_pruned_tool_text(m)))
+    return new_upto, saved
+
+
 def turn_starts(history: list[dict]) -> list[int]:
     return [i for i, m in enumerate(history) if m.get("role") == "user" and not m.get("_internal")]
 

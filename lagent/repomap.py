@@ -10,6 +10,61 @@ from pathlib import Path
 from . import security as sec
 from .tools.files import SKIP_DIRS
 
+_TS_CACHE: dict[str, object] = {}
+
+
+def _extract_treesitter(text: str, ext: str) -> list[str] | None:
+    """可选使用 tree-sitter 解析多语言符号大纲；未安装对应语言包时返回 None 回退。"""
+    lang_map = {
+        ".py": "python", ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
+        ".ts": "typescript", ".tsx": "tsx", ".go": "go", ".rs": "rust",
+        ".c": "c", ".h": "c", ".cpp": "cpp", ".hpp": "cpp", ".java": "java", ".cs": "c_sharp",
+    }
+    lang = lang_map.get(ext)
+    if not lang:
+        return None
+    try:
+        parser = _TS_CACHE.get(lang)
+        if parser is False:
+            return None
+        if parser is None:
+            try:
+                from tree_sitter_language_pack import get_parser  # type: ignore
+            except ImportError:
+                from tree_sitter_languages import get_parser  # type: ignore
+            parser = get_parser(lang)
+            _TS_CACHE[lang] = parser
+    except Exception:  # noqa: BLE001
+        _TS_CACHE[lang] = False
+        return None
+    try:
+        tree = parser.parse(text.encode("utf-8", "replace"))  # type: ignore[attr-defined]
+        wanted = {
+            "function_definition", "async_function_definition", "class_definition",
+            "function_declaration", "method_definition", "class_declaration",
+            "type_declaration", "struct_item", "enum_item", "trait_item", "impl_item",
+            "function_item", "interface_declaration",
+        }
+        out: list[str] = []
+
+        def walk(node, depth: int = 0) -> None:
+            if len(out) >= 24 or depth > 3:
+                return
+            if node.type in wanted:
+                name_node = node.child_by_field_name("name")
+                if name_node is not None:
+                    nm = name_node.text.decode("utf-8", "replace")
+                    line = node.start_point[0] + 1
+                    kind = node.type.split("_")[0]
+                    out.append(f"L{line} {kind} {nm}")
+            for ch in node.children:
+                walk(ch, depth + 1)
+
+        walk(tree.root_node)
+        return out if out else None
+    except Exception:  # noqa: BLE001
+        return None
+
 _EXT_ORDER = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".java", ".cs"}
 _JS_RX = re.compile(
     r"^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*)|(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)"
@@ -137,7 +192,9 @@ def build_repo_map(
         except (OSError, sec.SecurityError):
             continue
         ext = fp.suffix.lower()
-        syms = _extract_python(txt) if ext == ".py" else _extract_regex(txt, ext)
+        syms = _extract_treesitter(txt, ext)
+        if syms is None:
+            syms = _extract_python(txt) if ext == ".py" else _extract_regex(txt, ext)
         entry = f"{rel}" + (f": {' | '.join(syms)}" if syms else f" ({txt.count(chr(10)) + 1}L)")
         if used + len(entry) + 1 > max_chars:
             lines.append("…[已达到符号地图字符上限]")

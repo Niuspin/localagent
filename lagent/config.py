@@ -22,7 +22,7 @@ WEB_DIR = CODE_DIR / "web"
 CONFIG_PATH = ROOT / "config.json"
 SECRETS_PATH = DATA_DIR / "secrets.json"
 
-SECRET_NAMES = ("brave", "google_cse", "google_cx", "tavily", "serper")
+SECRET_NAMES = ("brave", "google_cse", "google_cx", "tavily", "serper", "compact_api_key", "embed_api_key")
 SEARCH_PROVIDERS = ("duckduckgo", "bing", "baidu", "yahoo", "brave", "google_cse", "searxng", "tavily", "serper")
 
 DEFAULTS: dict[str, Any] = {
@@ -31,6 +31,7 @@ DEFAULTS: dict[str, Any] = {
         "binary": "", "model": "", "mmproj": "auto", "draft_model": "auto",
         "ctx": "auto", "ctx_start": 32768, "ctx_max": 131072, "ctx_auto_grow": True,
         "gpu_layers": "auto", "n_cpu_moe": "auto", "moe_cache_mib": "auto", "moe_cache_cpu_share": 0.0,
+        "tensor_split": "auto", "split_mode": "layer",
         "mmproj_offload": "auto", "flash_attn": "auto", "kv_cache_type": "auto",
         "spec_mode": "auto", "spec_draft_max": 0, "spec_draft_min": 0,
         "threads": 0, "threads_batch": 0, "batch": 2048, "ubatch": 512,
@@ -40,7 +41,8 @@ DEFAULTS: dict[str, Any] = {
         "extra_args": [],
     },
     "generation": {
-        "thinking": "auto", "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
+        "thinking": "auto", "reasoning_budget": -1,
+        "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
         "max_tokens": 8192, "presence_penalty": 0.0,
     },
     "agent": {
@@ -56,8 +58,11 @@ DEFAULTS: dict[str, Any] = {
         "hooks_enabled": True,                # 项目生命周期钩子（.localagent/hooks.json）
         "granular_permissions": True,         # 细粒度权限规则（allow/ask/deny，不绕过硬安全防线）
         "subagent_max_steps": 8,              # delegate_task 子代理步数上限
-        "compact_endpoint": "",               # 可选：用于摘要压缩的外部 OpenAI 兼容端点（留空走本地引擎）
+        "compact_endpoint": "",               # 可选：用于摘要压缩的外部 OpenAI / Anthropic 兼容端点（留空走本地引擎）
         "compact_model": "",                  # 可选：摘要压缩专用轻量模型名
+        "compact_provider": "auto",           # compact 协议：auto / openai / anthropic
+        "embed_endpoint": "",                 # 可选：外部 Embedding 端点（/v1/embeddings，留空走本地引擎或离线哈希向量）
+        "embed_model": "",                    # 可选：Embedding 模型名
     },
     "security": {
         "allow_network_commands": False, "command_sandbox": "auto", "command_timeout_s": 120,
@@ -123,11 +128,32 @@ def _str_list(path: str, v: Any) -> list[str]:
     return [str(x) for x in v][:200]
 
 
+def _tensor_split(path: str, v: Any) -> str:
+    s = str(v or "auto").strip()
+    if not s or s.lower() == "auto":
+        return "auto"
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        return "auto"
+    cleaned: list[str] = []
+    for p in parts:
+        try:
+            n = float(p)
+        except ValueError:
+            raise _bad(path, v, "(需为 auto 或逗号分隔正数，如 24,16)")
+        if n < 0:
+            raise _bad(path, v, "(权重不能为负)")
+        cleaned.append(str(int(n)) if n.is_integer() else f"{n:.2f}")
+    return ",".join(cleaned)
+
+
 SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "engine.ctx": _auto_int(2048, 4_194_304),
     "engine.gpu_layers": _auto_int(0, 999, ("all",)),
     "engine.n_cpu_moe": _auto_int(0, 999),
     "engine.moe_cache_mib": _auto_int(0, 65536),
+    "engine.tensor_split": _tensor_split,
+    "engine.split_mode": _enum("auto", "layer", "row", "none"),
     "engine.mmproj_offload": _auto_bool,
     "engine.flash_attn": _enum("auto", "on", "off"),
     "engine.kv_cache_type": _enum("auto", "f16", "q8_0", "q4_0"),
@@ -137,6 +163,7 @@ SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "generation.thinking": _enum("auto", "on", "off"),
     "agent.permission_mode": _enum("ask", "auto_edit", "plan", "auto"),
     "agent.profile": _enum("auto", "compact", "standard", "large", "off"),
+    "agent.compact_provider": _enum("auto", "openai", "anthropic"),
     "security.command_sandbox": _enum("auto", "off"),
     "search.mode": _enum("merge", "first"),
     "search.safe": _enum("off", "moderate", "strict"),
@@ -151,6 +178,7 @@ RANGES: dict[str, tuple[float, float]] = {
     "engine.moe_cache_cpu_share": (0.0, 1.0), "engine.cache_reuse": (0, 16384),
     "engine.image_max_tokens": (0, 16384), "engine.cache_ram_mb": (-1, 1_048_576),
     "engine.vram_reserve_mb": (0, 65536), "engine.slots": (1, 8),
+    "generation.reasoning_budget": (-1, 32768),
     "generation.temperature": (0, 2), "generation.top_p": (0, 1), "generation.top_k": (0, 500),
     "generation.min_p": (0, 1), "generation.max_tokens": (64, 262144), "generation.presence_penalty": (-2, 2),
     "agent.max_steps": (1, 200), "agent.memory_recall_k": (0, 30), "agent.subagent_max_steps": (1, 30),
@@ -271,8 +299,19 @@ class Config:
             raise ValueError("配置必须是对象")
         with self._lock:
             new = copy.deepcopy(self.data)
-            _merge(new, partial)
+            clean_partial = copy.deepcopy(partial)
             new_secrets = dict(self.secrets)
+            ag = clean_partial.get("agent")
+            if isinstance(ag, dict):
+                for sk in ("compact_api_key", "embed_api_key"):
+                    if sk in ag:
+                        val = ag.pop(sk)
+                        if isinstance(val, str):
+                            if val == "":
+                                new_secrets.pop(sk, None)
+                            else:
+                                new_secrets[sk] = val.strip()
+            _merge(new, clean_partial)
             keys = (partial.get("search") or {}).get("keys") if isinstance(partial.get("search"), dict) else None
             if keys is not None:
                 if not isinstance(keys, dict):
@@ -293,7 +332,10 @@ class Config:
     def public(self) -> dict:
         with self._lock:
             d = copy.deepcopy(self.data)
-            d["search"]["keys"] = {n: bool(self.secrets.get(n)) for n in SECRET_NAMES}
+            d["search"]["keys"] = {n: bool(self.secrets.get(n)) for n in ("brave", "google_cse", "google_cx", "tavily", "serper")}
+            d.setdefault("agent", {})
+            d["agent"]["compact_api_key"] = bool(self.secrets.get("compact_api_key"))
+            d["agent"]["embed_api_key"] = bool(self.secrets.get("embed_api_key"))
             return d
 
 

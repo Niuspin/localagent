@@ -35,6 +35,7 @@ class HookDef:
     command: str        # 待执行命令
     matcher: str = "*"  # 工具匹配器（如 "run_command" 或 "write_file|edit_file" 或 "*"）
     timeout: int = 10   # 超时秒数
+    read_only: bool = False  # 仅在声明为只读且命令本身通过 is_readonly_command 时才允许在受污染上下文中运行
 
 
 @dataclass
@@ -103,7 +104,8 @@ class HookManager:
                         cmd = str(it["command"]).strip()
                         matcher = str(it.get("matcher") or "*").strip()
                         timeout = max(1, min(int(it.get("timeout") or 10), 30))
-                        self.hooks[ev].append(HookDef(event=ev, command=cmd, matcher=matcher, timeout=timeout))
+                        read_only = bool(it.get("read_only", False))
+                        self.hooks[ev].append(HookDef(event=ev, command=cmd, matcher=matcher, timeout=timeout, read_only=read_only))
 
     def reload(self) -> None:
         self.hooks = {"PreToolUse": [], "PostToolUse": [], "Stop": [], "UserPromptSubmit": []}
@@ -130,7 +132,7 @@ class HookManager:
 
     def list_hooks(self) -> dict[str, list[dict]]:
         return {
-            ev: [{"matcher": h.matcher, "command": h.command, "timeout": h.timeout} for h in defs]
+            ev: [{"matcher": h.matcher, "command": h.command, "timeout": h.timeout, "read_only": h.read_only} for h in defs]
             for ev, defs in self.hooks.items()
         }
 
@@ -158,6 +160,7 @@ class HookManager:
         if sec.IS_WIN:
             creationflags = 0x08000000 | 0x00000200  # NO_WINDOW | NEW_PROCESS_GROUP
 
+        pid = 0
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -167,6 +170,9 @@ class HookManager:
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=creationflags,
             )
+            pid = proc.pid or 0
+            if pid:
+                sec.harden_windows_process(pid)
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=hook.timeout)
             stdout = stdout_b.decode("utf-8", "replace").strip()
             stderr = stderr_b.decode("utf-8", "replace").strip()
@@ -194,18 +200,31 @@ class HookManager:
             return HookResult(action="deny", reason=f"钩子执行超时（>{hook.timeout}s）", exit_code=124)
         except Exception as e:  # noqa: BLE001
             return HookResult(action="deny", reason=f"钩子执行出错: {e}", exit_code=1)
+        finally:
+            if pid:
+                sec.release_windows_job(pid)
+
+    def _select_hooks(self, event: str, ctx: Any, *, warn: bool = False) -> tuple[list[HookDef], bool]:
+        """选择要执行的钩子：污染上下文仅放行声明为 read_only 且经只读白名单校验的钩子。"""
+        defs = self.hooks[event]
+        tainted = getattr(ctx.session, "tainted", False) if hasattr(ctx, "session") else False
+        if not tainted:
+            return list(defs), False
+        safe = [h for h in defs if h.read_only and sec.is_readonly_command(h.command)]
+        skipped_any = len(safe) < len(defs)
+        if skipped_any and warn and hasattr(ctx, "emit") and ctx.emit:
+            msg = f"当前上下文受污染，已跳过 {len(defs) - len(safe)} 个非只读 {event} 钩子。" if safe else f"当前上下文受污染，已跳过 {event} 钩子。"
+            ctx.emit("notice", {"level": "warn", "text": msg})
+        return safe, not safe
 
     async def run_pre_tool_use(self, tool_name: str, args: dict, ctx: Any) -> HookResult:
         if not self.workspace or not self.hooks["PreToolUse"]:
             return HookResult(action="allow")
-        # 污染上下文安全跳过：防止不可信数据通过钩子触发未审查行为
-        tainted = getattr(ctx.session, "tainted", False) if hasattr(ctx, "session") else False
-        if tainted:
-            if hasattr(ctx, "emit") and ctx.emit:
-                ctx.emit("notice", {"level": "warn", "text": "当前上下文受污染，已跳过 PreToolUse 钩子。"})
+        hooks, all_skipped = self._select_hooks("PreToolUse", ctx, warn=True)
+        if all_skipped:
             return HookResult(action="allow", skipped=True)
 
-        for h in self.hooks["PreToolUse"]:
+        for h in hooks:
             if self._matches(h.matcher, tool_name):
                 env = {
                     "HOOK_EVENT": "PreToolUse",
@@ -222,11 +241,11 @@ class HookManager:
     async def run_post_tool_use(self, tool_name: str, args: dict, result_content: str, ctx: Any) -> HookResult:
         if not self.workspace or not self.hooks["PostToolUse"]:
             return HookResult(action="allow")
-        tainted = getattr(ctx.session, "tainted", False) if hasattr(ctx, "session") else False
-        if tainted:
+        hooks, all_skipped = self._select_hooks("PostToolUse", ctx)
+        if all_skipped:
             return HookResult(action="allow", skipped=True)
 
-        for h in self.hooks["PostToolUse"]:
+        for h in hooks:
             if self._matches(h.matcher, tool_name):
                 env = {
                     "HOOK_EVENT": "PostToolUse",
@@ -242,11 +261,11 @@ class HookManager:
     async def run_stop(self, ctx: Any) -> HookResult:
         if not self.workspace or not self.hooks["Stop"]:
             return HookResult(action="allow")
-        tainted = getattr(ctx.session, "tainted", False) if hasattr(ctx, "session") else False
-        if tainted:
+        hooks, all_skipped = self._select_hooks("Stop", ctx)
+        if all_skipped:
             return HookResult(action="allow", skipped=True)
 
-        for h in self.hooks["Stop"]:
+        for h in hooks:
             env = {
                 "HOOK_EVENT": "Stop",
                 "SESSION_ID": getattr(ctx, "sid", "") if hasattr(ctx, "sid") else "",

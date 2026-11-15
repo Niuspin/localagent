@@ -83,11 +83,13 @@
     }
   }
   function updatePills() {
-    var mode = LA.cfg('agent.permission_mode', (LA.S.state && LA.S.state.permission_mode) || 'ask');
+    var isOv = !!(LA.S.cur && LA.S.cur.permission_mode);
+    var mode = (LA.S.cur && LA.S.cur.permission_mode) || LA.cfg('agent.permission_mode', (LA.S.state && LA.S.state.permission_mode) || 'ask');
     var m = MODES.filter(function (x) { return x.value === mode; })[0] || MODES[0];
-    modePill.className = 'pill' + (mode === 'auto' ? ' danger' : mode === 'plan' ? ' plan' : '');
+    modePill.className = 'pill' + (mode === 'auto' ? ' danger' : mode === 'plan' ? ' plan' : '') + (isOv ? ' sess-ov' : '');
     modePill.innerHTML = icon(mode === 'plan' ? 'eye' : mode === 'auto' ? 'zap' : 'shield', 14);
-    modePill.appendChild(el('span', { text: m.label }));
+    modePill.appendChild(el('span', { text: (isOv ? '本会话·' : '') + m.label }));
+    modePill.title = isOv ? '当前为本会话独立权限模式（可在菜单恢复跟随全局）' : '权限模式（仅作用于当前会话；全局默认在 设置→安全 修改）';
     var th = LA.cfg('generation.thinking', 'auto');
     var t = THINK.filter(function (x) { return x.value === th; })[0] || THINK[0];
     thinkPill.innerHTML = icon('brain', 14);
@@ -170,6 +172,8 @@
     { name: 'clear', desc: '清空会话历史' },
     { name: 'plan', desc: '进入只读规划模式或制定详细步骤' },
     { name: 'status', desc: '查看工作区、会话、污染与权限状态' },
+    { name: 'mode', desc: '切换或查看当前权限模式' },
+    { name: 'context', desc: '查看当前上下文 Token 分布明细' },
     { name: 'undo', desc: '撤销上一个回合产生的文件修改' },
     { name: 'doctor', desc: '诊断工作区、引擎、沙箱与环境状态' },
     { name: 'help', desc: '查看所有内置与自定义命令' },
@@ -439,7 +443,15 @@
     document.addEventListener('drop', function (e) { if (!hasFiles(e)) return; e.preventDefault(); depth = 0; mask.hidden = true; addFiles(e.dataTransfer.files); });
 
     modePill.addEventListener('click', function () {
-      LA.menu(modePill, MODES, function (v) { LA.cfgSet('agent.permission_mode', v, { immediate: true }); }, LA.cfg('agent.permission_mode', 'ask'));
+      var curMode = (LA.S.cur && LA.S.cur.permission_mode) || LA.cfg('agent.permission_mode', 'ask');
+      var opts = MODES.slice();
+      if (LA.S.cur && LA.S.cur.permission_mode) {
+        opts.push({ value: '', label: '跟随全局默认 (' + LA.cfg('agent.permission_mode', 'ask') + ')', desc: '清除当前会话的独立权限覆盖' });
+      }
+      LA.menu(modePill, opts, function (v) {
+        if (LA.setSessionMode) LA.setSessionMode(v);
+        else LA.cfgSet('agent.permission_mode', v || 'ask', { immediate: true });
+      }, LA.S.cur ? (LA.S.cur.permission_mode || curMode) : curMode);
     });
     thinkPill.addEventListener('click', function () {
       LA.menu(thinkPill, THINK, function (v) { LA.cfgSet('generation.thinking', v, { immediate: true }); }, LA.cfg('generation.thinking', 'auto'));

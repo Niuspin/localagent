@@ -42,9 +42,27 @@ def clean_text(s: Any, limit: int) -> str:
 
 
 # ---------------------------------------------------------------- schema
-def _spec(sp: Any, depth: int, with_desc: bool) -> dict:
+def _resolve_ref(ref: Any, defs: dict, seen: frozenset[str]) -> dict | None:
+    if not isinstance(ref, str) or ref in seen:
+        return None
+    for prefix in ("#/$defs/", "#/definitions/"):
+        if ref.startswith(prefix):
+            key = ref[len(prefix):]
+            target = defs.get(key)
+            return target if isinstance(target, dict) else None
+    return None
+
+
+def _spec(sp: Any, depth: int, with_desc: bool, defs: dict | None = None, seen: frozenset[str] = frozenset()) -> dict:
     if not isinstance(sp, dict):
         return {}
+    defs = defs or {}
+    if isinstance(sp.get("$ref"), str) and depth < 3:
+        ref = sp["$ref"]
+        target = _resolve_ref(ref, defs, seen)
+        if target is not None:
+            merged = {**target, **{k: v for k, v in sp.items() if k != "$ref"}}
+            return _spec(merged, depth + 1, with_desc, defs, seen | {ref})
     out: dict[str, Any] = {}
     t = sp.get("type")
     if isinstance(t, list):
@@ -56,26 +74,87 @@ def _spec(sp: Any, depth: int, with_desc: bool) -> dict:
     en = sp.get("enum")
     if isinstance(en, list) and 0 < len(en) <= 50 and all(isinstance(x, (str, int, float, bool)) for x in en):
         out["enum"] = en
+    if not t and depth < 2:
+        for union_key in ("anyOf", "oneOf"):
+            raw_u = sp.get(union_key)
+            if isinstance(raw_u, list) and raw_u:
+                variants = []
+                for v in raw_u[:6]:
+                    if isinstance(v, dict) and v.get("type") == "null":
+                        continue
+                    sv = _spec(v, depth + 1, with_desc, defs, seen)
+                    if sv:
+                        variants.append(sv)
+                if len(variants) == 1:
+                    desc = out.get("description")
+                    out.update(variants[0])
+                    if desc:
+                        out["description"] = desc
+                elif len(variants) > 1:
+                    out[union_key] = variants[:4]
+                break
     if t == "array" and depth < 2 and isinstance(sp.get("items"), dict):
-        it = _spec(sp["items"], depth + 1, with_desc)
-        if it.get("type"):
+        it = _spec(sp["items"], depth + 1, with_desc, defs, seen)
+        if it.get("type") or it.get("anyOf") or it.get("oneOf"):
             out["items"] = it
     if t == "object" and depth < 2 and isinstance(sp.get("properties"), dict):
-        props = {str(k): _spec(v, depth + 1, with_desc) for k, v in list(sp["properties"].items())[:30]}
+        props = {str(k): _spec(v, depth + 1, with_desc, defs, seen) for k, v in list(sp["properties"].items())[:30]}
         out["properties"] = props
         out["required"] = [r for r in (sp.get("required") or []) if isinstance(r, str) and r in props]
-    return out        # anyOf/oneOf/$ref 等复杂写法不翻译：不带 type，参数原样透传给服务器去校验
+    return out
 
 
 def convert_schema(input_schema: Any) -> dict:
     s = input_schema if isinstance(input_schema, dict) else {}
+    defs: dict[str, Any] = {}
+    for dk in ("$defs", "definitions"):
+        if isinstance(s.get(dk), dict):
+            defs.update(s[dk])
     raw = s.get("properties") if isinstance(s.get("properties"), dict) else {}
     for with_desc in (True, False):
-        props = {str(k): _spec(v, 0, with_desc) for k, v in list(raw.items())[:40]}
+        props = {str(k): _spec(v, 0, with_desc, defs) for k, v in list(raw.items())[:40]}
         out = {"type": "object", "properties": props, "required": [r for r in (s.get("required") or []) if isinstance(r, str) and r in props]}
         if len(json.dumps(out, ensure_ascii=False)) <= SCHEMA_BUDGET:
             break
     return out
+
+
+def vet_resources(raw_res: list[dict]) -> list[dict]:
+    ok: list[dict] = []
+    for r in raw_res:
+        if not isinstance(r, dict) or not isinstance(r.get("uri"), str) or not r["uri"].strip():
+            continue
+        blob = " ".join([r.get("uri", ""), str(r.get("name") or ""), str(r.get("description") or "")])
+        if suspicious(blob):
+            continue
+        ok.append({
+            "uri": str(r["uri"])[:500],
+            "name": clean_text(r.get("name") or r["uri"], 80),
+            "description": clean_text(r.get("description") or "", DESC_TOOL),
+            "mimeType": str(r.get("mimeType") or "")[:120],
+        })
+        if len(ok) >= MAX_TOOLS:
+            break
+    return ok
+
+
+def vet_prompts(raw_prompts: list[dict]) -> list[dict]:
+    ok: list[dict] = []
+    for p in raw_prompts:
+        if not isinstance(p, dict) or not isinstance(p.get("name"), str) or not p["name"].strip():
+            continue
+        blob = " ".join([p["name"], str(p.get("description") or "")])
+        if suspicious(blob):
+            continue
+        args = []
+        for a in (p.get("arguments") or [])[:20]:
+            if isinstance(a, dict) and isinstance(a.get("name"), str):
+                args.append({"name": clean_text(a["name"], 64), "description": clean_text(a.get("description") or "", DESC_PARAM),
+                             "required": bool(a.get("required", False))})
+        ok.append({"name": clean_text(p["name"], 80), "description": clean_text(p.get("description") or "", DESC_TOOL), "arguments": args})
+        if len(ok) >= MAX_TOOLS:
+            break
+    return ok
 
 
 # ---------------------------------------------------------------- 工具审查

@@ -114,3 +114,54 @@ def open_window(url: str, profile_dir: Path) -> subprocess.Popen | None:
                                 stderr=subprocess.DEVNULL, **kw)
     except OSError:
         return None
+
+
+def pick_folder(initial_dir: str = "") -> str | None:
+    """调用系统原生文件夹选择对话框；无桌面或用户取消时返回 None。"""
+    init = str(Path(initial_dir).expanduser()) if initial_dir and Path(initial_dir).is_dir() else str(Path.home())
+    if _active_window is not None:
+        try:
+            import webview
+            res = _active_window.create_file_dialog(webview.FOLDER_DIALOG, directory=init)
+            if res and len(res) > 0:
+                return str(res[0])
+            return None
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        if os.name == "nt":
+            ps = shutil.which("powershell") or shutil.which("pwsh")
+            if ps:
+                esc = init.replace("'", "''")
+                script = (
+                    "Add-Type -AssemblyName System.Windows.Forms;"
+                    "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+                    "$d.Description = '选择 LocalAgent 工作区目录';"
+                    f"$d.SelectedPath = '{esc}';"
+                    "$d.ShowNewFolderButton = $true;"
+                    "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }"
+                )
+                r = subprocess.run(
+                    [ps, "-NoProfile", "-STA", "-Command", f"[Console]::OutputEncoding=[Text.Encoding]::UTF8; {script}"],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                    creationflags=0x08000000,
+                )
+                out = (r.stdout or "").strip()
+                return out or None
+        elif sys.platform == "darwin":
+            r = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt "选择 LocalAgent 工作区目录")'],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+            )
+            return (r.stdout or "").strip().rstrip("/") or None if r.returncode == 0 else None
+        else:
+            for cmd in (
+                ["zenity", "--file-selection", "--directory", f"--filename={init}/"],
+                ["kdialog", "--getexistingdirectory", init],
+            ):
+                if shutil.which(cmd[0]):
+                    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+                    return (r.stdout or "").strip() or None if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return None

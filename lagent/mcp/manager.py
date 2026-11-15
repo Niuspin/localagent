@@ -14,7 +14,7 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .. import security as sec
 from .. import toolset
@@ -22,18 +22,22 @@ from ..journal import atomic_write
 from ..tools.base import TOOLS, P, Tool, ToolResult, obj
 from . import convert
 from .launch import LaunchError, build_launch
-from .session import McpError, McpSession
+from .session import HttpMcpSession, McpError, McpSession
 from .store import MASK, McpStore, ServerConfig
 
 
 class McpManager:
-    def __init__(self, data_dir: Path, audit: sec.AuditLog | None = None):
+    def __init__(self, data_dir: Path, audit: sec.AuditLog | None = None,
+                 on_change: Callable[[str, dict], None] | None = None):
         self.data_dir = Path(data_dir)
         self.audit = audit
+        self._on_change = on_change
         self.store = McpStore(self.data_dir / "mcp.json", self.data_dir)
-        self.sessions: dict[str, McpSession] = {}
+        self.sessions: dict[str, McpSession | HttpMcpSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._tools: dict[str, list[dict]] = {}          # 服务器 → 已转换的工具 [{name, tool, description, parameters}]
+        self._resources: dict[str, list[dict]] = {}
+        self._prompts: dict[str, list[dict]] = {}
         self._warns: dict[str, list[str]] = {}
         self._errors: dict[str, str] = {}
         self._registered: set[str] = set()
@@ -44,7 +48,7 @@ class McpManager:
 
     # ------------------------------------------------------------ 工具缓存
     def _sig(self, cfg: ServerConfig) -> str:
-        return hashlib.sha256(json.dumps([cfg.command, sorted(cfg.env)]).encode()).hexdigest()[:16]
+        return hashlib.sha256(json.dumps([cfg.transport, cfg.url, cfg.command, sorted(cfg.env), sorted(cfg.headers)]).encode()).hexdigest()[:16]
 
     def _cache_path(self, name: str) -> Path:
         return self.data_dir / "mcp" / name / "tools.json"
@@ -54,6 +58,8 @@ class McpManager:
             d = json.loads(self._cache_path(cfg.name).read_text("utf-8"))
             if d.get("sig") == self._sig(cfg) and isinstance(d.get("tools"), list):
                 self._tools[cfg.name] = d["tools"]
+                self._resources[cfg.name] = list(d.get("resources") or [])
+                self._prompts[cfg.name] = list(d.get("prompts") or [])
                 self._warns[cfg.name] = list(d.get("warnings") or [])
         except (OSError, ValueError):
             pass
@@ -62,8 +68,13 @@ class McpManager:
         p = self._cache_path(cfg.name)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(p, json.dumps({"sig": self._sig(cfg), "tools": self._tools.get(cfg.name, []),
-                                        "warnings": self._warns.get(cfg.name, [])}, ensure_ascii=False).encode("utf-8"))
+            atomic_write(p, json.dumps({
+                "sig": self._sig(cfg),
+                "tools": self._tools.get(cfg.name, []),
+                "resources": self._resources.get(cfg.name, []),
+                "prompts": self._prompts.get(cfg.name, []),
+                "warnings": self._warns.get(cfg.name, []),
+            }, ensure_ascii=False).encode("utf-8"))
         except OSError:
             pass
 
@@ -125,22 +136,26 @@ class McpManager:
 
     def effective_sandbox(self, name: str) -> str:
         cfg = self.store.get(name)
-        if cfg is None or cfg.sandbox == "off":
+        if cfg is None:
+            return "none"
+        if cfg.transport == "http":
+            return "http"
+        if cfg.sandbox == "off":
             return "none"
         info = sec.sandbox_info()
         return info.get("kind") or "none" if info["available"] else "unavailable"
 
     def contained(self, server: str) -> bool:
-        """沙箱生效且不能联网：此时自动模式下可以免审批。"""
+        """沙箱生效且不能联网：此时自动模式下可以免审批。HTTP MCP 需联网，不视为封闭沙箱。"""
         cfg = self.store.get(server)
-        if cfg is None or cfg.sandbox == "off" or cfg.network:
+        if cfg is None or cfg.transport != "stdio" or cfg.sandbox == "off" or cfg.network:
             return False
         s = self.sessions.get(server)
-        if s is not None and s.alive:
+        if s is not None and s.alive and s.launch is not None:
             return s.launch.sandboxed and not s.launch.network
         return bool(sec.sandbox_info()["available"])
 
-    async def ensure(self, name: str, workspace: str | None = None) -> McpSession:
+    async def ensure(self, name: str, workspace: str | None = None) -> McpSession | HttpMcpSession:
         cfg = self.store.get(name)
         if cfg is None:
             raise McpError("未知的服务器")
@@ -151,18 +166,28 @@ class McpManager:
             if s is not None:
                 await s.stop()
                 self.sessions.pop(name, None)
+            def _notify_changed() -> None:
+                try:
+                    asyncio.get_running_loop()
+                    asyncio.ensure_future(self._refresh_quiet(name))
+                except RuntimeError:
+                    pass
             try:
-                launch = build_launch(cfg, data_dir=self.data_dir, workspace=workspace if cfg.workspace else None)
-                s = McpSession(name, launch, workspace=workspace if cfg.workspace else None,
-                               on_tools_changed=None)
-                await s.start()
+                if cfg.transport == "http":
+                    s = HttpMcpSession(name, cfg, workspace=workspace if cfg.workspace else None, on_tools_changed=_notify_changed)
+                    await s.start()
+                    self._audit("mcp_start", name, transport="http", url=cfg.url)
+                else:
+                    launch = build_launch(cfg, data_dir=self.data_dir, workspace=workspace if cfg.workspace else None)
+                    s = McpSession(name, launch, workspace=workspace if cfg.workspace else None, on_tools_changed=_notify_changed)
+                    await s.start()
+                    self._audit("mcp_start", name, sandbox=launch.sandbox, network=launch.network, command=cfg.command[0])
             except (LaunchError, McpError) as e:
                 self._errors[name] = str(e)
                 self._audit("mcp_start_failed", name, error=str(e)[:200])
                 raise
             self._errors.pop(name, None)
             self.sessions[name] = s
-            self._audit("mcp_start", name, sandbox=launch.sandbox, network=launch.network, command=cfg.command[0])
             return s
 
     async def refresh_tools(self, name: str, workspace: str | None = None) -> list[dict]:
@@ -174,15 +199,34 @@ class McpManager:
         ok, warns = convert.vet_tools(raw)
         self._tools[name] = [{"name": convert.tool_name(name, t["name"]), "tool": t["name"],
                               "description": t["description"], "parameters": t["inputSchema"]} for t in ok]
+        caps = (s.info or {}).get("capabilities") or {}
+        if "resources" in caps or not caps:
+            self._resources[name] = convert.vet_resources(await s.list_resources())
+        else:
+            self._resources[name] = []
+        if "prompts" in caps or not caps:
+            self._prompts[name] = convert.vet_prompts(await s.list_prompts())
+        else:
+            self._prompts[name] = []
         self._warns[name] = warns
         self._save_cache(cfg)
         self.sync_registry()
         return self._tools[name]
 
+    async def read_resource(self, name: str, uri: str, workspace: str | None = None) -> dict:
+        s = await self.ensure(name, workspace)
+        return await s.read_resource(uri)
+
+    async def get_prompt(self, name: str, prompt_name: str, arguments: dict | None = None, workspace: str | None = None) -> dict:
+        s = await self.ensure(name, workspace)
+        return await s.get_prompt(prompt_name, arguments)
+
     async def _refresh_quiet(self, name: str) -> None:
         try:
             s = self.sessions.get(name)
             await self.refresh_tools(name, s.started_ws if s else None)
+            if self._on_change:
+                self._on_change(name, self.view(name))
         except Exception:  # noqa: BLE001
             pass
 
@@ -212,8 +256,11 @@ class McpManager:
         """进程退出时的兜底：杀掉所有仍在运行的服务器进程树。"""
         from ..tools.files import kill_tree
         for s in list(self.sessions.values()):
-            if s.proc is not None and s.proc.returncode is None:
-                kill_tree(s.proc)
+            proc = getattr(s, "proc", None)
+            if proc is not None and proc.returncode is None:
+                kill_tree(proc)
+                if proc.pid:
+                    sec.release_windows_job(proc.pid)
 
     def start_reaper(self) -> None:
         if self._reaper is None:
@@ -235,14 +282,16 @@ class McpManager:
         old = self.store.get(name)
         cfg, created = self.store.upsert(name, patch)
         restart = created or old is None or any(getattr(old, k) != getattr(cfg, k) for k in
-                                                ("command", "env", "sandbox", "network", "workspace", "readonly_paths"))
+                                                ("transport", "url", "headers", "command", "env", "sandbox", "network", "workspace", "readonly_paths"))
         if restart:
             await self.stop(name)
-        if old is not None and old.command != cfg.command or old is not None and sorted(old.env) != sorted(cfg.env):
+        if old is not None and (old.transport != cfg.transport or old.url != cfg.url or old.command != cfg.command or sorted(old.env) != sorted(cfg.env)):
             self._tools.pop(name, None)
+            self._resources.pop(name, None)
+            self._prompts.pop(name, None)
             self._warns.pop(name, None)
-        self._audit("mcp_config", name, created=created, sandbox=cfg.sandbox, network=cfg.network, workspace=cfg.workspace,
-                    trust_results=cfg.trust_results, enabled=cfg.enabled, readonly_paths=len(cfg.readonly_paths))
+        self._audit("mcp_config", name, created=created, transport=cfg.transport, sandbox=cfg.sandbox, network=cfg.network,
+                    workspace=cfg.workspace, trust_results=cfg.trust_results, enabled=cfg.enabled, readonly_paths=len(cfg.readonly_paths))
         if not cfg.enabled:
             await self.stop(name)
         self.sync_registry()
@@ -253,6 +302,8 @@ class McpManager:
         ok = self.store.delete(name)
         if ok:
             self._tools.pop(name, None)
+            self._resources.pop(name, None)
+            self._prompts.pop(name, None)
             self._warns.pop(name, None)
             self._errors.pop(name, None)
             base = (self.data_dir / "mcp").resolve()
@@ -271,11 +322,14 @@ class McpManager:
         s = self.sessions.get(name)
         d = cfg.public()
         d["env_masked"] = {k: MASK for k in cfg.env}
+        d["headers_masked"] = {k: MASK for k in cfg.headers}
         d["status"] = ("running" if s is not None and s.alive else "error" if name in self._errors else "idle") if cfg.enabled else "disabled"
         d["error"] = self._errors.get(name, "")
         d["tools"] = [{"name": t["name"], "tool": t["tool"], "description": t["description"]} for t in self._tools.get(name, [])]
+        d["resources"] = list(self._resources.get(name, []))
+        d["prompts"] = list(self._prompts.get(name, []))
         d["warnings"] = self._warns.get(name, [])
-        d["sandbox_effective"] = s.launch.sandbox if s is not None and s.alive else self.effective_sandbox(name)
+        d["sandbox_effective"] = ("http" if cfg.transport == "http" else (s.launch.sandbox if s is not None and s.alive and s.launch else self.effective_sandbox(name)))
         d["contained"] = self.contained(name)
         d["stderr"] = s.stderr_tail(20) if s is not None else ""
         d["server_info"] = s.info.get("server", {}) if s is not None else {}

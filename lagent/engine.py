@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+from contextlib import asynccontextmanager
 import os
 import re
 import secrets
@@ -41,6 +42,49 @@ OOM_HINT = ("显存/内存不足。可尝试：① 设置里把上下文调小�
 
 class EngineError(Exception):
     pass
+
+
+class _SlotScheduler:
+    """前台对话优先的推理槽位队列：slots >= 2 时为前台预留 1 个槽位，防止后台摘要/压缩饿死交互请求。"""
+
+    def __init__(self, slots: int = 1):
+        self.slots = max(1, int(slots))
+        self._active_fg = 0
+        self._active_bg = 0
+        self._fg_waiters = 0
+        self._cond = asyncio.Condition()
+
+    @asynccontextmanager
+    async def acquire(self, priority: int = 0):
+        is_fg = priority <= 0
+        bg_cap = max(1, self.slots - 1) if self.slots >= 2 else 1
+        async with self._cond:
+            if is_fg:
+                self._fg_waiters += 1
+            try:
+                while True:
+                    total = self._active_fg + self._active_bg
+                    if is_fg:
+                        if total < self.slots:
+                            self._active_fg += 1
+                            break
+                    else:
+                        if total < self.slots and self._fg_waiters == 0 and (self.slots == 1 or self._active_bg < bg_cap):
+                            self._active_bg += 1
+                            break
+                    await self._cond.wait()
+            finally:
+                if is_fg:
+                    self._fg_waiters -= 1
+        try:
+            yield
+        finally:
+            async with self._cond:
+                if is_fg:
+                    self._active_fg = max(0, self._active_fg - 1)
+                else:
+                    self._active_bg = max(0, self._active_bg - 1)
+                self._cond.notify_all()
 
 
 def _free_port() -> int:
@@ -132,6 +176,7 @@ class Engine:
         self._last: dict = {}
         self._ready_evt = asyncio.Event()
         self.auto_restarts = 0
+        self._slot_sched = _SlotScheduler(1)
 
     # ------------------------------------------------------------ 发现与能力
     def find_binary(self) -> Path | None:
@@ -371,6 +416,8 @@ class Engine:
             notes.append(f"MoE 优化：已启用 GPU 专家缓存（--moe-cache-mib {adv['moe']['moe_cache_mib']}）。")
         if adv["threads"]["threads_batch"] > threads and (self.has("--threads-batch") or self.has("-tb")):
             notes.append(f"线程优化：生成使用 {threads} 物理核心，提示批处理使用 {adv['threads']['threads_batch']} 逻辑线程（-tb）。")
+        if adv["multi_gpu"]["enabled"]:
+            notes.append(f"多卡调度：按可用显存比例切分（--tensor-split {adv['multi_gpu']['tensor_split']}）。")
 
         summary = (f"{info['name']} · {info['quant']} · {S:.1f} GB" + (" · MoE %s专家/激活%s" % (info["experts"], info["experts_used"]) if info["moe"] else "")
                    + f" · 档位:{prof.label}"
@@ -384,7 +431,8 @@ class Engine:
                 "batch": prof.batch, "ubatch": prof.ubatch, "cache_ram_mb": cache_mb, "profile": prof.brief(),
                 "spec": adv["spec"], "kv_budget": adv["kv_budget"], "moe_cache_mib": adv["moe"]["moe_cache_mib"],
                 "threads_batch": adv["threads"]["threads_batch"], "cache_reuse": adv["cache_reuse"]["threshold"],
-                "mlock": adv["memory_lock"]["enabled"], "memory_lock_flags": adv["memory_lock"]["flags"]}
+                "mlock": adv["memory_lock"]["enabled"], "memory_lock_flags": adv["memory_lock"]["flags"],
+                "multi_gpu": adv["multi_gpu"]}
 
     # ------------------------------------------------------------ 参数构建
     def slots_dir(self) -> Path:
@@ -394,6 +442,7 @@ class Engine:
         assert self.binary
         e = self.cfg.get("engine")
         slots = max(1, min(8, int(e.get("slots", 1) or 1)))
+        self._slot_sched = _SlotScheduler(slots)
         a = [str(self.binary), "-m", plan["model_path"], "--host", "127.0.0.1", "--port", str(self.port), "--api-key", self.api_key,
              "-c", str(plan["ctx"]), "-np", str(slots)]
         if self.has("--no-webui"):
@@ -488,6 +537,12 @@ class Engine:
         cache_mb = plan.get("cache_ram_mb", e["cache_ram_mb"])
         if cache_mb != 0 and self.has("--cache-ram"):
             a += ["--cache-ram", str(cache_mb)]
+        mgpu_flags = (plan.get("multi_gpu") or {}).get("flags") or []
+        if mgpu_flags:
+            a += mgpu_flags
+        rb = int(self.cfg.get("generation", "reasoning_budget", default=-1))
+        if rb >= 0 and self.has("--reasoning-budget"):
+            a += ["--reasoning-budget", str(rb)]
         a += self._safe_extra(e["extra_args"])
         return a
 
@@ -713,20 +768,35 @@ class Engine:
         raise EngineError(self.error or "引擎未就绪：请先在 设置→模型与引擎 中加载模型。")
 
     # ------------------------------------------------------------ 推理接口
-    async def chat_stream(self, body: dict):
-        async for chunk in net.sse_post("127.0.0.1", self.port, "/v1/chat/completions", body, headers=self._auth()):
-            if isinstance(chunk, dict) and chunk.get("timings"):
-                self.record_timings(chunk["timings"])
-            yield chunk
+    async def chat_stream(self, body: dict, *, priority: int = 0):
+        async with self._slot_sched.acquire(priority):
+            async for chunk in net.sse_post("127.0.0.1", self.port, "/v1/chat/completions", body, headers=self._auth()):
+                if isinstance(chunk, dict) and chunk.get("timings"):
+                    self.record_timings(chunk["timings"])
+                yield chunk
 
-    async def chat(self, body: dict, timeout: float = 600) -> dict:
-        st, data = await net.local_json("127.0.0.1", self.port, "POST", "/v1/chat/completions", {**body, "stream": False},
-                                        headers=self._auth(), timeout=timeout)
-        if st != 200:
-            raise net.HTTPStatusError(st, data if isinstance(data, str) else str(data))
-        if isinstance(data, dict) and data.get("timings"):
-            self.record_timings(data["timings"])
-        return data
+    async def chat(self, body: dict, timeout: float = 600, *, priority: int = 1) -> dict:
+        async with self._slot_sched.acquire(priority):
+            st, data = await net.local_json("127.0.0.1", self.port, "POST", "/v1/chat/completions", {**body, "stream": False},
+                                            headers=self._auth(), timeout=timeout)
+            if st != 200:
+                raise net.HTTPStatusError(st, data if isinstance(data, str) else str(data))
+            if isinstance(data, dict) and data.get("timings"):
+                self.record_timings(data["timings"])
+            return data
+
+    async def embeddings(self, texts: list[str], timeout: float = 15.0) -> list[list[float]] | None:
+        if self.status != "ready" or not self.port or not texts:
+            return None
+        async with self._slot_sched.acquire(1):
+            st, data = await net.local_json("127.0.0.1", self.port, "POST", "/v1/embeddings",
+                                            {"input": texts, "model": "local"}, headers=self._auth(), timeout=timeout)
+            if st == 200 and isinstance(data, dict) and isinstance(data.get("data"), list):
+                items = sorted(data["data"], key=lambda x: int(x.get("index", 0)))
+                vecs = [list(map(float, it["embedding"])) for it in items if isinstance(it.get("embedding"), list)]
+                if len(vecs) == len(texts):
+                    return vecs
+        return None
 
     def record_tps(self, v: float) -> None:
         if v > 0:

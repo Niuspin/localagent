@@ -90,6 +90,14 @@
     LA.sse('/api/events', {
       engine: function (e) { if (LA.S.state) { LA.S.state.engine = e; LA.bus.emit('state', LA.S.state); } },
       config: function (d) { if (d && d.config) { LA.S.config = d.config; LA.bus.emit('config', d.config); } },
+      mcp: function (d) { LA.bus.emit('mcp', d); },
+      hub: function (d) { LA.bus.emit('hub', d); },
+      state: function (d) {
+        if (d && d.session_id && LA.S.cur && LA.S.cur.id === d.session_id && 'permission_mode' in d) {
+          LA.S.cur.permission_mode = d.permission_mode || null;
+          LA.bus.emit('sessionmeta', LA.S.cur);
+        }
+      },
       notice: function (n) { LA.toast(n.text, n.level === 'warn' ? 'err' : null, 4500); }
     }, { onerror: function (final) { if (final) setTimeout(connectEvents, 5000); } });
   }
@@ -112,7 +120,10 @@
       ];
       ['ask', 'auto_edit', 'plan', 'auto'].forEach(function (md) {
         var names = { ask: '逐项确认', auto_edit: '自动编辑', plan: '只读规划', auto: '全自动' };
-        items.push({ kind: 'mode', tag: '模式', title: '权限模式: ' + names[md], sub: '/mode ' + md, run: function () { LA.cfgSet('agent.permission_mode', md, { immediate: true }); } });
+        items.push({ kind: 'mode', tag: '模式', title: '权限模式: ' + names[md], sub: '/mode ' + md, run: function () {
+          if (LA.setSessionMode) LA.setSessionMode(md);
+          else LA.cfgSet('agent.permission_mode', md, { immediate: true });
+        } });
       });
       (LA.S.sessions || []).slice(0, 12).forEach(function (s) {
         items.push({ kind: 'sess', tag: '会话', title: s.title || '未命名会话', sub: s.workspace || '', run: function () { LA.openSession(s.id); } });

@@ -108,8 +108,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-browser", action="store_true", help="不自动打开窗口/浏览器（纯服务模式）")
     ap.add_argument("--browser", action="store_true", help="用系统默认浏览器，而不是独立应用窗口")
     ap.add_argument("--load", action="store_true", help="启动后立即加载 config 里上次的模型")
+    ap.add_argument("--offline", action="store_true", help="纯离线模式启动（不提示联网或在线搜索配置）")
     ap.add_argument("--version", action="version", version=f"LocalAgent {__version__}")
     a = ap.parse_args(argv)
+    if a.offline:
+        os.environ["LOCALAGENT_OFFLINE"] = "1"
 
     if sys.version_info < (3, 10):
         notify("LocalAgent", "需要 Python 3.10 或更高版本")
