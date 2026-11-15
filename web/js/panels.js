@@ -43,16 +43,28 @@
   };
 
   /* ================================================================ 右侧抽屉 */
-  var drawer, dtab = 'files', previewing = null, expanded = {}, drawBody;
+  var drawer, dtab = 'files', previewing = null, previewLine = 0, expanded = {}, drawBody;
 
   P.initDrawer = function () {
     drawer = LA.$('#drawer');
     LA.$('#btnDrawer').innerHTML = icon('panel', 19);
     LA.$('#btnDrawer').addEventListener('click', function () { P.toggleDrawer(); });
     var refresh = LA.debounce(function () { if (LA.S.drawerOpen && !previewing) renderDrawer(); }, 400);
-    LA.bus.on('fschanged', refresh); LA.bus.on('session', function () { previewing = null; expanded = {}; if (LA.S.drawerOpen) renderDrawer(); });
-    LA.bus.on('workspace', function () { expanded = {}; if (LA.S.drawerOpen) renderDrawer(); });
+    LA.bus.on('fschanged', refresh); LA.bus.on('session', function () { previewing = null; previewLine = 0; expanded = {}; if (LA.S.drawerOpen) renderDrawer(); });
+    LA.bus.on('workspace', function () { expanded = {}; previewLine = 0; if (LA.S.drawerOpen) renderDrawer(); });
     LA.bus.on('todos', function () { if (LA.S.drawerOpen && dtab === 'tasks') renderDrawer(); });
+  };
+  P.openFile = function (relPath, line) {
+    if (!relPath) return;
+    dtab = 'files';
+    previewing = String(relPath);
+    previewLine = line || 0;
+    P.toggleDrawer(true);
+  };
+  P.openChanges = function () {
+    dtab = 'changes';
+    previewing = null;
+    P.toggleDrawer(true);
   };
   P.toggleDrawer = function (force) {
     LA.S.drawerOpen = force != null ? force : !LA.S.drawerOpen;
@@ -123,7 +135,22 @@
         btn('引用到对话', function () { LA.S.attachments.push({ kind: 'file', name: LA.baseName(p), path: p }); LA.composer.refresh(); LA.toast('已添加到输入框'); }, 'ghost'));
       if (r.kind === 'text' || r.kind === 'office') {
         bar.appendChild(btn('复制内容', function () { LA.copyText(r.content || ''); }, 'ghost'));
-        body.appendChild(bar); body.appendChild(el('pre', { text: r.content || '（空文件）' }));
+        body.appendChild(bar);
+        var txt = r.content || '（空文件）';
+        var ext = p.indexOf('.') >= 0 ? p.split('.').pop().toLowerCase() : '';
+        var nLines = txt.split('\n').length;
+        var nums = el('div', { class: 'pv-nums' });
+        var targetNum = null;
+        for (var i = 1; i <= nLines; i++) {
+          var s = el('span', { class: i === previewLine ? 'on' : '', text: String(i) });
+          if (i === previewLine) targetNum = s;
+          nums.appendChild(s);
+        }
+        var codeEl = el('code', { class: 'pv-code', html: LA.highlight ? LA.highlight(txt, ext) : txt });
+        var preEl = el('pre', {}, codeEl);
+        var wrap = el('div', { class: 'pv-wrap' }, nums, preEl);
+        body.appendChild(wrap);
+        if (targetNum) setTimeout(function () { targetNum.scrollIntoView({ block: 'center' }); }, 30);
       } else if (r.kind === 'image' && r.data_url) {
         body.appendChild(bar); body.appendChild(el('img', { src: r.data_url, alt: LA.baseName(p) }));
       } else {
@@ -132,9 +159,24 @@
     }).catch(function (e) { body.textContent = e.message; });
   }
 
+  function renderColorDiff(diffText) {
+    var box = el('pre', { class: 'git-diff' });
+    (diffText || '（无文本差异或为未跟踪/二进制文件）').split('\n').forEach(function (ln) {
+      var cls = ln.indexOf('+++') === 0 || ln.indexOf('---') === 0 ? 'gd-h'
+        : ln[0] === '+' ? 'gd-add'
+        : ln[0] === '-' ? 'gd-del'
+        : ln.indexOf('@@') === 0 ? 'gd-hunk' : '';
+      box.appendChild(el('div', { class: cls, text: ln || ' ' }));
+    });
+    return box;
+  }
+
   function drawChanges() {
+    var gHead = el('div', { class: 'dr-sec', style: { display: 'none' } }), gBox = el('div');
     var jBox = el('div'), tBox = el('div');
     drawBody.append(
+      gHead,
+      gBox,
       el('div', { class: 'dr-sec' }, el('span', { text: '本会话的文件变更' })),
       jBox,
       el('div', { class: 'dr-sec' }, el('span', { text: '回收站' }),
@@ -147,6 +189,39 @@
       tBox
     );
     function drawChangesRefresh() { LA.clear(drawBody); drawChanges(); }
+    if (curWs()) {
+      LA.get('/api/workspace/git' + (sid() ? '?session_id=' + encodeURIComponent(sid()) : '')).then(function (g) {
+        if (!g || !g.is_repo) return;
+        gHead.style.display = '';
+        gHead.append(el('span', { text: 'Git 工作区' + (g.branch ? ' (' + g.branch.split('...')[0] + ')' : '') }),
+          el('span', { class: 'hint2', text: (g.files || []).length + ' 个改动' }));
+        if (!(g.files || []).length) {
+          gBox.appendChild(el('div', { class: 'dr-empty', text: '工作树干净（无未提交改动）' }));
+          return;
+        }
+        g.files.forEach(function (f) {
+          var diffPane = el('div', { hidden: true });
+          var loaded = false;
+          var diffBtn = el('button', { class: 'btn-mini-act', type: 'button', text: 'Diff', on: { click: function (e) {
+            e.stopPropagation();
+            if (!diffPane.hidden) { diffPane.hidden = true; return; }
+            diffPane.hidden = false;
+            if (loaded) return;
+            loaded = true;
+            diffPane.textContent = '加载 diff…';
+            LA.get('/api/workspace/git?path=' + encodeURIComponent(f.path) + (sid() ? '&session_id=' + encodeURIComponent(sid()) : ''))
+              .then(function (r) { LA.clear(diffPane); diffPane.appendChild(renderColorDiff(r.diff)); })
+              .catch(function (err) { diffPane.textContent = err.message; });
+          } } });
+          var row = el('div', { class: 'jr-item git-item', title: f.path },
+            el('span', { class: 'badge op-' + (f.status === 'D' ? 'delete' : f.status === 'A' || f.status === '??' ? 'create' : 'edit'), text: f.status }),
+            el('span', { class: 'tx', text: f.path, style: { cursor: 'pointer' }, on: { click: function () { P.openFile(f.path); } } }),
+            diffBtn
+          );
+          gBox.append(row, diffPane);
+        });
+      }).catch(function () {});
+    }
     LA.get('/api/journal' + (sid() ? '?session_id=' + encodeURIComponent(sid()) : '')).then(function (l) {
       if (!l.length) jBox.appendChild(el('div', { class: 'dr-empty', text: '还没有变更记录' }));
       var opNames = { write: '写入', edit: '编辑', delete: '删除', move: '移动', copy: '复制', mkdir: '新建夹', create: '创建' };

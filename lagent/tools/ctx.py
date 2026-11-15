@@ -39,6 +39,7 @@ class ToolCtx:
     ask: Callable[[str, list[str]], Awaitable[str]] | None = None
     cancel: asyncio.Event | None = None
     sandbox_kind: str = "none"
+    tool_call_id: str = ""
 
     @property
     def sid(self) -> str:

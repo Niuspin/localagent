@@ -5,6 +5,8 @@
   var input, chipsBox, pop, btnSend, hint, modePill, thinkPill, taintChip, fileInput, composerEl;
   var popItems = [], popSel = 0, popRange = null;
   var busy = false;      // 正在发送请求（防双击）
+  var queued = [];       // 运行中排队的后续指令（Steer / Follow-up Queue）
+  var queueBox = null;
 
   var MODES = [
     { value: 'ask', label: '逐项确认', desc: '写文件、运行命令前都会询问（推荐）' },
@@ -22,8 +24,23 @@
   /* ------------------------------------------------------------ 对外接口 */
   LA.composer = {
     setText: function (t) { input.value = t || ''; autosize(); updateSend(); },
+    setDraft: function (d) {
+      d = d || {};
+      input.value = d.text || '';
+      LA.S.chosen = Array.isArray(d.skills) ? d.skills.slice() : [];
+      var atts = [];
+      (d.images || []).forEach(function (u) {
+        if (typeof u === 'string' && /^data:image\//.test(u)) atts.push({ kind: 'image', name: '图片', dataUrl: u });
+      });
+      (d.files || []).forEach(function (p) {
+        if (typeof p === 'string' && p) atts.push({ kind: 'file', name: LA.baseName(p), path: p });
+      });
+      LA.S.attachments = atts;
+      renderChips(); autosize(); updateSend();
+    },
     focus: function () { input.focus(); },
     sendText: function (t, o) { return send(t, o); },
+    drainQueue: function () { return drainQueue(); },
     refresh: function () { updatePills(); updateSend(); renderChips(); }
   };
 
@@ -47,7 +64,14 @@
     btnSend.title = run ? '停止' : '发送';
     btnSend.disabled = busy || (!run && (!hasContent() || !c.ok));
     LA.clear(hint);
-    if (!run && LA.S.state) {
+    if (run) {
+      if (hasContent() && !busy) {
+        hint.appendChild(document.createTextNode('运行中 · 按 Enter 排队 · '));
+        hint.appendChild(el('a', { text: '加入队列', on: { click: function () { enqueueDraft(); } } }));
+      } else if (queued.length) {
+        hint.textContent = '已完成本轮后将自动发送队列 (' + queued.length + ')';
+      }
+    } else if (LA.S.state) {
       if (c.why === 'engine') {
         var e = LA.engine();
         hint.appendChild(document.createTextNode(e.status === 'stopping' ? '模型正在卸载 · ' : '模型未加载 · '));
@@ -155,24 +179,39 @@
     { name: 'hooks', desc: '查看已配置的生命周期钩子' }
   ];
 
-  var fileTreeCache = { ts: 0, entries: [] };
-  function fetchFileTree() {
+  var slashCache = { ts: 0, ws: '', items: null };
+  function fetchSlashCommands() {
+    var ws = (LA.S.cur && LA.S.cur.workspace) || (LA.S.state && LA.S.state.workspace) || '';
     var now = Date.now();
-    if (fileTreeCache.entries.length && now - fileTreeCache.ts < 15000) {
+    if (slashCache.items && slashCache.ws === ws && now - slashCache.ts < 30000) {
+      return Promise.resolve(slashCache.items);
+    }
+    var sid = LA.S.cur ? LA.S.cur.id : '';
+    return LA.api('GET', '/api/commands?session_id=' + encodeURIComponent(sid)).then(function (res) {
+      var list = (res && res.commands) || [];
+      if (list.length) {
+        slashCache = { ts: now, ws: ws, items: list.map(function (c) {
+          return { name: c.name, desc: c.description || '', custom: c.kind === 'custom' };
+        }) };
+      }
+      return slashCache.items || BUILTIN_SLASH;
+    }).catch(function () { return slashCache.items || BUILTIN_SLASH; });
+  }
+
+  var fileTreeCache = { ts: 0, ws: '', entries: [] };
+  function fetchFileTree() {
+    var ws = (LA.S.cur && LA.S.cur.workspace) || (LA.S.state && LA.S.state.workspace) || '';
+    var now = Date.now();
+    if (fileTreeCache.entries.length && fileTreeCache.ws === ws && now - fileTreeCache.ts < 20000) {
       return Promise.resolve(fileTreeCache.entries);
     }
     var sid = LA.S.cur ? LA.S.cur.id : '';
-    return LA.api('GET', '/api/workspace/tree?path=&session_id=' + sid).then(function (res) {
-      var flat = [];
-      function walk(items, prefix) {
-        (items || []).forEach(function (e) {
-          var rel = prefix ? prefix + '/' + e.name : e.name;
-          flat.push({ path: rel, name: e.name, type: e.type, size: e.size });
-          if (e.children && e.children.length) walk(e.children, rel);
-        });
-      }
-      walk(res.entries || [], '');
-      fileTreeCache = { ts: now, entries: flat };
+    return LA.api('GET', '/api/workspace/tree?recursive=1&path=&session_id=' + encodeURIComponent(sid)).then(function (res) {
+      var flat = (res.entries || []).map(function (e) {
+        var rel = e.path || e.name;
+        return { path: rel, name: e.name, type: e.type || 'file', size: e.size || 0 };
+      });
+      fileTreeCache = { ts: now, ws: ws, entries: flat };
       return flat;
     }).catch(function () {
       return fileTreeCache.entries || [];
@@ -198,29 +237,41 @@
     if (!t) return closePop();
 
     if (t.type === 'slash') {
-      var list = [];
-      var q = t.q;
-      function scoreMatch(name, desc) {
-        var nl = name.toLowerCase(), dl = (desc || '').toLowerCase();
-        if (!q) return 1;
-        if (nl === q) return 100;
-        if (nl.indexOf(q) === 0) return 80;
-        if (nl.indexOf(q) >= 0) return 50;
-        if (dl.indexOf(q) >= 0) return 10;
-        return 0;
-      }
-      (LA.S.skills || []).forEach(function (s) {
-        if (s.enabled && LA.S.chosen.indexOf(s.name) < 0) {
-          var sc = scoreMatch(s.name, s.description || '技能');
-          if (sc > 0) list.push({ kind: 'skill', name: s.name, desc: s.description || '技能', _sc: sc + 5 });
+      var seq = ++popReqSeq;
+      var cmds = slashCache.items || BUILTIN_SLASH;
+      function buildSlashList(cmdList) {
+        var list = [];
+        var q = t.q;
+        function scoreMatch(name, desc) {
+          var nl = name.toLowerCase(), dl = (desc || '').toLowerCase();
+          if (!q) return 1;
+          if (nl === q) return 100;
+          if (nl.indexOf(q) === 0) return 80;
+          if (nl.indexOf(q) >= 0) return 50;
+          if (dl.indexOf(q) >= 0) return 10;
+          return 0;
         }
-      });
-      BUILTIN_SLASH.forEach(function (c) {
-        var sc = scoreMatch(c.name, c.desc);
-        if (sc > 0) list.push({ kind: 'cmd', name: c.name, desc: c.desc, _sc: sc });
-      });
-      list.sort(function (a, b) { return b._sc - a._sc; });
-      renderPopItems(t, list.slice(0, 12));
+        (LA.S.skills || []).forEach(function (s) {
+          if (s.enabled && LA.S.chosen.indexOf(s.name) < 0) {
+            var sc = scoreMatch(s.name, s.description || '技能');
+            if (sc > 0) list.push({ kind: 'skill', name: s.name, desc: s.description || '技能', _sc: sc + 5 });
+          }
+        });
+        cmdList.forEach(function (c) {
+          var sc = scoreMatch(c.name, c.desc);
+          if (sc > 0) list.push({ kind: 'cmd', name: c.name, desc: c.desc, _sc: sc + (c.custom ? 2 : 0) });
+        });
+        list.sort(function (a, b) { return b._sc - a._sc; });
+        return list.slice(0, 12);
+      }
+      renderPopItems(t, buildSlashList(cmds));
+      if (!slashCache.items) {
+        fetchSlashCommands().then(function (fresh) {
+          if (seq !== popReqSeq) return;
+          var nowTok = currentToken();
+          if (nowTok && nowTok.type === 'slash') renderPopItems(nowTok, buildSlashList(fresh));
+        });
+      }
     } else if (t.type === 'at') {
       var seq = ++popReqSeq;
       fetchFileTree().then(function (allFiles) {
@@ -289,16 +340,48 @@
     input.focus();
   }
 
-  /* ------------------------------------------------------------ 发送 */
+  /* ------------------------------------------------------------ 队列与发送 */
+  function renderQueue() {
+    if (!queueBox) return;
+    LA.clear(queueBox);
+    queueBox.hidden = !queued.length;
+    if (!queued.length) return;
+    queued.forEach(function (q, idx) {
+      var lbl = q.text || (q.files.length ? '@' + q.files[0] : '附件消息');
+      queueBox.appendChild(el('span', { class: 'queue-pill', title: lbl },
+        el('span', { class: 'q-tag', text: '排队 #' + (idx + 1) }),
+        el('span', { class: 'q-txt', text: lbl.length > 48 ? lbl.slice(0, 48) + '…' : lbl }),
+        el('button', { type: 'button', text: '×', title: '移出队列', on: { click: function () { queued.splice(idx, 1); renderQueue(); updateSend(); } } })
+      ));
+    });
+  }
+  function enqueueDraft() {
+    var text = input.value.trim();
+    if (LA.S.attachments.some(function (a) { return a.uploading; })) { LA.toast('附件还在上传…'); return; }
+    var images = LA.S.attachments.filter(function (a) { return a.kind === 'image'; }).map(function (a) { return a.dataUrl; });
+    var files = LA.S.attachments.filter(function (a) { return a.kind === 'file' && a.path; }).map(function (a) { return a.path; });
+    var skills = LA.S.chosen.slice();
+    if (!text && !images.length && !files.length) return;
+    queued.push({ text: text, images: images, files: files, skills: skills });
+    input.value = ''; LA.S.attachments = []; LA.S.chosen = []; renderChips(); autosize(); closePop(); renderQueue(); updateSend();
+    LA.toast('已加入后续执行队列', 'ok', 2000);
+  }
+  function drainQueue() {
+    if (LA.live || busy || !queued.length) return;
+    var next = queued.shift();
+    renderQueue();
+    send(next.text, { keepAttachments: true, images: next.images, files: next.files, skills: next.skills });
+  }
+
   function send(textOverride, o) {
     o = o || {};
     if (LA.live) return Promise.resolve();
     var text = textOverride != null ? String(textOverride).trim() : input.value.trim();
     var atts = textOverride != null && !o.keepAttachments ? [] : LA.S.attachments;
     if (atts.some(function (a) { return a.uploading; })) { LA.toast('附件还在上传…'); return Promise.resolve(); }
-    var images = atts.filter(function (a) { return a.kind === 'image'; }).map(function (a) { return a.dataUrl; });
-    var files = atts.filter(function (a) { return a.kind === 'file' && a.path; }).map(function (a) { return a.path; });
-    var skills = textOverride != null ? [] : LA.S.chosen.slice();
+    var images = o.images ? o.images.slice() : atts.filter(function (a) { return a.kind === 'image'; }).map(function (a) { return a.dataUrl; });
+    var files = o.files ? o.files.slice() : atts.filter(function (a) { return a.kind === 'file' && a.path; }).map(function (a) { return a.path; });
+    var skills = o.skills ? o.skills.slice() : (textOverride != null ? [] : LA.S.chosen.slice());
     if (!text && !images.length && !files.length) return Promise.resolve();
     var c = canSend();
     if (!c.ok) { updateSend(); return Promise.resolve(); }
@@ -319,6 +402,8 @@
   LA.composer.init = function () {
     input = LA.$('#input'); chipsBox = LA.$('#attachChips'); pop = LA.$('#slashPop'); btnSend = LA.$('#btnSend'); hint = LA.$('#sendHint');
     modePill = LA.$('#modePill'); thinkPill = LA.$('#thinkPill'); taintChip = LA.$('#taintChip'); fileInput = LA.$('#fileInput'); composerEl = LA.$('#composer');
+    queueBox = el('div', { class: 'queue-box', id: 'queueBox', hidden: true });
+    composerEl.insertBefore(queueBox, chipsBox);
     LA.$('#btnAttach').innerHTML = icon('clip', 19);
 
     input.addEventListener('input', function () { autosize(); updateSend(); updatePop(); });
@@ -330,7 +415,11 @@
         if ((e.key === 'Enter' || e.key === 'Tab') && !e.isComposing) { e.preventDefault(); pick(popSel); return; }
       }
       if (e.key === 'Escape' && !pop.hidden) { e.preventDefault(); e.stopPropagation(); closePop(); return; }
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); if (!btnSend.disabled && !LA.live) send(); }
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+        e.preventDefault();
+        if (LA.live) { if (hasContent() && !busy) enqueueDraft(); }
+        else if (!btnSend.disabled) send();
+      }
       if (e.key === 'Backspace' && !input.value && LA.S.chosen.length) { LA.S.chosen.pop(); renderChips(); }
     });
     input.addEventListener('paste', function (e) {
@@ -357,6 +446,9 @@
     });
 
     ['state', 'config', 'runstate', 'taint', 'sessionmeta', 'session'].forEach(function (n) { LA.bus.on(n, function () { updatePills(); updateSend(); }); });
+    LA.bus.on('fschanged', function () { fileTreeCache.ts = 0; });
+    LA.bus.on('workspace', function () { fileTreeCache = { ts: 0, ws: '', entries: [] }; slashCache = { ts: 0, ws: '', items: null }; });
+    LA.bus.on('session', function () { fileTreeCache.ts = 0; slashCache.ts = 0; queued = []; renderQueue(); });
     updatePills(); updateSend(); autosize();
   };
 })();

@@ -430,6 +430,8 @@ class TelemetryTracker:
         self.cache_hit_rate = 0.0
         self.total_prompt_tokens = 0
         self.total_eval_tokens = 0
+        self.ttft_ms = 0.0
+        self.low_spec_streak = 0
         self.requests = 0
 
     def record_tps(self, tps: float) -> None:
@@ -464,6 +466,12 @@ class TelemetryTracker:
         if rate is not None:
             val = float(rate)
             self.spec_accept_rate = val if self.spec_accept_rate is None else self.alpha * val + (1.0 - self.alpha) * self.spec_accept_rate
+            self.low_spec_streak = (self.low_spec_streak + 1) if val < 0.25 else 0
+
+        p_ms = timings.get("prompt_ms")
+        if p_ms is not None and float(p_ms) > 0:
+            v_ms = float(p_ms)
+            self.ttft_ms = v_ms if self.ttft_ms == 0.0 else self.alpha * v_ms + (1.0 - self.alpha) * self.ttft_ms
 
         # 缓存命中率
         hit = next((timings[k] for k in ("n_cache_hit", "cache_n") if timings.get(k) is not None), None)
@@ -480,13 +488,24 @@ class TelemetryTracker:
         if comp_n:
             self.total_eval_tokens += int(comp_n)
 
+    def should_disable_speculation(self) -> bool:
+        """若连续多轮投机解码采纳率过低 (<25%)，建议关闭投机解码以减少无效草稿计算。"""
+        return (
+            self.requests >= 3
+            and self.low_spec_streak >= 3
+            and self.spec_accept_rate is not None
+            and self.spec_accept_rate < 0.25
+        )
+
     def benchmark_summary(self) -> dict:
         """返回性能指标字典。"""
         return {
             "prompt_tps": round(self.prompt_tps, 1),
             "eval_tps": round(self.eval_tps, 1),
             "tps": round(self.eval_tps, 1),
+            "ttft_ms": round(self.ttft_ms, 1),
             "spec_accept_rate": round(self.spec_accept_rate, 3) if self.spec_accept_rate is not None else None,
+            "spec_recommended": not self.should_disable_speculation(),
             "cache_hit_rate": round(self.cache_hit_rate, 3),
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_eval_tokens": self.total_eval_tokens,

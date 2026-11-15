@@ -215,16 +215,20 @@
   function editFrom(idx, m) {
     if (!guardIdle()) return;
     LA.post('/api/sessions/' + LA.S.cur.id + '/truncate', { from_index: idx }).then(function (v) {
-      LA.setSession(v); LA.composer.setText(m.text || ''); LA.composer.focus();
+      LA.setSession(v);
+      if (LA.composer.setDraft) LA.composer.setDraft({ text: m.text || '', images: m.images || [], files: m.files || [], skills: m.skills || [] });
+      else LA.composer.setText(m.text || '');
+      LA.composer.focus();
     }).catch(LA.fail);
   }
   function regenerate(idx) {
     if (!guardIdle()) return;
     var msgs = LA.S.cur.messages, u = idx - 1;
     if (u < 0 || msgs[u].role !== 'user') return;
-    var text = msgs[u].text || '';
+    var mu = msgs[u], text = mu.text || '';
     LA.post('/api/sessions/' + LA.S.cur.id + '/truncate', { from_index: u }).then(function (v) {
-      LA.setSession(v); LA.composer.sendText(text);
+      LA.setSession(v);
+      LA.composer.sendText(text, { keepAttachments: true, images: mu.images || [], files: mu.files || [], skills: mu.skills || [] });
     }).catch(LA.fail);
   }
 
@@ -330,11 +334,74 @@
     return v;
   }
 
+  function splitStableMarkdown(src) {
+    var lines = src.split('\n'), fence = null, safeCut = -1;
+    for (var i = 0; i < lines.length - 1; i++) {
+      var trimmed = lines[i].trim();
+      var fm = /^(```+|~~~+)/.exec(trimmed);
+      if (fm) {
+        if (!fence) fence = fm[1][0];
+        else if (trimmed[0] === fence && /^[`~]+\s*$/.test(trimmed)) fence = null;
+      } else if (!fence && trimmed === '') {
+        safeCut = i + 1;
+      }
+    }
+    if (safeCut <= 0) return { stable: '', tail: src };
+    return { stable: lines.slice(0, safeCut).join('\n'), tail: lines.slice(safeCut).join('\n') };
+  }
+
+  function linkifyWorkspacePaths(rootEl) {
+    var ws = (LA.S.cur && LA.S.cur.workspace) || (LA.S.state && LA.S.state.workspace);
+    if (!ws || !LA.panels || !LA.panels.openFile) return;
+    var codes = rootEl.querySelectorAll('code');
+    var rx = /^([A-Za-z0-9_.\-/\\]+\.[A-Za-z0-9]{1,8})(?::(\d+))?$/;
+    for (var i = 0; i < codes.length; i++) {
+      var c = codes[i];
+      if (c.closest('pre') || c.classList.contains('file-ref')) continue;
+      var txt = (c.textContent || '').trim();
+      var m = rx.exec(txt);
+      if (!m || m[1].indexOf('://') >= 0) continue;
+      c.classList.add('file-ref');
+      c.title = '在工作区面板打开 ' + m[1];
+      (function (fpath, lno) {
+        c.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          LA.panels.openFile(fpath.replace(/\\/g, '/'), lno ? parseInt(lno, 10) : 0);
+        });
+      })(m[1], m[2]);
+    }
+  }
+
   function mkText(b) {
     var d = el('div', { class: 'md' });
+    var stableEl = null, tailEl = null, lastStable = '', lastTail = '', lastRendered = null;
     var v = { el: d, type: 'text', b: b };
     v.update = function () {
-      d.innerHTML = LA.renderMarkdown(b.text || '');
+      var txt = b.text || '';
+      if (b.live && txt.length > 240) {
+        var sp = splitStableMarkdown(txt);
+        if (!stableEl) {
+          LA.clear(d);
+          stableEl = el('div', { class: 'md-stable' });
+          tailEl = el('div', { class: 'md-tail' });
+          d.append(stableEl, tailEl);
+        }
+        if (sp.stable !== lastStable) {
+          lastStable = sp.stable;
+          stableEl.innerHTML = sp.stable ? LA.renderMarkdown(sp.stable) : '';
+        }
+        if (sp.tail !== lastTail) {
+          lastTail = sp.tail;
+          tailEl.innerHTML = sp.tail ? LA.renderMarkdown(sp.tail) : '';
+        }
+      } else {
+        if (stableEl || lastRendered !== txt) {
+          stableEl = tailEl = null; lastStable = ''; lastTail = '';
+          lastRendered = txt;
+          d.innerHTML = LA.renderMarkdown(txt);
+          if (!b.live) linkifyWorkspacePaths(d);
+        }
+      }
       d.classList.toggle('cursor', !!b.live);
     };
     v.update();
@@ -401,6 +468,12 @@
           el('button', { class: 'btn-mini-act', text: '复制', type: 'button', on: { click: function (e) { e.stopPropagation(); LA.copyText(b.content); } } }));
         body.appendChild(resHdr);
         body.appendChild(el('pre', { text: b.content }));
+      } else if (s === 'running' && b.live_output) {
+        if (!open) { open = true; root.classList.add('open'); head.setAttribute('aria-expanded', 'true'); }
+        var liveHdr = el('div', { class: 't-sec-head' }, el('h6', { text: '实时输出' }));
+        var livePre = el('pre', { class: 't-live', text: b.live_output });
+        body.append(liveHdr, livePre);
+        livePre.scrollTop = livePre.scrollHeight;
       }
       var meta = b.meta || {};
       var chips = el('div', { class: 't-meta' });
@@ -565,8 +638,13 @@
       },
       tool_start: function (d) {
         endBlocks();
-        var b = { type: 'tool', id: d.id, name: d.name, title: d.title, args: d.args, status: 'running', content: '', meta: {}, duration_ms: 0, approval: null };
+        var b = { type: 'tool', id: d.id, name: d.name, title: d.title, args: d.args, status: 'running', content: '', live_output: '', meta: {}, duration_ms: 0, approval: null };
         model.blocks.push(b); view.addBlock(b); LA.chat.scrollToBottom();
+      },
+      tool_output_delta: function (d) {
+        var v = findTool(d.id); if (!v) return;
+        v.b.live_output = ((v.b.live_output || '') + (d.chunk || '')).slice(-16000);
+        sched(v);
       },
       approval_request: function (d) {
         var v = findTool(d.tool_id); if (!v) return;
@@ -581,7 +659,7 @@
       },
       tool_result: function (d) {
         var v = findTool(d.id); if (!v) return;
-        v.b.status = d.status; v.b.content = d.content; v.b.meta = d.meta || {}; v.b.duration_ms = d.duration_ms; v.b.approval = null; v.update();
+        v.b.status = d.status; v.b.content = d.content; v.b.live_output = ''; v.b.meta = d.meta || {}; v.b.duration_ms = d.duration_ms; v.b.approval = null; v.update();
         if ((d.meta && (d.meta.path || d.meta.undo_id)) || d.name === 'run_command') LA.bus.emit('fschanged');
       },
       question: function (d) { endBlocks(); view.toolsWrap = null; view.lastType = 'note'; view.body.appendChild(questionCard(d, view)); LA.chat.scrollToBottom(true); },
@@ -612,16 +690,41 @@
         }).catch(function () {});
         LA.refreshSessions(); LA.bus.emit('fschanged');
         if (d.status === 'done' && document.hidden && 'Notification' in window && Notification.permission === 'granted') { try { new Notification('LocalAgent 已完成'); } catch (e) {} }
+        if (d.status !== 'cancelled' && LA.composer && LA.composer.drainQueue) setTimeout(LA.composer.drainQueue, 20);
       }
     };
 
-    var closeFn = LA.sse('/api/runs/' + runId + '/events?after=0', H, {
-      onerror: function (final) {
-        if (final && LA.live && LA.live.runId === runId) {
-          LA.live = null; model.status = 'error'; view.showError('与服务的连接中断'); view.renderFooter(); LA.bus.emit('runstate', false);
+    var lastSeq = 0;
+    var wrapped = {};
+    Object.keys(H).forEach(function (k) {
+      wrapped[k] = function (d, ev) {
+        if (ev && ev.lastEventId) {
+          var n = parseInt(ev.lastEventId, 10);
+          if (!isNaN(n)) { if (n <= lastSeq) return; lastSeq = n; }
         }
-      }
+        H[k](d, ev);
+      };
     });
+
+    var closeFn = function () {};
+    function connectSse(afterSeq) {
+      closeFn();
+      closeFn = LA.sse('/api/runs/' + runId + '/events?after=' + (afterSeq || 0), wrapped, {
+        onerror: function (final) {
+          if (final && LA.live && LA.live.runId === runId) {
+            var retryBtn = el('button', { class: 'btn sm', text: '重连', on: { click: function () {
+              wrapErr.remove();
+              LA.live = live; model.status = 'running'; view.el.classList.add('live'); LA.bus.emit('runstate', true);
+              connectSse(lastSeq);
+            } } });
+            var wrapErr = el('div', { class: 'sse-retry' }, el('span', { text: '与服务的事件流连接中断' }), retryBtn);
+            LA.live = null; model.status = 'error'; view.el.classList.remove('live');
+            view.body.appendChild(wrapErr); view.renderFooter(); LA.bus.emit('runstate', false);
+          }
+        }
+      });
+    }
+    connectSse(0);
 
     function close() { closeFn(); }
     live.close = close;

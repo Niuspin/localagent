@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import platform
 import re
@@ -265,6 +266,8 @@ class Agent:
         for t in TOOLS.values():
             if mode == "plan" and t.kind in ("write", "delete", "exec", "skill", "mcp"):
                 continue
+            if mode == "verify" and t.kind in ("write", "delete", "skill", "mcp"):
+                continue
             if not toolset.visible(t.name, groups):
                 continue
             if not has_ws and t.group not in ("web", "memory", "skills", "mcp") and t.name not in ("todo_write", "ask_user"):
@@ -280,7 +283,7 @@ class Agent:
     async def _execute(self, run: Run, sess: Session, text: str, images: list[str], files_: list[str], skills_: list[str]) -> None:
         cfg = self.cfg
         ui_user = {"id": uuid.uuid4().hex[:8], "role": "user", "ts": time.time(), "text": text, "images": [_thumb(u) for u in images],
-                   "files": files_, "skills": skills_, "hist_index": len(sess.history)}
+                   "files": files_, "skills": skills_, "hist_index": len(sess.history), "turn_id": run.id}
         ui_ast: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant", "ts": time.time(), "status": "running", "error": None, "usage": None,
                         "blocks": [], "hist_index": len(sess.history) + 1}
         sess.ui += [ui_user, ui_ast]
@@ -297,7 +300,8 @@ class Agent:
         st.tool_groups = set(sess.tool_groups) | toolset.detect(text, files_, skills_)
         if self.engine.tuned().preload_tools:          # 大模型：一次给全，省掉 load_tools 往返（MCP 组仍按需）
             st.tool_groups |= toolset.static_groups()
-        st.seen = self.seen_files.setdefault(sess.id, {})
+        st.seen = self.seen_files.setdefault(sess.id, dict(getattr(sess, "seen", {}) or {}))
+        sess.seen = st.seen
         status, err = "done", None
         run.emit("run_start", {"run_id": run.id, "session_id": sess.id})
         ws = sess.workspace or cfg.get("workspace", default="")
@@ -340,6 +344,7 @@ class Agent:
                         mode_val = cmd_res.data.get("mode")
                         if mode_val:
                             cfg.set("agent", "permission_mode", mode_val)
+                        self.notify("config", {"config": cfg.public()})
                         sess.history.append({"role": "user", "content": text})
                         sess.history.append({"role": "assistant", "content": cmd_res.text})
                     else:
@@ -430,6 +435,7 @@ class Agent:
                        memory=self.memory, skills=self.skills, outputs=self.outputs, emit=run.emit, ask=ask, cancel=run.cancel_evt,
                        sandbox_kind=sec.sandbox_info()["kind"])
         ctx.agent = self
+        ctx.run = run
         ctx.depth = getattr(st, "depth", 0)
         ctx.turn_id = getattr(st, "turn_id", run.id)
         return ctx
@@ -501,7 +507,7 @@ class Agent:
         for step in range(1, max_steps + 1):
             run.emit("step_start", {"step": step})
             run.stats.steps = step
-            mode = "plan" if getattr(st, "depth", 0) > 0 else cfg.get("agent", "permission_mode", default="ask")
+            mode = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else cfg.get("agent", "permission_mode", default="ask")
             ws = sess.workspace or cfg.get("workspace", default="")
             if self.outputs is not None and "outputs" not in st.tool_groups and any(m.get("_pruned") and m.get("_out") for m in sess.history):
                 self._ensure_outputs_group(sess, st)       # 历史里已有“可取回”的占位（上一轮或更早精简的）
@@ -805,9 +811,11 @@ class Agent:
             stats.bump("arg_errors")
             finish("error", cerr)
             return f"错误: {cerr}（参数规格: {json.dumps(tool.parameters, ensure_ascii=False)[:600]}）", []
+        call_ctx = copy.copy(ctx)
+        call_ctx.tool_call_id = tid
         if tool.precheck:                       # 例如“先读再改”：失败就直接告诉模型，不让用户去审批一个注定失败的操作
             try:
-                pre = tool.precheck(ctx, args)
+                pre = tool.precheck(call_ctx, args)
             except Exception:  # noqa: BLE001
                 pre = None
             if pre:
@@ -818,20 +826,20 @@ class Agent:
         # ---- 生命周期 PreToolUse 钩子检查
         ws_curr = sess.workspace or self.cfg.get("workspace", default="")
         if ws_curr:
-            pre_hook = await self._get_hook_mgr(ws_curr).run_pre_tool_use(name, args, ctx)
+            pre_hook = await self._get_hook_mgr(ws_curr).run_pre_tool_use(name, args, call_ctx)
             if pre_hook.action == "deny":
                 finish("denied", f"被 PreToolUse 钩子拒绝: {pre_hook.reason}")
                 self.audit.append(event="hook_deny", session=sess.id, tool=name, reason=pre_hook.reason)
                 return f"拒绝: PreToolUse 钩子拒绝了此操作（{pre_hook.reason}）。", []
 
         # ---- 路径与敏感性
-        mode = self.cfg.get("agent", "permission_mode", default="ask")
+        mode = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else self.cfg.get("agent", "permission_mode", default="ask")
         sensitive = None
         try:
             for pa in tool.path_args:
                 if args.get(pa):
-                    p = ctx.guard.resolve(args[pa], write=tool.kind in ("write", "delete"))
-                    sensitive = sensitive or sec.sensitive_reason(ctx.guard.rel(p))
+                    p = call_ctx.guard.resolve(args[pa], write=tool.kind in ("write", "delete"))
+                    sensitive = sensitive or sec.sensitive_reason(call_ctx.guard.rel(p))
         except sec.SecurityError as e:
             finish("error", f"安全限制: {e}")
             return f"安全限制: {e}", []
@@ -846,7 +854,7 @@ class Agent:
         if tool.kind == "net_fetch":
             u = urlsplit(args.get("url", "") if "://" in args.get("url", "") else "https://" + args.get("url", ""))
             domain_ok = (net.domain_of(u.geturl()) in st.user_domains) and len(u.query) <= 200 and not u.username
-        sandboxed = ctx.sandbox_kind != "none" and self.cfg.get("security", "command_sandbox", default="auto") == "auto"
+        sandboxed = call_ctx.sandbox_kind != "none" and self.cfg.get("security", "command_sandbox", default="auto") == "auto"
         if tool.kind == "mcp":      # MCP 服务器是否“被隔离”看它自己的沙箱与联网设置，而不是命令沙箱
             sandboxed = bool(self.mcp is not None and self.mcp.contained(str(tool.extra.get("server", ""))))
         tainted_eff = st.tainted and bool(self.cfg.get("security", "taint_tracking", default=True))
@@ -866,7 +874,7 @@ class Agent:
             finish("denied", dec.reason)
             return f"拒绝: {dec.reason}", []
         if dec.action == "ask":
-            decision = await self._ask(run, ctx, blk, tool, args, dec, tainted_eff)
+            decision = await self._ask(run, call_ctx, blk, tool, args, dec, tainted_eff)
             if decision == "deny":
                 finish("denied", "用户拒绝了此操作")
                 self.audit.append(event="denied", session=sess.id, tool=name, args=sec.summarize_args(args))
@@ -876,7 +884,7 @@ class Agent:
         # ---- 执行
         t0 = time.time()
         try:
-            res: ToolResult = await asyncio.wait_for(tool.fn(ctx, args), 3600)
+            res: ToolResult = await asyncio.wait_for(tool.fn(call_ctx, args), 3600)
         except asyncio.CancelledError:
             raise
         except sec.SecurityError as e:
@@ -894,7 +902,7 @@ class Agent:
         dur = int((time.time() - t0) * 1000)
         if ws_curr:
             try:
-                await self._get_hook_mgr(ws_curr).run_post_tool_use(name, args, res.content, ctx)
+                await self._get_hook_mgr(ws_curr).run_post_tool_use(name, args, res.content, call_ctx)
             except Exception:  # noqa: BLE001
                 pass
         if res.taint and self.cfg.get("security", "taint_tracking", default=True) and not st.tainted:
@@ -958,7 +966,7 @@ class Agent:
 
     def _verify_nudge(self, run: Run, sess: Session, mode: str) -> str | None:
         """模型准备收尾时：若改过文件却没验证，或验证失败后没处理，返回一条要追加给模型的内部提醒；否则 None。最多提醒 2 次。"""
-        if mode == "plan" or run.nudges >= 2 or not (run.dirty or run.verify_failed):
+        if mode in ("plan", "verify") or run.nudges >= 2 or not (run.dirty or run.verify_failed):
             return None
         vc = self._verify_command(sess)
         if not vc:
@@ -1002,20 +1010,21 @@ class Agent:
             preview = {"kind": "text", "text": json.dumps(sec.summarize_args(args, 600), ensure_ascii=False, indent=1)}
         aid = uuid.uuid4().hex[:12]
         fut = asyncio.get_running_loop().create_future()
-        run.approvals[aid] = fut
+        target_run = getattr(ctx, "approval_run", None) or run
+        target_run.approvals[aid] = fut
         ap = {"approval_id": aid, "reason": dec.reason, "risk": dec.risk, "preview": preview, "tainted": tainted}
         blk["status"], blk["approval"] = "pending_approval", ap
-        run.emit("approval_request", {**ap, "tool_id": blk["id"], "name": tool.name, "title": blk["title"], "args": args})
+        target_run.emit("approval_request", {**ap, "tool_id": blk["id"], "name": tool.name, "title": blk["title"], "args": args})
         try:
             decision = await asyncio.wait_for(fut, 3600)
         except asyncio.TimeoutError:
             decision = "deny"
         finally:
-            run.approvals.pop(aid, None)
+            target_run.approvals.pop(aid, None)
         if decision not in ("allow", "allow_session", "deny"):
             decision = "deny"
         blk["status"], blk["approval"] = "running", None
-        run.emit("approval_resolved", {"approval_id": aid, "tool_id": blk["id"], "decision": decision})
+        target_run.emit("approval_resolved", {"approval_id": aid, "tool_id": blk["id"], "decision": decision})
         return decision
 
     # ------------------------------------------------------------ 上下文自适应
@@ -1114,6 +1123,7 @@ class Agent:
                               todos=[], user_domains=set(parent_ctx.session.user_domains),
                               allow_keys=set())
         sub_st.depth = sub_depth
+        sub_st.sub_mode = "verify" if mode == "verify" else "plan"
         sub_st.turn_id = parent_ctx.turn_id
         sub_st.tool_groups = set(parent_ctx.session.tool_groups)
         sub_run = Run(sub_sid)
@@ -1121,6 +1131,9 @@ class Agent:
         sub_ctx.agent = self
         sub_ctx.depth = sub_depth
         sub_ctx.turn_id = parent_ctx.turn_id
+        sub_ctx.approval_run = getattr(parent_ctx, "run", None)
+        if parent_ctx.ask:
+            sub_ctx.ask = parent_ctx.ask
 
         if parent_ctx.emit:
             orig_emit = sub_run.emit
@@ -1132,10 +1145,15 @@ class Agent:
                     parent_ctx.emit("notice", {"level": "info", "text": f"[子代理] 调用工具: {data.get('title') or data.get('name')}"})
             sub_run.emit = forwarded_emit  # type: ignore
 
+        role_desc = (
+            "你是主代理派生的验证子代理，可使用只读工具与测试/检查命令进行验证（禁止修改或删除文件）。"
+            if sub_st.sub_mode == "verify"
+            else "你是主代理派生的独立只读子代理。请专注调研并输出结构化的简明结论，指出核心发现、关键代码行号或具体建议。"
+        )
         sub_text = (
             f"【子代理任务 · 模式={mode}】\n"
             f"目标: {prompt}\n\n"
-            "你是主代理派生的独立只读子代理。请专注调研并输出结构化的简明结论，指出核心发现、关键代码行号或具体建议。"
+            f"{role_desc}"
         )
         await self._append_user(sub_run, sub_sess, sub_ctx, sub_text, [], [], [])
         sub_ui: dict = {"id": uuid.uuid4().hex[:8], "role": "assistant", "ts": time.time(), "status": "running", "error": None,
@@ -1162,12 +1180,24 @@ class Agent:
         hi = sess.ui[from_index].get("hist_index")
         if hi is None:
             raise ValueError("该位置之前的内容已被压缩/裁剪，无法回退到此处")
+        removed_tids: list[str] = []
+        seen_tids: set[str] = set()
+        for item in reversed(sess.ui[from_index:]):
+            tid = item.get("turn_id")
+            if tid and tid not in seen_tids:
+                seen_tids.add(tid)
+                removed_tids.append(tid)
+        has_legacy_no_tid = not removed_tids and not any(u.get("turn_id") for u in sess.ui[:from_index])
         del sess.history[hi:]
         del sess.ui[from_index:]
         self._repair_history(sess)
         if self.journal:
             try:
-                rewind_to_turn(self.journal, sess.id)
+                if removed_tids:
+                    for tid in removed_tids:
+                        rewind_to_turn(self.journal, sess.id, turn_id=tid)
+                elif has_legacy_no_tid:
+                    rewind_to_turn(self.journal, sess.id)
             except Exception:  # noqa: BLE001
                 pass
         self.store.save(sess)

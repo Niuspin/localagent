@@ -467,6 +467,8 @@ class Policy:
         risk = {"write": "medium", "delete": "high", "exec": "high", "skill": "high", "mcp": "high", "net_fetch": "medium"}.get(kind, "low")
         if mode == "plan" and kind in ("write", "delete", "exec", "skill", "mcp"):
             return Decision("deny", "当前为「规划（只读）」模式：不能修改文件、执行命令或调用外部工具。请切换权限模式后重试。", risk, key)
+        if mode == "verify" and kind in ("write", "delete", "skill", "mcp"):
+            return Decision("deny", "验证子代理禁止写入、删除、改技能或调用外部工具，仅可执行只读检查与验证命令。", risk, key)
         if kind in ("read", "meta", "memory_read"):
             if sensitive:
                 return Decision("ask", f"读取敏感文件: {sensitive}", "medium", key)

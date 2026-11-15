@@ -1768,3 +1768,122 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
     transition-duration: .001s !important;
   }
 }
+
+/* ---------- 新增：Steer 队列、文件跳转引用、代码行号预览、Git Diff、命令面板 ---------- */
+.queue-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px 2px;
+}
+.queue-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  background: var(--bg-soft, rgba(127, 127, 127, 0.1));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.queue-pill .q-tag { color: var(--accent); font-weight: 600; }
+.queue-pill button { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
+.queue-pill button:hover { color: var(--danger); }
+
+.md code.file-ref {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+.md code.file-ref:hover { color: var(--accent); }
+
+.t-live { max-height: 220px; overflow: auto; }
+
+.sse-retry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--danger);
+  background: rgba(220, 60, 60, 0.08);
+  font-size: 13px;
+}
+
+.pv-wrap {
+  display: flex;
+  align-items: stretch;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg, rgba(127, 127, 127, 0.06));
+}
+.pv-nums {
+  user-select: none;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 8px;
+  text-align: right;
+  font-family: var(--mono, monospace);
+  font-size: .82em;
+  line-height: 1.55;
+  color: var(--muted);
+  border-right: 1px solid var(--border);
+  min-width: 36px;
+}
+.pv-nums span.on { color: var(--accent); font-weight: 700; }
+.pv-wrap pre {
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px !important;
+  line-height: 1.55;
+  font-size: .82em;
+}
+.pv-wrap pre code.pv-code { font-family: inherit; background: none; padding: 0; }
+
+.git-diff {
+  margin: 4px 8px 8px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-x: auto;
+  background: var(--code-bg, rgba(127, 127, 127, 0.05));
+}
+.git-diff .gd-add { color: #1f883d; background: rgba(46, 160, 67, 0.1); }
+.git-diff .gd-del { color: #cf222e; background: rgba(248, 81, 73, 0.1); }
+.git-diff .gd-hunk { color: var(--accent); font-weight: 600; }
+.git-diff .gd-h { color: var(--muted); }
+
+.pal-body { display: flex; flex-direction: column; gap: 10px; }
+.pal-list { display: flex; flex-direction: column; max-height: 360px; overflow-y: auto; gap: 3px; }
+.pal-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.pal-item:hover, .pal-item.sel { background: var(--bg-soft, rgba(127, 127, 127, 0.12)); }
+.pal-item b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal-item small { margin-left: auto; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+.pal-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  flex-shrink: 0;
+}

@@ -15,24 +15,21 @@
 
 ## 全局状态与模型 / 引擎
 
-### `GET /api/state`
-返回应用实时快照：
+### `GET /api/state?session_id=...`
+返回应用实时快照（可选传 `session_id` 解析工作区与 `tainted` 状态）：
 - `version` (str)
 - `workspace` (str | null)
-- `recent` (list[str])
-- `hardware`: `HwInfo`（`cpu_cores`、`cpu_threads`、`ram_gb`、`ram_free_gb`、`gpus`、`gpu_backend` 等）
+- `permission_mode` (str)
+- `tainted` (bool)
+- `hw`: `HwInfo`（`cpu_cores`、`cpu_threads`、`ram_gb`、`ram_free_gb`、`gpus`、`gpu_backend` 等）
+- `sandbox` (dict)
 - `engine`:
   - `status`: `"stopped" | "starting" | "ready" | "stopping" | "error"`
-  - `model` (str | null), `mmproj` (str | null), `ctx` (int), `ctx_max` (int), `vision` (bool)
-  - `binary` (str | null), `binary_version` (str | null), `error` (str | null)
-  - `load_log_tail` (list[str])
-  - `tps` (float)
-  - `perf`: `{"prompt_tps": float, "eval_tps": float, "tps": float, "spec_accept_rate": float | null, "cache_hit_rate": float, "total_prompt_tokens": int, "total_eval_tokens": int, "requests": int}`
-  - `plan` (dict | null): 当前已应用的推理规划（含 `summary`、`command`、`spec`、`kv_budget`、`moe_cache_mib`、`threads_batch`、`cache_reuse`、`mlock`、`notes`）
-  - `profile` (dict | null): 当前模型自动调优档案概要
-- `config` (dict): 完整配置字典（`workspace`、`engine`、`agent`、`permissions`、`search`、`web`、`mcp`、`ui`）
-- `mcp` (list): MCP 服务器连接与工具数列表
-- `has_model` (bool), `has_binary` (bool)
+  - `model` (dict | null), `mmproj` (str | null), `ctx` (int), `ctx_cap` (int), `vision` (bool)
+  - `binary` (str | null), `error` (str | null)
+  - `tps` (float), `perf` (`TelemetryTracker` summary: `prompt_tps`, `eval_tps`, `ttft_ms`, `spec_accept_rate`, `spec_recommended`, `cache_hit_rate`, ...)
+- `models`: `ModelInfo[]`
+- `mmprojs`: `list[str]`
 
 ### `GET /api/models`
 扫描 `models/` 下的 `.gguf` 文件并返回：
@@ -70,11 +67,12 @@
 返回已配置的生命周期钩子（`PreToolUse` / `PostToolUse` / `Stop` / `UserPromptSubmit`）：  
 `{"hooks": [...]}`
 
-### `POST /api/workspace` / `GET /api/browse` / `GET /api/files` / `GET /api/file`
-- `POST /api/workspace`: 绑定工作区路径（校验 `PathGuard` 与目录存在性）
-- `GET /api/browse`: 本地目录浏览（用于工作区选择器）
-- `GET /api/files`: 递归列出当前工作区安全文件（用于抽屉与 `@` 补全）
-- `GET /api/file`: 读取工作区内受限文本文件预览
+### `PUT /api/workspace` / `GET /api/workspace/browse` / `GET /api/workspace/tree` / `GET /api/workspace/file` / `GET /api/workspace/git`
+- `PUT /api/workspace`: 绑定工作区路径（校验 `PathGuard` 与目录存在性）
+- `GET /api/workspace/browse`: 本地目录浏览（用于工作区选择器）
+- `GET /api/workspace/tree?recursive=1`: 列出工作区安全目录项；加 `recursive=1` 时递归返回全部工作区文件相对路径（用于 `@` 全局检索与 `Ctrl/Cmd+K` 命令面板）
+- `GET /api/workspace/file`: 读取工作区内受限文本文件预览
+- `GET /api/workspace/git?path=...`: 读取工作区 Git 分支、变更文件清单与单文件 Diff（非仓库时返回 `{"is_repo": false}`）
 
 ---
 
@@ -103,7 +101,7 @@
 单次运行实时事件流，常见事件类型：
 - `thinking_delta` / `thinking_end`
 - `text_delta`
-- `tool_start` / `tool_end`
+- `tool_start` / `tool_output_delta` / `tool_result`
 - `approval_request`（需前端回传 `POST /api/approvals/{aid}`）
 - `usage`: `{"prompt_tokens": int, "completion_tokens": int, "ctx": int, "used": int, "pct": float, "tps": float}`
 - `run_end`: `{"status": "done" | "cancelled" | "error", "stats": dict, ...}`

@@ -231,20 +231,29 @@ def dispatch_command(text: str, ctx: CommandContext) -> CommandResult | None:
             lines.append(f"- **已加载扩展工具组**: `{', '.join(sorted(ctx.session.tool_groups)) or '仅核心'}`")
         if ctx.agent and hasattr(ctx.agent, "engine"):
             eng = ctx.agent.engine
-            lines.append(f"- **引擎状态**: `{eng.status}` (模型: `{eng.model or '未加载'}`)")
+            m = eng.model
+            mname = (m.get("name") or m.get("file")) if isinstance(m, dict) else (m or "未加载")
+            lines.append(f"- **引擎状态**: `{eng.status}` (模型: `{mname}`)")
         return CommandResult(handled=True, is_prompt=False, text="\n".join(lines))
 
     if cmd == "model":
         if ctx.agent and hasattr(ctx.agent, "engine"):
             eng = ctx.agent.engine
-            prof = eng.profile()
+            m = eng.model
+            mname = (m.get("name") or m.get("file")) if isinstance(m, dict) else (m or "未加载")
+            prof_attr = getattr(eng, "profile", None)
+            prof = prof_attr() if callable(prof_attr) else prof_attr
+            prof_str = (
+                f"档位 `{prof.tier}`（{prof.label}），参数约 `{prof.params_b:.1f}B`"
+                if prof is not None else "未加载"
+            )
             lines = [
                 "### 🧠 模型与引擎状态",
-                f"- **当前模型**: `{eng.model or '未加载'}`",
+                f"- **当前模型**: `{mname}`",
                 f"- **引擎状态**: `{eng.status}`",
                 f"- **上下文容量**: `{eng.ctx}` (最大上限: `{eng.ctx_cap}`)",
                 f"- **视觉多模态 (Vision)**: `{'已启用' if eng.vision else '未启用'}`",
-                f"- **硬件画像**: 显卡/内存等级 `{prof.tier}`（{prof.label}），参数约 `{prof.params_b}B`",
+                f"- **硬件画像**: {prof_str}",
                 f"- **平均生成速度 (TPS)**: `{eng.tps:.1f}`" if eng.tps else "- **平均速度**: 暂无数据",
             ]
             return CommandResult(handled=True, is_prompt=False, text="\n".join(lines))

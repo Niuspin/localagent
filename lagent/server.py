@@ -9,6 +9,8 @@ import json
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import uuid
@@ -37,7 +39,7 @@ from .permissions import PermissionManager
 from .sessions import SessionStore
 from .skills import Skills
 from .tools import search as search_mod
-from .tools.files import rewind_to_turn
+from .tools.files import SKIP_DIRS, rewind_to_turn
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; "
        "font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -127,7 +129,9 @@ class Guard:
             if "=" in part:
                 k, v = part.strip().split("=", 1)
                 cookies[k] = v
-        authed = sec.token_ok(cookies.get(COOKIE), st.token)
+        auth_hdr = hdr.get("authorization", "")
+        bearer = auth_hdr[7:].strip() if auth_hdr[:7].lower() == "bearer " else ""
+        authed = sec.token_ok(cookies.get(COOKIE), st.token) or sec.token_ok(bearer, st.token)
         if path == "/" and method == "GET":
             t = parse_qs(scope.get("query_string", b"").decode()).get("t", [""])[0]
             if t and sec.token_ok(t, st.token):
@@ -194,9 +198,12 @@ def make_app(st: State) -> Starlette:
         if st.engine.binary is None and st.engine.status == "stopped":
             await asyncio.to_thread(st.engine.probe)
         models, mms = await asyncio.to_thread(models_view)
-        return J({"version": __version__, "workspace": st.cfg.get("workspace", default=""), "engine": st.engine.state(), "models": models,
+        sid = req.query_params.get("session_id")
+        sess = st.store.get(sid) if sid else None
+        return J({"version": __version__, "workspace": st.workspace_of(sid), "engine": st.engine.state(), "models": models,
                   "mmprojs": mms, "hw": await asyncio.to_thread(hw.detect), "sandbox": sec.sandbox_info(),
-                  "permission_mode": st.cfg.get("agent", "permission_mode"), "tainted": False})
+                  "permission_mode": st.cfg.get("agent", "permission_mode"),
+                  "tainted": bool(sess.tainted) if sess else False})
 
     @route("/api/config", ["GET", "PATCH"])
     async def config(req: Request) -> Response:
@@ -206,6 +213,7 @@ def make_app(st: State) -> Starlette:
                 raise ValueError("工作区请通过 PUT /api/workspace 设置")
             out = st.cfg.patch(d)
             st.audit.append(event="config", keys=sorted(d.keys()))
+            st.broadcast("config", {"config": out})
             return J({"config": out})
         return J({"config": st.cfg.public()})
 
@@ -509,6 +517,27 @@ def make_app(st: State) -> Starlette:
         p = g.resolve(req.query_params.get("path") or ".")
         if not p.is_dir():
             raise ValueError("不是目录")
+        rec = req.query_params.get("recursive") in ("1", "true", "yes")
+        if rec:
+            def _scan_rec() -> list[dict]:
+                items: list[dict] = []
+                for root_s, dirs, fns in os.walk(p, followlinks=False):
+                    dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not os.path.islink(os.path.join(root_s, d)))
+                    rp = Path(root_s)
+                    for fn in sorted(fns):
+                        fp = rp / fn
+                        if fp.is_symlink():
+                            continue
+                        try:
+                            rel = g.rel(fp)
+                        except sec.SecurityError:
+                            continue
+                        items.append({"name": fn, "path": rel, "type": "file"})
+                        if len(items) >= 2500:
+                            return items
+                return items
+            ents = await asyncio.to_thread(_scan_rec)
+            return J({"path": g.rel(p), "recursive": True, "entries": ents})
         ents = []
         for e in os.scandir(p):
             try:
@@ -519,6 +548,50 @@ def make_app(st: State) -> Starlette:
                 continue
         ents.sort(key=lambda x: (x["type"] != "dir", x["name"].lower()))
         return J({"path": g.rel(p), "entries": ents[:2000]})
+
+    @route("/api/workspace/git", ["GET"])
+    async def wgit(req: Request) -> Response:
+        g = st.guard(req.query_params.get("session_id"))
+        diff_rel = ""
+        if req.query_params.get("path"):
+            dp = g.resolve(req.query_params["path"])
+            diff_rel = g.rel(dp)
+
+        def _git_info() -> dict:
+            if not shutil.which("git"):
+                return {"is_repo": False, "reason": "git not installed"}
+            kw = {"cwd": str(g.ws), "capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace", "timeout": 4}
+            try:
+                chk = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], **kw)
+            except (OSError, subprocess.SubprocessError):
+                return {"is_repo": False}
+            if chk.returncode != 0 or chk.stdout.strip() != "true":
+                return {"is_repo": False}
+            st_r = subprocess.run(["git", "-c", "core.quotepath=false", "status", "--porcelain=v1", "-b"], **kw)
+            branch = ""
+            files = []
+            for ln in st_r.stdout.splitlines():
+                if ln.startswith("## "):
+                    branch = ln[3:].strip()
+                    continue
+                if len(ln) >= 4:
+                    xy = ln[:2]
+                    fp = ln[3:].strip()
+                    if " -> " in fp:
+                        fp = fp.split(" -> ", 1)[1]
+                    files.append({"status": xy.strip() or xy, "code": xy, "path": fp})
+            diff_text = ""
+            if diff_rel:
+                dr = subprocess.run(["git", "-c", "core.quotepath=false", "diff", "--no-color", "--", diff_rel], **kw)
+                diff_text = dr.stdout or ""
+                if not diff_text:
+                    dr2 = subprocess.run(["git", "-c", "core.quotepath=false", "diff", "--cached", "--no-color", "--", diff_rel], **kw)
+                    diff_text = dr2.stdout or ""
+                if len(diff_text) > 32000:
+                    diff_text = diff_text[:32000] + "\n…(diff 已截断)"
+            return {"is_repo": True, "branch": branch, "files": files[:300], "diff": diff_text}
+
+        return J(await asyncio.to_thread(_git_info))
 
     @route("/api/workspace/file", ["GET"])
     async def wfile(req: Request) -> Response:

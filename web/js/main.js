@@ -89,15 +89,100 @@
   function connectEvents() {
     LA.sse('/api/events', {
       engine: function (e) { if (LA.S.state) { LA.S.state.engine = e; LA.bus.emit('state', LA.S.state); } },
+      config: function (d) { if (d && d.config) { LA.S.config = d.config; LA.bus.emit('config', d.config); } },
       notice: function (n) { LA.toast(n.text, n.level === 'warn' ? 'err' : null, 4500); }
     }, { onerror: function (final) { if (final) setTimeout(connectEvents, 5000); } });
+  }
+
+  /* ------------------------------------------------------------ 全局命令面板 (Ctrl/Cmd+K) */
+  function openPalette() {
+    var inp = LA.el('input', { class: 'inp wide', placeholder: '搜索文件、会话、斜杠命令或快捷操作…', spellcheck: false });
+    var listEl = LA.el('div', { class: 'pal-list' });
+    var sel = 0, visible = [], filesLoaded = false, wsFiles = [];
+    var m = LA.modal({ title: '命令面板 (Ctrl+K)', width: 560, body: LA.el('div', { class: 'pal-body' }, inp, listEl), focus: false });
+
+    function baseItems() {
+      var items = [
+        { kind: 'act', tag: '操作', title: '新建对话', sub: 'Ctrl+Shift+O', run: function () { LA.newSession(); } },
+        { kind: 'act', tag: '面板', title: '打开文件抽屉', sub: '查看工作区文件', run: function () { LA.panels.toggleDrawer(true); } },
+        { kind: 'act', tag: 'Git', title: '查看 Git 变更与撤销日志', sub: '切换至变更抽屉', run: function () { LA.panels.openChanges(); } },
+        { kind: 'act', tag: '设置', title: '打开设置', sub: '模型、引擎、生成与安全配置', run: function () { LA.openSettings(); } },
+        { kind: 'act', tag: '记忆', title: '打开长期记忆库', sub: '检索与管理记忆条目', run: function () { LA.panels.openMemory(); } },
+        { kind: 'act', tag: '技能', title: '打开技能管理', sub: '启用或创建本地技能', run: function () { LA.panels.openSkills(); } }
+      ];
+      ['ask', 'auto_edit', 'plan', 'auto'].forEach(function (md) {
+        var names = { ask: '逐项确认', auto_edit: '自动编辑', plan: '只读规划', auto: '全自动' };
+        items.push({ kind: 'mode', tag: '模式', title: '权限模式: ' + names[md], sub: '/mode ' + md, run: function () { LA.cfgSet('agent.permission_mode', md, { immediate: true }); } });
+      });
+      (LA.S.sessions || []).slice(0, 12).forEach(function (s) {
+        items.push({ kind: 'sess', tag: '会话', title: s.title || '未命名会话', sub: s.workspace || '', run: function () { LA.openSession(s.id); } });
+      });
+      wsFiles.forEach(function (f) {
+        items.push({ kind: 'file', tag: '文件', title: f.path || f.name, sub: '预览代码', run: function () { LA.panels.openFile(f.path || f.name); } });
+      });
+      return items;
+    }
+
+    function render() {
+      var q = inp.value.trim().toLowerCase();
+      var all = baseItems();
+      visible = all.filter(function (it) {
+        if (!q) return it.kind !== 'file';
+        return it.title.toLowerCase().indexOf(q) >= 0 || (it.sub || '').toLowerCase().indexOf(q) >= 0 || it.tag.toLowerCase().indexOf(q) >= 0;
+      }).slice(0, 14);
+      if (sel >= visible.length) sel = Math.max(0, visible.length - 1);
+      LA.clear(listEl);
+      if (!visible.length) {
+        listEl.appendChild(LA.el('div', { class: 'dr-empty', text: '没有匹配项' }));
+        return;
+      }
+      visible.forEach(function (it, idx) {
+        listEl.appendChild(LA.el('button', {
+          class: 'pal-item' + (idx === sel ? ' sel' : ''),
+          type: 'button',
+          on: { click: function () { m.close(); it.run(); } }
+        },
+          LA.el('span', { class: 'pal-tag', text: it.tag }),
+          LA.el('b', { text: it.title }),
+          LA.el('small', { text: it.sub || '' })
+        ));
+      });
+    }
+
+    inp.addEventListener('input', function () {
+      sel = 0;
+      render();
+      if (!filesLoaded && ((LA.S.cur && LA.S.cur.workspace) || (LA.S.state && LA.S.state.workspace))) {
+        filesLoaded = true;
+        var sid = LA.S.cur ? LA.S.cur.id : '';
+        LA.get('/api/workspace/tree?recursive=1&path=&session_id=' + encodeURIComponent(sid)).then(function (r) {
+          wsFiles = (r && r.entries) || [];
+          render();
+        }).catch(function () {});
+      }
+    });
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (visible.length) sel = (sel + (e.key === 'ArrowDown' ? 1 : visible.length - 1)) % visible.length;
+        render();
+      } else if (e.key === 'Enter' && !e.isComposing && visible[sel]) {
+        e.preventDefault();
+        var item = visible[sel];
+        m.close();
+        item.run();
+      }
+    });
+    render();
+    setTimeout(function () { inp.focus(); }, 20);
   }
 
   /* ------------------------------------------------------------ 快捷键 */
   function wireKeys() {
     document.addEventListener('keydown', function (e) {
       var mod = e.ctrlKey || e.metaKey;
-      if (mod && e.shiftKey && (e.key === 'O' || e.key === 'o')) { e.preventDefault(); LA.newSession(); }
+      if (mod && !e.shiftKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); if (!LA.hasModal()) openPalette(); }
+      else if (mod && e.shiftKey && (e.key === 'O' || e.key === 'o')) { e.preventDefault(); LA.newSession(); }
       else if (mod && !e.shiftKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); toggleSide(); }
       else if (e.key === 'Escape' && !e.defaultPrevented) { if (LA.closeTopModal()) e.preventDefault(); else appEl.classList.remove('menu-open'); }
     });

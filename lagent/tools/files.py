@@ -7,6 +7,7 @@ import codecs
 import difflib
 import fnmatch
 import io
+import json
 import os
 import re
 import shutil
@@ -278,7 +279,8 @@ async def write_file(ctx: ToolCtx, a: dict) -> ToolResult:
     meta = commit_bytes(ctx, p, data, "write", f"{'覆盖' if old is not None else '创建'} {ctx.guard.rel(p)}")
     mark_seen(ctx, p, data)
     n = content.count("\n") + (0 if content.endswith("\n") or not content else 1)
-    return ToolResult(f"已{'覆盖' if old is not None else '创建'} {meta['path']}（{n} 行，{len(content)} 字符）", meta=meta)
+    diag = _post_edit_check(p, data)
+    return ToolResult(f"已{'覆盖' if old is not None else '创建'} {meta['path']}（{n} 行，{len(content)} 字符）{diag}", meta=meta)
 
 
 async def write_preview(ctx: ToolCtx, a: dict) -> dict | None:
@@ -388,7 +390,8 @@ async def edit_file(ctx: ToolCtx, a: dict) -> ToolResult:
     data = encode_text(new_text, enc, nl)
     meta = commit_bytes(ctx, p, data, "edit", f"编辑 {ctx.guard.rel(p)}")
     mark_seen(ctx, p, data)
-    return ToolResult(f"已编辑 {meta['path']}\n" + make_diff(text, new_text, meta["path"], 3000), meta=meta)
+    diag = _post_edit_check(p, data)
+    return ToolResult(f"已编辑 {meta['path']}{diag}\n" + make_diff(text, new_text, meta["path"], 3000), meta=meta)
 
 
 async def edit_preview(ctx: ToolCtx, a: dict) -> dict | None:
@@ -493,6 +496,74 @@ register(Tool("glob", "按通配符查找文件，如 '**/*.py'、'*.docx'、'sr
               glob_files, "read", title=lambda a: f"查找 {a.get('pattern', '')}", path_args=("path",)))
 
 
+def _post_edit_check(p: Path, data: bytes) -> str:
+    """写/改完成后做零开销本地语法预检（Python/JSON），尽早把拼写/缩进错误反馈给模型。"""
+    ext = p.suffix.lower()
+    if ext not in (".py", ".json"):
+        return ""
+    text = decode_bytes(data)[0]
+    if ext == ".py":
+        try:
+            compile(text, p.name, "exec")
+        except SyntaxError as e:
+            return f"\n[语法诊断] Python 语法错误 (第 {e.lineno or '?'} 行): {e.msg}"
+    elif ext == ".json":
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as e:
+            return f"\n[语法诊断] JSON 格式错误 (第 {e.lineno} 行第 {e.colno} 列): {e.msg}"
+    return ""
+
+
+def _grep_rg(ctx: ToolCtx, root: Path, pattern: str, gl: str | None, ignore_case: bool) -> ToolResult | None:
+    """若本机安装了 ripgrep (rg)，优先走原生高速搜索；不可用或失败时返回 None 回退到纯 Python 遍历。"""
+    rg = shutil.which("rg")
+    if not rg:
+        return None
+    argv = [rg, "--no-heading", "--line-number", "--color", "never", "--max-filesize", "2M"]
+    if ignore_case:
+        argv.append("-i")
+    if gl:
+        argv += ["-g", gl]
+    if root.is_dir():
+        for sd in SKIP_DIRS:
+            argv += ["--glob", f"!{sd}/**"]
+        for ext in OFFICE_EXT | IMG_EXT:
+            argv += ["--glob", f"!*{ext}"]
+    argv += ["--", pattern, str(root)]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=12)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode == 1:
+        return ToolResult("没有匹配")
+    if r.returncode != 0:
+        return None
+    out: list[str] = []
+    single_file = root.is_file()
+    for line in r.stdout.splitlines():
+        if single_file:
+            lno, _, body = line.partition(":")
+            try:
+                rel = ctx.guard.rel(root)
+            except sec.SecurityError:
+                break
+        else:
+            fp_s, _, rest = line.partition(":")
+            lno, _, body = rest.partition(":")
+            if not lno.isdigit():
+                continue
+            try:
+                rp = ctx.guard.resolve(fp_s, write=False)
+                rel = ctx.guard.rel(rp)
+            except sec.SecurityError:
+                continue
+        out.append(f"{rel}:{lno}: {body.strip()[:200]}")
+        if len(out) >= 200:
+            return ToolResult("\n".join(out) + "\n…[已达 200 条上限]")
+    return ToolResult("\n".join(out) if out else "没有匹配")
+
+
 def _grep_sync(ctx: ToolCtx, a: dict) -> ToolResult:
     root = ctx.guard.resolve(a.get("path") or ".")
     flags = re.I if a.get("ignore_case") else 0
@@ -501,6 +572,9 @@ def _grep_sync(ctx: ToolCtx, a: dict) -> ToolResult:
     except re.error as e:
         return err(f"正则表达式错误: {e}")
     gl = a.get("glob")
+    fast = _grep_rg(ctx, root, a["pattern"], gl, bool(a.get("ignore_case")))
+    if fast is not None:
+        return fast
     files = [root] if root.is_file() else [d / f for d, _x, fns in _walk(root, 12) for f in fns]
     out, nfiles = [], 0
     t0 = time.time()
@@ -730,15 +804,38 @@ async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
         return err(f"无法启动命令: {e}")
     buf = bytearray()
     cap = 400_000
+    pending_delta = bytearray()
+    last_emit = 0.0
+    streamed = 0
+
+    def flush_delta(force: bool = False) -> None:
+        nonlocal last_emit, streamed
+        if not pending_delta or not ctx.emit or not ctx.tool_call_id or streamed >= 16000:
+            pending_delta.clear()
+            return
+        now = time.time()
+        if not force and now - last_emit < 0.15 and len(pending_delta) < 1024:
+            return
+        chunk_txt = pending_delta.decode("utf-8", "replace")
+        pending_delta.clear()
+        last_emit = now
+        take = chunk_txt[: 16000 - streamed]
+        if take:
+            streamed += len(take)
+            ctx.emit("tool_output_delta", {"id": ctx.tool_call_id, "chunk": take})
 
     async def pump() -> None:
         assert proc.stdout
         while True:
             chunk = await proc.stdout.read(8192)
             if not chunk:
+                flush_delta(force=True)
                 return
             if len(buf) < cap:
                 buf.extend(chunk[: cap - len(buf)])
+            if ctx.emit and ctx.tool_call_id and streamed < 16000:
+                pending_delta.extend(chunk)
+                flush_delta(force=False)
 
     def kill() -> None:
         kill_tree(proc)

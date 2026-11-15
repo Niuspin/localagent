@@ -728,6 +728,19 @@ class Engine:
     def benchmark_summary(self) -> dict:
         return self.telemetry.benchmark_summary()
 
+    async def tokenize(self, text: str) -> int | None:
+        """调用 llama-server /tokenize 精确统计文本 token 数；不可用或失败时返回 None。"""
+        if self.status != "ready" or not self.port or not text:
+            return None
+        try:
+            st, data = await net.local_json("127.0.0.1", self.port, "POST", "/tokenize",
+                                            {"content": text}, headers=self._auth(), timeout=5)
+            if st == 200 and isinstance(data, dict) and isinstance(data.get("tokens"), list):
+                return len(data["tokens"])
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
 
 def _physical_cores() -> int:
     return hw.physical_cores()

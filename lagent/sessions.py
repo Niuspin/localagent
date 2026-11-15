@@ -33,6 +33,7 @@ class Session:
         self.user_domains: list[str] = []
         self.calib = 1.0
         self.tool_groups: list[str] = []      # 已加载的扩展工具组
+        self.seen: dict[str, str] = {}        # 已读/写文本文件 sha256（跨重启保留）
         self.active_run: str | None = None   # 仅内存
 
     # ------------------------------------------------------------ 序列化
@@ -40,13 +41,13 @@ class Session:
         return {"v": 1, "id": self.id, "title": self.title, "workspace": self.workspace, "created": self.created, "updated": self.updated,
                 "pinned": self.pinned, "tainted": self.tainted, "summary": self.summary, "todos": self.todos, "ui": self.ui,
                 "history": self.history, "usage": self.usage, "nonce": self.nonce, "user_domains": self.user_domains, "calib": self.calib,
-                "tool_groups": self.tool_groups}
+                "tool_groups": self.tool_groups, "seen": self.seen}
 
     @classmethod
     def from_disk(cls, d: dict) -> "Session":
         s = cls(d["id"], d.get("workspace", ""))
         for k in ("title", "created", "updated", "pinned", "tainted", "summary", "todos", "ui", "history", "usage", "nonce",
-                  "user_domains", "calib", "tool_groups"):
+                  "user_domains", "calib", "tool_groups", "seen"):
             if k in d:
                 setattr(s, k, d[k])
         # 上次异常退出时残留的 running 消息

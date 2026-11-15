@@ -251,6 +251,16 @@ class Config:
     def secret(self, name: str) -> str:
         return self.secrets.get(name, "")
 
+    def set(self, *keys_and_value: Any) -> dict:
+        """按嵌套键路径设置单个配置项并持久化，等价于 patch({k1: {k2: val}})。"""
+        if len(keys_and_value) < 2:
+            raise ValueError("set() 需要至少一个键名和目标值")
+        *keys, val = keys_and_value
+        partial: Any = val
+        for k in reversed(keys):
+            partial = {str(k): partial}
+        return self.patch(partial)
+
     def patch(self, partial: dict) -> dict:
         """深合并。校验失败时抛 ValueError 且不产生任何修改。"""
         if not isinstance(partial, dict):

@@ -91,16 +91,13 @@ def kv_bytes_per_token(meta: dict, bytes_per_elem: float = 2.0) -> int:
     return int(heads_sum * (head_dim + vdim) * bytes_per_elem)
 
 
-def tensor_layout(path: str | Path) -> dict | None:
-    """读取张量表，返回 {"expert_per_layer": {层号: 字节}, "dense": 非专家字节, "total": 字节}。
-    仅对单文件 GGUF 精确；分片/解析失败返回 None（规划器退回经验比例）。"""
-    path = Path(path)
-    if _SHARD_RE.match(path.name):
-        return None
+def _single_tensor_layout(path: Path) -> dict | None:
+    """解析单个 GGUF 文件的张量字节布局。"""
     try:
         fsize = path.stat().st_size
         with open(path, "rb", buffering=1 << 20) as f:
-            f.read(4)
+            if f.read(4) != b"GGUF":
+                return None
             struct.unpack("<I", f.read(4))
             n_t, n_kv = struct.unpack("<QQ", f.read(16))
             align = 32
@@ -157,6 +154,30 @@ def tensor_layout(path: str | Path) -> dict | None:
         return {"expert_per_layer": per_layer, "dense": dense, "total": data_len}
     except Exception:  # noqa: BLE001
         return None
+
+
+def tensor_layout(path: str | Path) -> dict | None:
+    """读取张量表（支持单文件与分片 GGUF），返回 {"expert_per_layer": {层号: 字节}, "dense": 非专家字节, "total": 字节}。"""
+    path = Path(path)
+    m = _SHARD_RE.match(path.name)
+    if not m:
+        return _single_tensor_layout(path)
+    total_shards = int(m.group(3))
+    shards = sorted(path.parent.glob(f"{m.group(1)}-*-of-{m.group(3)}.gguf"))
+    if total_shards <= 0 or len(shards) != total_shards:
+        return None
+    per_layer: dict[int, int] = {}
+    dense = 0
+    total = 0
+    for shard in shards:
+        sub = _single_tensor_layout(shard)
+        if sub is None:
+            return None
+        for k, v in sub["expert_per_layer"].items():
+            per_layer[k] = per_layer.get(k, 0) + v
+        dense += sub["dense"]
+        total += sub["total"]
+    return {"expert_per_layer": per_layer, "dense": dense, "total": total}
 
 
 def guess_quant(name: str, meta: dict) -> str:
