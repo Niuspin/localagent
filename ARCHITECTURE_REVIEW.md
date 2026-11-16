@@ -17,7 +17,20 @@
 
 ## 1. P0 级已发现缺陷与前后端断层
 
-在代码遍历过程中直接定位到以下可复现的功能断点与契约不一致问题，应作为第一批次修复目标：
+> **状态更新（2026-11-16，基线 `cb76b65`）**：下列 6 项在 v0.2.0 中均已修复，保留原描述仅作历史记录；逐项复核结果如下。
+>
+> | # | 缺陷 | 当前状态（证据） |
+> | :-- | :--- | :--- |
+> | 1 | `/model` `/plan` `/mode` 崩溃 | 已修复：`Config.set()` 已存在（`config.py`）；`commands.py` 以 `getattr(eng, "profile", None)` 访问属性 |
+> | 2 | `@` 无法补全子目录 | 已修复：`/api/workspace/tree?recursive=1` 返回递归条目（`server.py:724-744`） |
+> | 3 | 自定义 Slash 命令未接前端 | 已修复：`composer.js` 通过 `/api/commands` 拉取，`BUILTIN_SLASH` 仅作回退 |
+> | 4 | `verify` 子代理被降级 | 已修复：`loop.py` 的 `run_subagent` 为 `verify` 保留独立 `sub_mode`，并按模式只拦截写类工具 |
+> | 5 | 编辑重发/重新生成丢附件、`truncate` 只回滚一轮 | 已修复：`chat.js` 的 `editFrom`/`regenerate` 保留 `images/files/skills`；`truncate` 按 `turn_id` 回滚 |
+> | 6 | API 文档与鉴权/状态漂移 | 已修复：`server.py` 同时接受 Cookie 与 `Authorization: Bearer`；`/api/state` 的 `tainted` 取自会话；`docs/API.md` 已对齐 |
+>
+> 本文其余章节（§2 起）为演进建议，未必已实施。
+
+在代码遍历过程中直接定位到以下可复现的功能断点与契约不一致问题（历史记录，基线 `be0f14b`）：
 
 1. **Slash 命令 `/model`、`/plan`、`/mode` 运行时崩溃**
    - `lagent/commands.py` 第 240 行调用 `eng.profile()`，但 `lagent/engine.py` 第 120 行的 `self.profile` 是 `Profile | None` 属性而非方法；且第 234、243 行直接打印 `eng.model` 整包扫描字典。

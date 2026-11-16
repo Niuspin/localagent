@@ -69,7 +69,10 @@ try:
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append("pageerror: " + str(e)))
         page.on("console", lambda m: errors.append("console." + m.type + ": " + m.text) if m.type in ("error", "warning") else None)
-        page.on("requestfailed", lambda r: errors.append(f"requestfailed: {r.url} ({r.failure})") if not (r.failure == "net::ERR_ABORTED" and "/api/events" in r.url) else None)
+        # SSE 长连接在刷新/导航时被浏览器主动中止（net::ERR_ABORTED）属正常现象：全局事件流与各类 run/swarm/mission 事件流都放行
+        def _is_sse_abort(r):
+            return r.failure == "net::ERR_ABORTED" and (r.url.split("?")[0].endswith("/events"))
+        page.on("requestfailed", lambda r: errors.append(f"requestfailed: {r.url} ({r.failure})") if not _is_sse_abort(r) else None)
         external: list[str] = []
         page.on("request", lambda r: external.append(r.url) if not r.url.startswith((base, "data:", "blob:")) else None)
 
@@ -131,8 +134,10 @@ try:
         page.wait_for_selector("#drawer .preview pre")
         check("世界" in page.inner_text("#drawer .preview pre"), "文件预览")
         page.click("#drawer .dr-tab:has-text('变更')")
-        page.wait_for_selector("#drawer .jr-item")
-        check(page.locator("#drawer .jr-item").count() >= 1, "变更记录")
+        # 「变更」页四路数据异步到齐后才整体渲染；等到具体的 journal 条目（hello.txt）再断言，
+        # 而不是等任意 .jr-item（git/快照区块可能先出现）。
+        page.wait_for_selector("#drawer .dr-changes .jr-item:has-text('hello.txt')", timeout=10000)
+        check(page.locator("#drawer .dr-changes .jr-item:has-text('hello.txt')").count() >= 1, "变更记录")
         page.click("#drawer .dr-tab:has-text('产物')")
         page.wait_for_selector("#drawer .art-export-box")
         check(page.locator("#drawer .art-exp-btns button").count() == 3, "产物面板与会话导出按钮")

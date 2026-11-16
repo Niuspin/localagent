@@ -225,8 +225,8 @@ def test_ensure_dirs(tmp_path):
 
 
 # ------------------------------------------------------------------ 启动器
-@pytest.mark.skipif(sys.platform == "win32", reason="用 flock 语义验证；Windows 走 msvcrt")
 def test_single_instance_lock(tmp_path):
+    # 全平台运行：POSIX 走 fcntl.flock，Windows 走 msvcrt.locking
     a, b = SingleInstance(tmp_path / "d" / ".lock"), SingleInstance(tmp_path / "d" / ".lock")
     assert a.acquire() is True
     assert b.acquire() is False

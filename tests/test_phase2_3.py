@@ -45,7 +45,7 @@ def _ctx(ws: Path, *, cfg: config.Config | None = None, sess_state: SessionState
 
 
 # ------------------------------------------------------------------ WP1: Launcher / Config / Net Pool / Router / Inference / Engine / Context
-def test_launcher_offline_flag(monkeypatch):
+def test_launcher_offline_flag(monkeypatch, tmp_path):
     monkeypatch.delenv("LOCALAGENT_OFFLINE", raising=False)
     ap = launcher.build_parser() if hasattr(launcher, "build_parser") else None
     if ap is not None:
@@ -54,7 +54,7 @@ def test_launcher_offline_flag(monkeypatch):
     # 直接测试 hub 在离线环境变量下的保护
     monkeypatch.setenv("LOCALAGENT_OFFLINE", "1")
     with pytest.raises(PermissionError, match="离线模式"):
-        hub.DownloadManager(Path.cwd() / ".tmp_nonexist_check").start_download("https://huggingface.co/a/b.gguf", "b.gguf")
+        hub.DownloadManager(tmp_path / "dl").start_download("https://huggingface.co/a/b.gguf", "b.gguf")
 
 
 def test_config_secrets_and_new_fields(tmp_path: Path):

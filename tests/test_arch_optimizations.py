@@ -316,7 +316,7 @@ def test_model_router_fallback_and_remote(monkeypatch, tmp_path):
     from lagent.config import Config
     from lagent.router import ModelRouter
 
-    cfg = Config(tmp_path / "cfg.json")
+    cfg = Config(tmp_path / "cfg.json", tmp_path / "secrets.json")
 
     class FakeEng:
         def __init__(self):
@@ -390,7 +390,7 @@ def test_edit_file_atomic_multi_edit(tmp_path):
     f.write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
     guard = PathGuard(tmp_path)
     ctx = ToolCtx(
-        cfg=Config(tmp_path / "cfg.json"),
+        cfg=Config(tmp_path / "cfg.json", tmp_path / "secrets.json"),
         guard=guard,
         journal=Journal(tmp_path / "j"),
         session=SessionState("s1"),
@@ -457,7 +457,7 @@ def test_engine_slots_spec_disable_and_slot_persistence(monkeypatch, tmp_path):
     b = tmp_path / ("llama-server.exe" if __import__("os").name == "nt" else "llama-server")
     b.write_bytes(b"")
 
-    cfg = Config(tmp_path / "cfg.json")
+    cfg = Config(tmp_path / "cfg.json", tmp_path / "secrets.json")
     cfg.set("engine", "model", "main.gguf")
     cfg.set("engine", "slots", 2)
     cfg.set("engine", "reasoning_format", "deepseek")

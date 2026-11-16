@@ -55,7 +55,11 @@
     drawer = LA.$('#drawer');
     LA.$('#btnDrawer').innerHTML = icon('panel', 19);
     LA.$('#btnDrawer').addEventListener('click', function () { P.toggleDrawer(); });
-    var refresh = LA.debounce(function () { if (LA.S.drawerOpen && !previewing) renderDrawer(); }, 400);
+    var refresh = LA.debounce(function () {
+      if (!LA.S.drawerOpen || previewing) return;
+      if (dtab === 'changes' && drawBody) drawChanges();   // 原位刷新：新数据到齐后再整体替换，不先清空
+      else renderDrawer();
+    }, 400);
     LA.bus.on('fschanged', refresh); LA.bus.on('session', function () { previewing = null; previewLine = 0; expanded = {}; if (LA.S.drawerOpen) renderDrawer(); });
     LA.bus.on('workspace', function () { expanded = {}; previewLine = 0; if (LA.S.drawerOpen) renderDrawer(); });
     LA.bus.on('todos', function () { if (LA.S.drawerOpen && dtab === 'tasks') renderDrawer(); });
@@ -226,11 +230,17 @@
     return box;
   }
 
+  /* 「变更」页：先在离屏容器里把四路异步数据（git / 回合快照 / journal / 回收站）全部装好，
+   * 再一次性替换到抽屉里；用 changesGen 丢弃过期响应，避免刷新时列表先清空再逐段回填造成闪烁与竞态。 */
+  var changesGen = 0;
   function drawChanges() {
+    var target = drawBody, gen = ++changesGen, pending = [];
     var gHead = el('div', { class: 'dr-sec', style: { display: 'none' } }), gBox = el('div');
     var cpHead = el('div', { class: 'dr-sec', style: { display: 'none' } }), cpBox = el('div');
     var jBox = el('div'), tBox = el('div');
-    drawBody.append(
+    var stage = el('div', { class: 'dr-changes' });
+    if (!target.firstChild) target.appendChild(el('div', { class: 'dr-empty hint2', text: '加载中…' }));
+    stage.append(
       gHead,
       gBox,
       cpHead,
@@ -246,9 +256,9 @@
       ),
       tBox
     );
-    function drawChangesRefresh() { LA.clear(drawBody); drawChanges(); }
+    function drawChangesRefresh() { drawChanges(); }
     if (curWs()) {
-      LA.get('/api/workspace/git' + (sid() ? '?session_id=' + encodeURIComponent(sid()) : '')).then(function (g) {
+      pending.push(LA.get('/api/workspace/git' + (sid() ? '?session_id=' + encodeURIComponent(sid()) : '')).then(function (g) {
         if (!g || !g.is_repo) return;
         gHead.style.display = '';
         gHead.append(el('span', { text: 'Git 工作区' + (g.branch ? ' (' + g.branch.split('...')[0] + ')' : '') }),
@@ -278,10 +288,10 @@
           );
           gBox.append(row, diffPane);
         });
-      }).catch(function () {});
+      }).catch(function () {}));
     }
     if (sid()) {
-      LA.get('/api/sessions/' + encodeURIComponent(sid()) + '/checkpoints').then(function (cps) {
+      pending.push(LA.get('/api/sessions/' + encodeURIComponent(sid()) + '/checkpoints').then(function (cps) {
         if (!cps || !cps.length) return;
         cpHead.style.display = '';
         cpHead.append(el('span', { text: '按回合快照' }), el('span', { class: 'hint2', text: cps.length + ' 轮' }));
@@ -292,9 +302,9 @@
             el('span', { class: 'tm', text: LA.fmtTime(cp.ts) })
           ));
         });
-      }).catch(function () {});
+      }).catch(function () {}));
     }
-    LA.get('/api/journal' + (sid() ? '?session_id=' + encodeURIComponent(sid()) : '')).then(function (l) {
+    pending.push(LA.get('/api/journal' + (sid() ? '?session_id=' + encodeURIComponent(sid()) : '')).then(function (l) {
       if (!l.length) jBox.appendChild(el('div', { class: 'dr-empty', text: '还没有变更记录' }));
       var opNames = { write: '写入', edit: '编辑', delete: '删除', move: '移动', copy: '复制', mkdir: '新建夹', create: '创建' };
       l.slice().reverse().forEach(function (j) {
@@ -315,9 +325,9 @@
           }) : null
         ));
       });
-    }).catch(function (e) { jBox.textContent = e.message; });
+    }).catch(function (e) { jBox.textContent = e.message; }));
 
-    LA.get('/api/trash').then(function (l) {
+    pending.push(LA.get('/api/trash').then(function (l) {
       if (!l.length) tBox.appendChild(el('div', { class: 'dr-empty', text: '回收站是空的' }));
       l.forEach(function (t) {
         tBox.appendChild(el('div', { class: 'jr-item', title: t.path },
@@ -331,7 +341,13 @@
           })
         ));
       });
-    }).catch(function (e) { tBox.textContent = e.message; });
+    }).catch(function (e) { tBox.textContent = e.message; }));
+
+    Promise.all(pending).then(function () {
+      if (gen !== changesGen || target !== drawBody || dtab !== 'changes') return;   // 已被更新的一次渲染取代
+      LA.clear(target);
+      target.appendChild(stage);
+    });
   }
 
   function drawTasks() {
