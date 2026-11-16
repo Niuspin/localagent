@@ -118,13 +118,26 @@ register(Tool("memory_forget", "删除一条记忆（用户要求忘掉某事，
 async def use_skill(ctx: ToolCtx, a: dict) -> ToolResult:
     if ctx.skills is None:
         return err("技能系统未启用")
+    tier = getattr(ctx.session, "model_tier", "standard")
     try:
-        text, meta = ctx.skills.load_for_model(a["name"], ctx.guard.ws)
+        text, meta = ctx.skills.load_for_model(a["name"], ctx.guard.ws, tier=tier)
+    except TypeError:
+        try:
+            text, meta = ctx.skills.load_for_model(a["name"], ctx.guard.ws)
+        except KeyError as e:
+            names = ", ".join(s["name"] for s in ctx.skills.enabled()) or "（无）"
+            return err(f"{e.args[0]}。可用技能: {names}")
     except KeyError as e:
         names = ", ".join(s["name"] for s in ctx.skills.enabled()) or "（无）"
         return err(f"{e.args[0]}。可用技能: {names}")
     ctx.session.loaded_skills.add(a["name"])
-    ctx.session.tool_groups |= {"office", "fileops"}      # 技能的做法常要读写办公文件、整理文件
+    allowed = meta.get("allowed_tools") if isinstance(meta, dict) else None
+    if allowed:
+        aset = set(allowed)
+        cur = getattr(ctx.session, "skill_allowed_tools", None)
+        ctx.session.skill_allowed_tools = aset if cur is None else (cur & aset)
+    else:
+        ctx.session.tool_groups |= {"office", "fileops"}      # 技能的做法常要读写办公文件、整理文件
     return ToolResult(text, meta=meta)
 
 

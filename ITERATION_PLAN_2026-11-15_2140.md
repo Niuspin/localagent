@@ -727,10 +727,10 @@ flowchart LR
 - [x] M2 Mission 运行时（B）
 - [x] M3 多模态输入（C-in）
 - [x] M4 产物与多模态输出（C-out）
-- [ ] M5 Research Engine（D）
+- [x] M5 Research Engine（D）
 - [x] M6 UI 设计系统 v2（E）
-- [ ] M7 技能库 v2（F）
-- [ ] M8 集成加固与发布 `v0.2.0`
+- [x] M7 技能库 v2（F）
+- [x] M8 集成加固与发布 `v0.2.0`
 
 > 本文件仅为规划；实施时每完成一个里程碑，请在 `ARCHITECTURE_PROGRESS.md` 追加带时间戳的进度条目，并在本节勾选。
 

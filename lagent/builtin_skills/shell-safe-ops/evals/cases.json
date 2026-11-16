@@ -1,0 +1,17 @@
+[
+  {
+    "id": "sso-1",
+    "query": "我要批量执行跨平台脚本处理输出文件，按安全命令行和干跑预览流程来",
+    "should_trigger": true,
+    "expect_skill": "shell-safe-ops"
+  },
+  {
+    "id": "sso-2",
+    "query": "Write a cross-platform PowerShell script safely with dry-run preview",
+    "files": [
+      "deploy.ps1"
+    ],
+    "should_trigger": true,
+    "expect_skill": "shell-safe-ops"
+  }
+]

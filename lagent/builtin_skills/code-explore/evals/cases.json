@@ -1,0 +1,14 @@
+[
+  {
+    "id": "ce-1",
+    "query": "帮我只读梳理代码库架构，查一下鉴权在哪里实现及完整调用链",
+    "should_trigger": true,
+    "expect_skill": "code-explore"
+  },
+  {
+    "id": "ce-2",
+    "query": "Explore codebase and trace call chain for the scheduler module",
+    "should_trigger": true,
+    "expect_skill": "code-explore"
+  }
+]

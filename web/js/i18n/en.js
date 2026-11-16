@@ -54,6 +54,14 @@
     'mission.rollback': 'Rollback Here',
     'mission.md.title': 'MISSION.md (applied on next Episode)',
     'mission.md.save': 'Save MISSION.md',
-    'mission.detail.title': 'Mission Inspector'
+    'mission.detail.title': 'Mission Inspector',
+    'drawer.tab.research': 'Research',
+    'drawer.tab.net': 'Net Ledger',
+    'research.start': 'Start Research',
+    'research.policy': 'Policy',
+    'research.placeholder': 'Enter a topic to research and cross-verify...',
+    'research.empty': 'No research tasks yet. Enter a question or run /research.',
+    'net.empty': 'No outbound network requests recorded.',
+    'metrics.title': 'Local Runtime Metrics (stored locally only, zero telemetry)'
   };
 })();

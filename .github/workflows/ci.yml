@@ -18,6 +18,10 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
       - run: pip install -r requirements-dev.txt
+      - name: 技能库 v2 规范与完整性门禁检查
+        run: python -m lagent.skills lint
+      - name: UI 主题对比度与设计系统检查
+        run: python tests/ui_contrast.py
       - name: 单元与端到端测试（假 llama-server，不需要模型）
         run: python -m pytest -q
       - name: 浏览器冒烟测试（仅一个版本）

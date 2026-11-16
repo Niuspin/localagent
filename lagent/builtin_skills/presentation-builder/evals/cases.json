@@ -1,0 +1,14 @@
+[
+  {
+    "id": "pb-1",
+    "query": "把季度复盘整理成 10 页左右的项目汇报，帮我做 PPT 演示文稿",
+    "should_trigger": true,
+    "expect_skill": "presentation-builder"
+  },
+  {
+    "id": "pb-2",
+    "query": "Create a 10-slide presentation deck (.pptx) from this architecture proposal",
+    "should_trigger": true,
+    "expect_skill": "presentation-builder"
+  }
+]

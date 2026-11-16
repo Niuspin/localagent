@@ -2,8 +2,8 @@
 
 > 对齐基线：[ITERATION_PLAN_2026-11-15_2140.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/ITERATION_PLAN_2026-11-15_2140.md)（v0.2.0 **"Swarm & Mission"**）  
 > 上一阶段基线报告：[ARCHITECTURE_PROGRESS.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/ARCHITECTURE_PROGRESS.md)（v0.1.x Phase 1–3）  
-> 基线提交：`e503db1`（M0 / M1 / M6 已提交并同步至 `origin/main`）  
-> 最近更新：`2026-11-16 21:38 +08:00`
+> 基线提交：`5178acf`（M0–M4 / M6 已提交并同步至 `origin/main`）  
+> 最近更新：`2026-11-16 23:31 +08:00`
 
 ---
 
@@ -16,10 +16,10 @@
 | **M2 Mission 运行时（B）** | 1.5 周 | `lagent/mission/`；`/mission` 命令与 API；`MISSION.md`；Watchdog/Gates/Policy；Mission 详情页 | §3.8 测试全绿；崩溃续跑 100% | **已完成** | `2026-11-16 19:00 +08:00` |
 | **M3 多模态输入（C-in）** | 1 周 | `media/ingest`、能力协商、受限子进程、前端附件条 | 黄金样本通过；炸弹样本被拒 | **已完成** | `2026-11-16 19:26 +08:00` |
 | **M4 产物与多模态输出（C-out）** | 1 周 | Artifact 面板、`make_chart`、HTML 沙箱预览、会话导出、bundle | §4.4 测试全绿 | **已完成** | `2026-11-16 21:38 +08:00` |
-| **M5 Research Engine（D）** | 2 周 | `lagent/research/` 全部模块；策略闸门接入全部联网路径；网络账本 UI；`cite_check` | §5.6 断言全绿；`--offline` 零出站 | 待开始 | — |
+| **M5 Research Engine（D）** | 2 周 | `lagent/research/` 全部模块；策略闸门接入全部联网路径；网络账本 UI；`cite_check` | §5.6 断言全绿；`--offline` 零出站 | **已完成** | `2026-11-16 22:40 +08:00` |
 | **M6 UI 设计系统 v2（E）**（与 M1–M5 并行） | 2 周 | tokens/字体/图标/主题/动效/布局重构；对比度校验与无障碍强化 | §6.8 指标达标 | **已完成（无头 Playwright 截图留待装 Chromium 环境补跑）** | `2026-11-16 16:34 +08:00` |
-| **M7 技能库 v2（F）** | 1 周 | Spec v2、路由、lint、`skills.lock`、30 个技能 + 评测 | §7.4 达标 | 待开始 | — |
-| **M8 集成加固与发布 `v0.2.0`** | 0.5–1 周 | 全量回归、安全清单、文档收官、版本号 `0.2.0`、PyInstaller 冒烟 | CI 全绿；§8.2 清单全通过 | 待开始 | — |
+| **M7 技能库 v2（F）** | 1 周 | Spec v2、路由、lint、`skills.lock`、30 个技能 + 评测 | §7.4 达标 | **已完成** | `2026-11-16 23:08 +08:00` |
+| **M8 集成加固与发布 `v0.2.0`** | 0.5–1 周 | 全量回归、安全清单、文档收官、版本号 `0.2.0`、PyInstaller 配置与冒烟 | CI 门禁全绿；§8.2 清单全通过 | **已完成（`LocalAgent.exe` 实机打包留待 CI `build-exe` 或安装 PyInstaller 环境）** | `2026-11-16 23:31 +08:00` |
 
 ---
 
@@ -30,9 +30,9 @@
 | **A. Agent 集群并发处理（Swarm）** | §2 | M1 | **M1 核心已完成** | `lagent/swarm/`（DAG 环检测与级联、四级优先调度器、7 角色单调权限、分层预算账本、类型化 JSONL 邮箱、文件租约锁、串行行级三方 `MergeQueue` + 冲突卡、崩溃恢复）、`slots="auto"` 规划、`worker_endpoint` 路由、Swarm 工具与 `/api/swarms*` HTTP/SSE、`parallel_refactor` 评测及 6 组专项测试全绿 |
 | **B. 超长期编程智能体（Mission）** | §3 | M2 | **M2 核心已完成** | `lagent/mission/`（模型与 `MISSION.md` 双向解析、原子 `state.json`/`events.jsonl`、分段 Episode 引擎、Git 分支与里程碑回滚、`StallWatchdog` 四级升级、`MissionPolicy` 无人值守与安全单调边界、四维预算与 80%/100% 控管、跨平台防休眠与安静时间窗）、`--resume-missions`、`/mission` 命令、`/api/missions*` HTTP/SSE、前端 Missions 侧栏与详情监控面板 |
 | **C. 多模态多格式 I/O 与 Artifact** | §4 | M3 / M4 | **M3 输入 + M4 输出已完成** | 已落地 M3 `lagent/media/ingest/` 与 M4 `lagent/media/artifacts/`（零依赖 SVG `make_chart` 5 类图表与暗色主题 CSS 变量、HTML `<iframe sandbox>` 默认禁脚本与逐产物禁网授权、PDF 分页/表格分页/PPTX/Markdown/Archive 安全预览、`bundle_artifacts` + `MANIFEST.json` 打包、会话多格式导出 `md/html/pdf` 含思考/工具开关、`write_document`/`write_spreadsheet`/`write_presentation`/`edit_office`/`write_file` 自动 Artifact 登记与事件推送、`table` 句柄预算降级、可选 `piper` TTS 降级、对话内联产物卡片与右侧检查器「产物」面板） |
-| **D. 安全合法自动联网调研** | §5 | M5 | 已完成 M0 配置/目录预留 | 已完成 `research` 默认安全配置（`mode="off"`、`respect_robots=True`、`pii_redact=True`、`reader_isolation=True`）、`search.html_scrapers_ack`、`data/webcache/` |
+| **D. 安全合法自动联网调研** | §5 | M5 | **M5 核心已完成** | `lagent/research/`（`policy.py`、`robots.py`、`limiter.py`、`cache.py`、`extract.py`、`evidence.py`、`verify.py`、`pipeline.py`、`ledger.py`、`watch.py`）、接入 `net.py`/`web_search`/`web_fetch`/`HttpMcpSession`、`research_start`/`research_status`/`cite_check` 工具、`/research` 与 `/net` 命令、`/api/research*` & `/api/net/ledger`、前端「调研」与「网络账本」检查器面板及策略设置 |
 | **E. UI 界面深度美化** | §6 | M6 | **M6 设计系统 v2 已完成** | `web/css/` 模块化分层重构（零 `transition: all`）、6 套 WCAG AA 主题（含 Paper / Midnight / HC / Colorblind）+ `tests/ui_contrast.py` 自动化校验、SVG 图标精灵、CJK 排版与等宽连字控制、可拖拽/键盘分栏、专注模式、View Transitions 与 `reduced/off` 动效控制、i18n 双语字典、Swarm 检查器面板（`web/` 总计 ~321.8 KB） |
-| **F. 系统默认技能库（Skills v2）** | §7 | M7 | 已完成 M0 预算配置 | 已完成 `skills.default_enabled_limit=14`（1..50）与 `skills.auto_route=True` 配置模型与旧配置自动补全 |
+| **F. 系统默认技能库（Skills v2）** | §7 | M7 | **M7 核心已完成** | `lagent/skills.py` Spec v2 元数据/包管理/自动路由（关键词+glob+MIME+`local_embed`）/compact 档位/`skills.lock` 校验与 `python -m lagent.skills lint` 门禁、38 个内置技能（7 大包，默认启用 12 条 ≤ 上限 14）、`allowed_tools` 单调收窄、`/api/skills/packs|pack|lint|route` 与前端分包 UI |
 
 ---
 
@@ -51,6 +51,52 @@
 ---
 
 ## 四、变更与验证日志
+
+### `2026-11-16 23:31 +08:00` — M8 集成加固与发布 `v0.2.0` 收官与全量验证
+- **M8 代码与发布交付**：
+  - **版本与打包**：将 [__init__.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/__init__.py) 版本号升级为 **`0.2.0`**；更新 [localagent.spec](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/packaging/localagent.spec) 补齐 `lagent.swarm`、`lagent.mission`、`lagent.media`、`lagent.research`、`lagent.skills`、`lagent.metrics`、`yaml`、`sqlite3` 等隐藏导入。
+  - **本地可观测性 (§8.4)**：新增 [metrics.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/metrics.py) 与 `GET /api/metrics`（[server.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/server.py#L1681-L1684)、[loop.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/loop.py#L490-L504)），纯本机汇总 `steps_per_hour`、`tokens`、`verify_pass_rate`、`stall_count`、`denied_requests`、`merge_conflict_rate`、引擎遥测与 `skills.lock` 状态；前端 [settings.js](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/js/settings.js#L645-L702)、[controls.css](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/css/components/controls.css#L273-L277) 与中英 i18n 新增设置页「运行指标」面板。
+  - **安全加固**：[session.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/mcp/session.py#L300-L304) 为 `HttpMcpSession._post_sync` 补充独立 `--offline` 兜底阻断（即使 `policy=None` 也严禁非回环外部连接）；在 [.github/workflows/ci.yml](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/.github/workflows/ci.yml#L22-L23) 增补 `python tests/ui_contrast.py` 门禁。
+  - **全套文档与清单同步**：更新 [README.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/README.md)、[CHANGELOG.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/CHANGELOG.md)（发布 `[0.2.0]` 完整条目）、[API.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/docs/API.md)、[THIRD_PARTY_LICENSES.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/THIRD_PARTY_LICENSES.md)（补齐 dev/build/可选扩展及 38 个内置技能声明），并勾选 [ITERATION_PLAN_2026-11-15_2140.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/ITERATION_PLAN_2026-11-15_2140.md#L733) §13 全部 M0–M8 里程碑；清理遗留空目录 `.tmp_nonexist_check`。
+  - **M8 安全/发布专项测试**：新增 [test_m8_release.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/tests/test_m8_release.py) 覆盖版本与 spec 校验、§8.2 7 项安全退出清单（`PathGuard`、单调权限、socket 级 `--offline` 零出站、产物下载/XSS/CSP、全部新增路由 `Guard` 401/403 拦截、敏感文件黑名单、许可证完整性）、§8.3 预算与 §8.4 `/api/metrics`。
+- **实测验证结果**：
+  - `.venv\Scripts\python.exe -m pytest tests\test_m8_release.py -v -p no:cacheprovider`：**`5 passed`（5.27s）**。
+  - `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider`：**`452 passed, 3 skipped, 1 warning`（129.28s）**（3 skipped 为无本地真实模型的 `tests/test_eval.py` 可选真机用例）。
+  - `.venv\Scripts\python.exe -m lagent.skills lint`：**`ok=true`, `count=38`, `default_enabled=12`, `errors=[]`, `lock.verified=38`**。
+  - `.venv\Scripts\python.exe tests\ui_smoke.py`：真 Chromium 无头测试 **[1]–[12] 全部通过**（含新增「设置页『运行指标』渲染」，零控制台/CSP 错误、零外部请求）。
+  - `.venv\Scripts\python.exe tests\ui_contrast.py`：6 套主题 WCAG 2.2 AA 全通过，零 `transition: all`。
+  - `node --check web/js/**/*.js`：**全部通过**；`web/` 总大小 **`416,028 bytes`**（< `1.5 MB`）。
+  - `.venv\Scripts\python.exe tests\eval\run_eval.py`：无本地 `llama-server` 时正确退出 `SKIP`；`--list` 列出全部 **16** 个评测场景。
+  - 注：当前 `.venv` 未安装 `pyinstaller`（`requirements-build.txt`），未在本机生成 `dist/LocalAgent/LocalAgent.exe`，但已通过 `packaging/localagent.spec` / `packaging/build.py` 编译检查、模块导入、`run.py --version` 与资源完整性校验，真实 exe 构建与 `--version` 冒烟在 CI `build-exe` 任务执行。
+
+### `2026-11-16 23:08 +08:00` — M7 技能库 v2（方向 F）交付与全量验证
+- **M7 代码交付**：
+  - 核心引擎升级 ([skills.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/skills.py))：全面支持 Skill Spec v2 元数据（`description_en`/`version`/`pack`/`tags`/`when_to_use`/`triggers`/`requires`/`allowed_tools`/`risk`/`profiles`/`license`/`default_enabled`）、保留 v1 内置/自定义技能向后兼容与 mtime 目录扫描缓存；落地 `default_enabled_limit`（14 条索引硬上限）、7 大包分类管理 (`packs`/`set_pack_enabled`)、混合路由器 `route()`（名称 + 关键词 + glob + MIME + `tokens` + `local_embed` 余弦相似度）、`compact` 模型档位自动选择 `SKILL.compact.md`、`skills.lock` SHA-256 清单构建/防篡改校验、增强型 `scan_warnings`（脚本联网、越界路径、零宽不可见 Unicode 与提示注入扫描）及 `python -m lagent.skills lint` 质量门禁 CLI。
+  - 运行时与接口集成：[ctx.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/tools/ctx.py)、[agentic.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/tools/agentic.py)、[loop.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/loop.py)、[server.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/server.py) 与 [API.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/docs/API.md) 接入系统提示硬上限 `limit`、`skills.auto_route` 轻量 Top-K(<=3) 路由提示、`model_tier` 传递给 `use_skill`、`skill_allowed_tools` 会话回合级单调收窄拦截，并新增 `/api/skills/packs`、`/api/skills/pack`、`/api/skills/lint` 与 `/api/skills/route`。
+  - 系统默认技能库（`lagent/builtin_skills/`）：升级既有 4 个并补全全套 38 个内置技能（覆盖 `core`/`dev`/`research`/`office`/`media`/`ops`/`meta` 7 大包，仅 12 条 ★ 技能默认启用 `<=14`），每个技能均配套双语描述、`SKILL.compact.md`、`evals/cases.json`（>=2 条）与参考手册，并生成 `skills.lock`。
+  - 前端、CI 与测试：更新 [panels.js](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/js/panels.js)、[controls.css](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/css/components/controls.css)、[main.js](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/js/main.js)（支持 7 大包页签筛选、整包一键启停、`skills.lock` 状态徽章及稳态 30s 轮询降噪）；在 [.github/workflows/ci.yml](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/.github/workflows/ci.yml) 增加 `python -m lagent.skills lint`；新增 [test_m7_skills.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/tests/test_m7_skills.py)（8 组测试）、扩展 [ui_smoke.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/tests/ui_smoke.py) 与 [run_eval.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/tests/eval/run_eval.py)（`skill_routing`）并勾选 §13 清单。
+- **实测验证结果**：
+  - `.venv\Scripts\python.exe -m lagent.skills lint`：**`ok=true`, `count=38`, `default_enabled=12`, `errors=[]`, `lock.verified=38`**。
+  - `.venv\Scripts\python.exe -m pytest tests\test_m7_skills.py -v -p no:cacheprovider`：**`8 passed`（9.19s）**。
+  - `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider`：**`447 passed, 3 skipped`（127.21s）**。
+  - `.venv\Scripts\python.exe tests\ui_smoke.py`：真 Chromium 无头测试 **[1]–[12] 全部通过**（含 7 大技能包标签与 `skills.lock` 状态断言，零控制台错误、零外部请求）。
+  - `.venv\Scripts\python.exe tests\ui_contrast.py`：6 套主题 WCAG 2.2 AA 全通过，零 `transition: all`。
+  - `node --check web/js/**/*.js`：**全部通过**；`web/` 总大小 **`411,751 bytes`**（< `1.5 MB`）。
+- **下一步计划**：进入 **M8（集成加固与发布 `v0.2.0`）**。
+
+### `2026-11-16 22:40 +08:00` — M5 Research Engine（方向 D）交付与全量验证
+- **M5 代码交付**：
+  - 新增 `lagent/research/` 全包（`__init__.py`、`policy.py`、`robots.py`、`limiter.py`、`cache.py`、`extract.py`、`evidence.py`、`verify.py`、`pipeline.py`、`ledger.py`、`watch.py`）。
+  - 统一策略闸门与离线防线：`config.py` 强化 `respect_robots`（仅 `allowlist` 可关）与 `research.user_agent` 反伪装校验；`net.py` 强制 `--offline` 拦截非回环请求；`tools/search.py` 强制出站查询脱敏、官方/SearXNG 优先及 `search.html_scrapers_ack` 显式确认；`tools/web.py` 与 `mcp/session.py` (`HttpMcpSession`) 接入 `ResearchPolicy` / `RobotsCache` / `DomainLimiter` / `WebCache` / `NetLedger`（并修复 `web_fetch` 缓存丢失 `links` 问题）。
+  - 工具、命令与接口：新增 `lagent/tools/research_tools.py`（`research_start`、`research_status`、`cite_check`）与 `toolset.py` `research` 分组；`commands.py` 新增 `/research` 与 `/net`；`server.py` 与 `docs/API.md` 新增 `/api/research*`、`/api/research/policy`、`/api/net/ledger`（JSON/CSV）。
+  - 前端与测试：新增 `web/js/research.js`，更新 `index.html`、`panels.js`、`settings.js`、`main.js`、`drawer.css`、`i18n/{zh-CN,en}.js`，提供「调研」与「网络账本」面板、可点击 `[n]` 证据跳转与 HTML 解析确认弹窗；新增 `tests/test_m5_research.py`（5 组测试）并在 `run_eval.py` 增补 `research_cited`、扩展 `ui_smoke.py`。
+- **实测验证结果**：
+  - `.venv\Scripts\python.exe -m pytest tests\test_m5_research.py -v -p no:cacheprovider`：**`5 passed`（7.83s）**。
+  - `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider`：**`439 passed, 3 skipped`（111.87s）**。
+  - `.venv\Scripts\python.exe tests\ui_smoke.py`：真 Chromium 无头测试 **[1]–[12] 全部通过**（含「调研面板渲染」与「网络账本面板渲染」，零控制台错误、零外部请求）。
+  - `.venv\Scripts\python.exe tests\ui_contrast.py`：6 套主题 WCAG 2.2 AA 全通过，零 `transition: all`。
+  - `node --check web/js/**/*.js`：**16 个 JS 文件全部通过**；`web/` 总大小 **`407,714 bytes`**（< `1.5 MB`）。
+- **下一步计划**：进入 **M7（技能库 v2 / 方向 F）**。
 
 ### `2026-11-16 21:38 +08:00` — M4 产物与多模态输出（方向 C-out）交付与全量验证
 - **M4 代码交付**：

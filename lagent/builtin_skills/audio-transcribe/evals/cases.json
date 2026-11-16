@@ -1,0 +1,26 @@
+[
+  {
+    "id": "at-1",
+    "query": "把这段采访录音 audio_clip.mp3 做音频转写并整理成带分段标点的文字稿",
+    "files": [
+      "audio_clip.mp3"
+    ],
+    "mimes": [
+      "audio/mpeg"
+    ],
+    "should_trigger": true,
+    "expect_skill": "audio-transcribe"
+  },
+  {
+    "id": "at-2",
+    "query": "Transcribe voice memo recording.wav and clean up punctuation",
+    "files": [
+      "recording.wav"
+    ],
+    "mimes": [
+      "audio/wav"
+    ],
+    "should_trigger": true,
+    "expect_skill": "audio-transcribe"
+  }
+]

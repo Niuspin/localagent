@@ -1,0 +1,17 @@
+[
+  {
+    "id": "rw-1",
+    "query": "根据调研材料帮我写一份正式的架构选型报告并导出成 Word 文档",
+    "should_trigger": true,
+    "expect_skill": "report-writer"
+  },
+  {
+    "id": "rw-2",
+    "query": "Compile these notes into a structured executive brief and PDF report",
+    "files": [
+      "notes.md"
+    ],
+    "should_trigger": true,
+    "expect_skill": "report-writer"
+  }
+]

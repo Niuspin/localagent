@@ -7,8 +7,10 @@ ROOT = Path(SPECPATH).parent
 hidden = [
     "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.loops.asyncio", "uvicorn.protocols.http.auto",
     "uvicorn.protocols.http.h11_impl", "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on",
-    "multipart", "lxml.etree", "lxml._elementpath", "docx", "openpyxl", "pptx", "pypdf", "pdfplumber", "reportlab",
+    "multipart", "lxml.etree", "lxml._elementpath", "yaml", "sqlite3",
+    "docx", "openpyxl", "pptx", "pypdf", "pdfplumber", "reportlab",
     "webview", "clr_loader", "pythonnet", "lagent.bootstrap",
+    "lagent.swarm", "lagent.mission", "lagent.media", "lagent.research", "lagent.skills", "lagent.metrics",
 ]
 datas = [
     (str(ROOT / "web"), "web"),

@@ -1,0 +1,14 @@
+[
+  {
+    "id": "mn-1",
+    "query": "把这份项目周会聊天记录整理成一份清晰的会议纪要和待办表",
+    "should_trigger": true,
+    "expect_skill": "meeting-notes"
+  },
+  {
+    "id": "mn-2",
+    "query": "Turn this transcript into clean meeting minutes with owners and action items",
+    "should_trigger": true,
+    "expect_skill": "meeting-notes"
+  }
+]

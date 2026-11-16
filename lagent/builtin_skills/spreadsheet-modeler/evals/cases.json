@@ -1,0 +1,14 @@
+[
+  {
+    "id": "sm-1",
+    "query": "帮我做一个年度预算表和多sheet联动的财务模型 Excel",
+    "should_trigger": true,
+    "expect_skill": "spreadsheet-modeler"
+  },
+  {
+    "id": "sm-2",
+    "query": "Build a multi-sheet excel workbook budget model with dynamic formulas",
+    "should_trigger": true,
+    "expect_skill": "spreadsheet-modeler"
+  }
+]

@@ -1,0 +1,17 @@
+[
+  {
+    "id": "sld-1",
+    "query": "这份白皮书太长了，帮我做长文档总结和分段摘要",
+    "should_trigger": true,
+    "expect_skill": "summarize-long-doc"
+  },
+  {
+    "id": "sld-2",
+    "query": "Produce an executive summary of this long PDF document",
+    "files": [
+      "spec_long.pdf"
+    ],
+    "should_trigger": true,
+    "expect_skill": "summarize-long-doc"
+  }
+]

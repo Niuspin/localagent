@@ -167,7 +167,7 @@
     clearTimeout(pollTimer);
     LA.refreshState().catch(function () {}).then(function () {
       var s = LA.engine().status;
-      pollTimer = setTimeout(poll, s === 'starting' || s === 'stopping' ? 3000 : 10000);
+      pollTimer = setTimeout(poll, s === 'starting' || s === 'stopping' ? 3000 : 30000);
     });
   }
   function watchEngine() {
@@ -220,6 +220,8 @@
         { kind: 'act', tag: '产物', title: '打开产物面板与导出', sub: '图表/表格/HTML 沙箱预览、打包与导出', run: function () { if (LA.panels.openArtifact) LA.panels.openArtifact(); } },
         { kind: 'act', tag: '集群', title: '打开 Swarm 集群面板', sub: '查看多代理 DAG 与合并队列', run: function () { if (LA.panels.openSwarm) LA.panels.openSwarm(); } },
         { kind: 'act', tag: '任务', title: '新建或查看长期 Mission', sub: '超长期断点续跑 / MISSION.md / 回滚', run: function () { if (LA.panels.openMission) LA.panels.openMission(); } },
+        { kind: 'act', tag: '调研', title: '打开联网调研面板', sub: '多源证据、引用核查与来源摘录', run: function () { if (LA.panels.openResearch) LA.panels.openResearch(); } },
+        { kind: 'act', tag: '账本', title: '打开网络账本', sub: '出站请求审计与策略拦截明细', run: function () { if (LA.panels.openNet) LA.panels.openNet(); } },
         { kind: 'act', tag: '视图', title: '切换专注模式', sub: 'Ctrl+Shift+F 隐藏侧栏与检查器', run: function () { toggleFocus(); } },
         { kind: 'act', tag: 'Git', title: '查看 Git 变更与撤销日志', sub: '切换至变更抽屉', run: function () { LA.panels.openChanges(); } },
         { kind: 'act', tag: '设置', title: '打开设置', sub: '模型、引擎、生成与安全配置', run: function () { LA.openSettings(); } },
@@ -306,7 +308,10 @@
       else if (mod && !e.shiftKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); toggleSide(); }
       else if (e.key === 'Escape' && !e.defaultPrevented) { if (LA.closeTopModal()) e.preventDefault(); else appEl.classList.remove('menu-open'); }
     });
-    window.addEventListener('beforeunload', function () { if (LA.flushConfig) LA.flushConfig(); });
+    window.addEventListener('beforeunload', function () {
+      clearTimeout(pollTimer);
+      if (LA.flushConfig) LA.flushConfig();
+    });
     document.addEventListener('visibilitychange', function () { if (!document.hidden) LA.refreshState().catch(function () {}); });
     // 外链一律新标签页打开且不带 referrer
     document.addEventListener('click', function (e) {
@@ -334,7 +339,9 @@
       var p = has ? LA.openSession(last) : (LA.setSession(null), Promise.resolve());
       return p.then(function () {
         try { if (localStorage.getItem('la.drawer') === '1' && window.innerWidth > 860) LA.panels.toggleDrawer(true); } catch (e) {}
-        updateTop(); poll(); connectEvents();
+        updateTop();
+        pollTimer = setTimeout(poll, LA.engine().status === 'starting' || LA.engine().status === 'stopping' ? 3000 : 30000);
+        connectEvents();
         // 引擎未加载且有模型：给出明确引导（不自动加载，避免意外占满显存）
       });
     }).catch(function (e) { if (e && e.message !== 'unauthorized') { LA.toast('无法连接到后端：' + e.message, 'err', 8000); } });

@@ -1,123 +1,193 @@
-"""web_fetch：抓取网页正文（SSRF 防护、限量、HTML→文本、PDF 支持、分页）。"""
+"""web_fetch：抓取网页正文（SSRF 防护、策略闸门、robots.txt、限速、条件缓存、隐藏文本清洗、PDF 支持、分页）。"""
 from __future__ import annotations
 
 import asyncio
 import io
 import re
 import time
-from urllib.parse import urljoin, urlsplit
+from typing import Any
+from urllib.parse import urljoin
 
 from .. import net
+from ..research.extract import extract_html, extract_response
+from ..research.limiter import DomainLimiter
+from ..research.policy import ResearchPolicy, detect_access_block, domain_of, safe_user_agent
+from ..research.robots import RobotsCache
 from .base import P, Tool, ToolResult, obj, register
 from .ctx import ToolCtx
 
-_CACHE: dict[str, tuple[float, str, str]] = {}   # url -> (ts, title, text)
-_DROP = ("script", "style", "noscript", "template", "svg", "iframe", "canvas", "form", "nav", "footer", "aside", "header", "button", "select", "dialog")
-_NOISE = re.compile(r"(^|[-_ ])(cookie|banner|advert|ads?|sidebar|menu|popup|modal|share|social|breadcrumb|comment|related|newsletter|subscribe)([-_ ]|$)", re.I)
+# url -> (ts, title, text, links, note)
+_CACHE: dict[str, tuple[float, str, str, list[tuple[str, str]], str]] = {}
+_DEFAULT_ROBOTS = RobotsCache()
+_DEFAULT_LIMITER = DomainLimiter()
 
 
 def html_to_text(html: str, base_url: str) -> tuple[str, str, list[tuple[str, str]]]:
-    from bs4 import BeautifulSoup, NavigableString  # type: ignore
-    try:
-        s = BeautifulSoup(html, "lxml")
-    except Exception:  # noqa: BLE001
-        s = BeautifulSoup(html, "html.parser")
-    title = (s.title.get_text().strip() if s.title else "")[:200]
-    for t in s(_DROP):
-        t.decompose()
-    for t in s.find_all(attrs={"aria-hidden": "true"}):
-        t.decompose()
-    for t in list(s.find_all(True)):
-        if t.attrs is None:
-            continue
-        cls = " ".join(t.get("class") or []) + " " + (t.get("id") or "")
-        if cls.strip() and _NOISE.search(cls) and t.name not in ("html", "body", "article", "main"):
-            t.decompose()
-    root = s.find("article") or s.find("main") or s.find(attrs={"role": "main"}) or s.body or s
-    links: list[tuple[str, str]] = []
-
-    out: list[str] = []
-
-    def walk(node, depth=0):
-        for ch in node.children:
-            if isinstance(ch, NavigableString):
-                tx = re.sub(r"\s+", " ", str(ch))
-                if tx.strip():
-                    out.append(tx)
-                continue
-            n = ch.name
-            if n in ("h1", "h2", "h3", "h4", "h5", "h6"):
-                out.append("\n\n" + "#" * int(n[1]) + " " + re.sub(r"\s+", " ", ch.get_text()).strip() + "\n")
-            elif n in ("p", "div", "section", "tr", "dd", "dt", "figcaption", "blockquote"):
-                out.append("\n")
-                walk(ch, depth + 1)
-                out.append("\n")
-            elif n == "br":
-                out.append("\n")
-            elif n == "li":
-                out.append("\n- ")
-                walk(ch, depth + 1)
-            elif n in ("td", "th"):
-                walk(ch, depth + 1)
-                out.append(" | ")
-            elif n in ("pre", "code") and n == "pre":
-                out.append("\n```\n" + ch.get_text() + "\n```\n")
-            elif n == "a":
-                href = ch.get("href", "")
-                txt = re.sub(r"\s+", " ", ch.get_text()).strip()
-                if href and txt and not href.startswith(("#", "javascript:", "mailto:", "tel:")):
-                    full = urljoin(base_url, href)
-                    if full.startswith("http") and len(links) < 80:
-                        links.append((txt[:80], full))
-                out.append(txt if txt else "")
-            elif n == "img":
-                alt = (ch.get("alt") or "").strip()
-                if alt:
-                    out.append(f"[图: {alt[:80]}]")
-            else:
-                walk(ch, depth + 1)
-
-    walk(root)
-    text = "".join(out)
-    text = re.sub(r"[ \t ]+", " ", text)
-    text = re.sub(r" ?\n ?", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return title, text, links
+    doc = extract_html(html, base_url, do_redact_pii=False)
+    return doc.title, doc.text, doc.links
 
 
 def _pdf_text(data: bytes) -> str:
     try:
         import pdfplumber  # type: ignore
+
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             return "\n".join(f"--- 第 {i} 页 ---\n{(p.extract_text() or '').strip()}" for i, p in enumerate(pdf.pages[:80], 1))
     except ImportError:
         from pypdf import PdfReader  # type: ignore
+
         r = PdfReader(io.BytesIO(data))
         return "\n".join(f"--- 第 {i} 页 ---\n{(p.extract_text() or '').strip()}" for i, p in enumerate(r.pages[:80], 1))
 
 
-def _fetch_page(ctx: ToolCtx, url: str) -> tuple[str, str, list[tuple[str, str]], str]:
+def _fetch_page(ctx: ToolCtx, url: str) -> tuple[str, str, list[tuple[str, str]], str, bool]:
     cfg = ctx.cfg
-    r = net.fetch_sync(url, timeout=float(cfg.get("web", "timeout_s", default=20)), max_bytes=int(cfg.get("web", "max_bytes", default=3_000_000)),
-                       proxy=cfg.get("search", "proxy", default=""),
-                       headers={"Accept": "text/html,application/xhtml+xml,application/pdf,text/plain;q=0.9,*/*;q=0.5",
-                                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
-    if r.status >= 400:
-        raise net.NetError(f"HTTP {r.status}" + ("（站点拒绝机器人访问，换个来源试试）" if r.status in (401, 403, 429) else ""))
+    research = getattr(ctx, "research", None)
+    policy = research.policy if research is not None else ResearchPolicy(cfg)
+    ledger = research.ledger if research is not None else None
+    robots = research.robots if research is not None else _DEFAULT_ROBOTS
+    limiter = research.limiter if research is not None else _DEFAULT_LIMITER
+    wcache = research.cache if research is not None else None
+    agent_id = getattr(ctx.session, "agent_id", "main") if ctx.session else "main"
+    sid = ctx.sid if ctx.session else ""
+
+    dec = policy.evaluate_url(url, purpose="web_fetch", approved_domains=set(ctx.session.user_domains or ()))
+    if not dec.allowed:
+        if ledger is not None:
+            ledger.record(
+                url=url, method="GET", status=0, purpose="web_fetch",
+                agent_id=agent_id, session_id=sid, decision="deny", reason=dec.reason,
+            )
+        raise net.NetError(dec.reason)
+
+    dom = dec.domain or domain_of(url)
+    blk = limiter.is_blocked(dom)
+    if blk:
+        if ledger is not None:
+            ledger.record(
+                url=url, method="GET", status=0, purpose="web_fetch",
+                agent_id=agent_id, session_id=sid, decision="blocked", reason=blk,
+            )
+        raise net.NetError(f"站点 {dom} 此前触发访问限制 ({blk})，已跳过（不绕过反爬/验证）")
+
+    proxy = cfg.get("search", "proxy", default="")
+    ok_rob, delay, why_rob = robots.check_sync(url, cfg=cfg, proxy=proxy, respect_robots=policy.respect_robots())
+    if not ok_rob:
+        if ledger is not None:
+            ledger.record(
+                url=url, method="GET", status=0, purpose="web_fetch",
+                agent_id=agent_id, session_id=sid, decision="deny", reason=why_rob,
+            )
+        raise net.NetError(f"robots.txt 拒绝访问: {why_rob}")
+
+    qcap = int(cfg.get("research", "quote_max_chars", default=400))
+    pii = bool(cfg.get("research", "pii_redact", default=True))
+
+    if wcache is not None:
+        hit_disk = wcache.get(url)
+        if hit_disk and hit_disk.get("fresh"):
+            if ledger is not None:
+                ledger.record(
+                    url=url, method="GET", status=hit_disk["status"], bytes_in=len(hit_disk["body"]),
+                    purpose="web_fetch", agent_id=agent_id, session_id=sid, decision="allow", cached=True,
+                )
+            doc = extract_response(hit_disk["body"], url, headers=hit_disk.get("headers"), quote_max_chars=qcap, do_redact_pii=pii)
+            no_cache = bool(doc.directives.get("noarchive") or doc.directives.get("noai") or doc.directives.get("noindex"))
+            return doc.title, doc.text, doc.links, "", no_cache
+
+    cond_hdrs = wcache.conditional_headers(url) if wcache is not None else {}
+    ua = safe_user_agent(cfg)
+    req_hdrs = {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain;q=0.9,*/*;q=0.5",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        **cond_hdrs,
+    }
+
+    r = None
+    for attempt in range(2):
+        with limiter.acquire_sync(dom, crawl_delay=delay):
+            t0 = time.monotonic()
+            r = net.fetch_sync(
+                url,
+                timeout=float(cfg.get("web", "timeout_s", default=20)),
+                max_bytes=int(cfg.get("web", "max_bytes", default=3_000_000)),
+                proxy=proxy,
+                headers=req_hdrs,
+            )
+            dur = int((time.monotonic() - t0) * 1000)
+        if r.status == 304 and wcache is not None:
+            refreshed = wcache.touch_304(url, r.headers)
+            if ledger is not None:
+                ledger.record(
+                    url=url, method="GET", status=304, bytes_in=0, purpose="web_fetch",
+                    agent_id=agent_id, session_id=sid, decision="allow", cached=True, duration_ms=dur,
+                )
+            if refreshed:
+                doc = extract_response(refreshed["body"], url, headers=refreshed.get("headers"), quote_max_chars=qcap, do_redact_pii=pii)
+                no_cache = bool(doc.directives.get("noarchive") or doc.directives.get("noai") or doc.directives.get("noindex"))
+                return doc.title, doc.text, doc.links, "", no_cache
+        if r.status in (429, 503):
+            wait_s = limiter.note_response(dom, r.status, r.headers.get("retry-after"))
+            if ledger is not None:
+                ledger.record(
+                    url=url, method="GET", status=r.status, bytes_in=len(r.body), purpose="web_fetch",
+                    agent_id=agent_id, session_id=sid, decision="retry" if attempt == 0 else "deny",
+                    reason=f"HTTP {r.status}", duration_ms=dur,
+                )
+            if attempt == 0:
+                time.sleep(min(wait_s, 3.0))
+                continue
+            raise net.NetError(f"HTTP {r.status}（站点限流）")
+        limiter.note_response(dom, r.status)
+        break
+
+    assert r is not None
     ct = r.headers.get("content-type", "").split(";")[0].strip().lower()
-    final = r.url
-    note = f"（内容被截断到 {len(r.body) // 1024} KB）" if r.truncated else ""
-    if ct == "application/pdf" or final.lower().split("?")[0].endswith(".pdf"):
-        return "PDF 文档", _pdf_text(r.body), [], note
+    raw_txt = "" if ct == "application/pdf" else r.text()
+    is_blk, blk_why = detect_access_block(r.status, r.headers, raw_txt)
+    if is_blk:
+        limiter.mark_blocked(dom, blk_why)
+        if ledger is not None:
+            ledger.record(
+                url=r.url, method="GET", status=r.status, bytes_in=len(r.body), purpose="web_fetch",
+                agent_id=agent_id, session_id=sid, decision="blocked", reason=blk_why,
+            )
+        raise net.NetError(f"HTTP {r.status}（检测到 {blk_why}，LocalAgent 不绕过访问控制，换个来源试试）")
+
+    if r.status >= 400:
+        if ledger is not None:
+            ledger.record(
+                url=r.url, method="GET", status=r.status, bytes_in=len(r.body), purpose="web_fetch",
+                agent_id=agent_id, session_id=sid, decision="error", reason=f"HTTP {r.status}",
+            )
+        raise net.NetError(f"HTTP {r.status}")
+
     if ct.startswith("image/") or ct.startswith(("audio/", "video/")) or ct in ("application/zip", "application/octet-stream", "application/gzip"):
         raise net.NetError(f"不支持的内容类型 {ct}")
-    html = r.text()
-    if ct in ("text/html", "application/xhtml+xml", "") or "<html" in html[:500].lower():
-        t, text, links = html_to_text(html, final)
-        if len(text) < 200 and re.search(r"enable javascript|请开启.*javascript|requires javascript", html, re.I):
-            note += "（页面需要 JavaScript 渲染，可能读不到正文）"
-        return t, text, links, note
-    return "", html, [], note
+
+    note = f"（内容被截断到 {len(r.body) // 1024} KB）" if r.truncated else ""
+    doc = extract_response(
+        r.body,
+        r.url,
+        headers=r.headers,
+        content_type=ct,
+        charset_text=raw_txt if ct != "application/pdf" else None,
+        quote_max_chars=qcap,
+        do_redact_pii=pii,
+    )
+    if doc.kind == "html" and len(doc.text) < 200 and re.search(r"enable javascript|请开启.*javascript|requires javascript", raw_txt, re.I):
+        note += "（页面需要 JavaScript 渲染，可能读不到正文）"
+
+    if wcache is not None:
+        wcache.put(url, status=r.status, headers=r.headers, body=r.body, directives=doc.directives)
+    if ledger is not None:
+        ledger.record(
+            url=r.url, method="GET", status=r.status, bytes_in=len(r.body), purpose="web_fetch",
+            agent_id=agent_id, session_id=sid, decision="allow",
+        )
+    no_cache = bool(doc.directives.get("noarchive") or doc.directives.get("noai") or doc.directives.get("noindex"))
+    return doc.title, doc.text, doc.links, note, no_cache
 
 
 async def web_fetch(ctx: ToolCtx, a: dict) -> ToolResult:
@@ -128,12 +198,13 @@ async def web_fetch(ctx: ToolCtx, a: dict) -> ToolResult:
     max_chars = int(ctx.cfg.get("web", "max_chars", default=12000))
     hit = _CACHE.get(url)
     if hit and time.time() - hit[0] < 600:
-        title, text, links, note = hit[1], hit[2], [], ""
+        title, text, links, note = hit[1], hit[2], hit[3], hit[4]
     else:
-        title, text, links, note = await asyncio.to_thread(_fetch_page, ctx, url)
-        _CACHE[url] = (time.time(), title, text)
-        if len(_CACHE) > 40:
-            _CACHE.pop(min(_CACHE, key=lambda k: _CACHE[k][0]))
+        title, text, links, note, no_cache = await asyncio.to_thread(_fetch_page, ctx, url)
+        if not no_cache:
+            _CACHE[url] = (time.time(), title, text, links, note)
+            if len(_CACHE) > 40:
+                _CACHE.pop(min(_CACHE, key=lambda k: _CACHE[k][0]))
     d = net.domain_of(url)
     if d:
         ctx.session.user_domains.add(d)
@@ -147,8 +218,12 @@ async def web_fetch(ctx: ToolCtx, a: dict) -> ToolResult:
         tail += "\n\n页面链接:\n" + "\n".join(f"- {t} → {u}" for t, u in links[:30])
     if not chunk.strip():
         return ToolResult(head + "（未提取到正文）" + note, meta={"url": url})
-    return ToolResult(head + "\n" + chunk + tail + (("\n" + note) if note else ""), meta={"url": url, "chars": total},
-                      taint=f"网页 {d}", untrusted_source=url)
+    return ToolResult(
+        head + "\n" + chunk + tail + (("\n" + note) if note else ""),
+        meta={"url": url, "chars": total},
+        taint=f"网页 {d}",
+        untrusted_source=url,
+    )
 
 
 register(Tool(

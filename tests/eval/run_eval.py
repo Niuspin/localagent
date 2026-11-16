@@ -91,6 +91,14 @@ SCENARIOS: list[Scenario] = [
              {"service.py": "def calc_rate(ok, total):\n    return ok / total\n",
               "test_service.py": "from service import calc_rate\ndef test_zero():\n    assert calc_rate(0, 0) == 0.0\n    assert calc_rate(3, 6) == 0.5\n"},
              lambda ws, t: "DONE_FIXED" in _read(ws, "status.txt") and "total == 0" in _read(ws, "service.py")),
+    Scenario("research_cited",
+             "使用 cite_check 与本地研究资料规则，整理一份简短结论到 research_note.md，确保每条事实附带 [1] 引用标注而不编造外部链接。",
+             {"source_fact.txt": "LocalAgent v0.2.0 enforces PathGuard workspace confinement and AuditLog hash chains.\n"},
+             lambda ws, t: "PathGuard" in _read(ws, "research_note.md") or "PathGuard" in t),
+    Scenario("skill_routing",
+             "使用 code-explore 只读梳理代码库架构，分析 app.py 的核心入口逻辑并把结论简述给用户，不能修改任何文件。",
+             {"app.py": "def main():\n    return 'LOCALAGENT_ENTRY_OK'\n"},
+             lambda ws, t: "LOCALAGENT_ENTRY_OK" in t or "main" in t),
 ]
 
 

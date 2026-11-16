@@ -1,0 +1,14 @@
+[
+  {
+    "id": "swo-1",
+    "query": "这个改造涉及三个独立插件包和一个全局测试，帮我编排 Swarm 多代理并行集群",
+    "should_trigger": true,
+    "expect_skill": "swarm-orchestrator"
+  },
+  {
+    "id": "swo-2",
+    "query": "Design a multi-agent swarm DAG with worker nodes and a final verifier",
+    "should_trigger": true,
+    "expect_skill": "swarm-orchestrator"
+  }
+]

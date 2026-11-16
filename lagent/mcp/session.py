@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import http.client
 import json
+import os
 import ssl
 import time
 from pathlib import Path
@@ -231,9 +232,13 @@ class McpSession(_BaseMcpSession):
 class HttpMcpSession(_BaseMcpSession):
     """MCP Streamable HTTP（application/json + text/event-stream）传输会话。"""
 
-    def __init__(self, name: str, cfg: ServerConfig, *, workspace: str | None, on_tools_changed: Callable[[], None] | None = None):
+    def __init__(self, name: str, cfg: ServerConfig, *, workspace: str | None,
+                 on_tools_changed: Callable[[], None] | None = None,
+                 policy: Any = None, ledger: Any = None):
         super().__init__(name, workspace=workspace, on_tools_changed=on_tools_changed)
         self.cfg = cfg
+        self.policy = policy
+        self.ledger = ledger
         self.session_id: str | None = None
         self._alive = False
         self._next = 0
@@ -293,6 +298,19 @@ class HttpMcpSession(_BaseMcpSession):
         return m.get("result")
 
     def _post_sync(self, obj: dict, timeout: float, rid: int | None) -> Any:
+        if os.environ.get("LOCALAGENT_OFFLINE") == "1":
+            h = (urlsplit(self.cfg.url).hostname or "").lower().strip("[]")
+            if h not in ("127.0.0.1", "::1", "localhost"):
+                raise McpError("MCP HTTP 请求被策略拦截: 离线模式（--offline）已禁用外部网络连接")
+        if self.policy is not None:
+            dec = self.policy.evaluate_url(self.cfg.url, purpose="mcp_http", allow_loopback=True)
+            if not dec.allowed:
+                if self.ledger is not None:
+                    self.ledger.record(
+                        url=self.cfg.url, method="POST", status=0, purpose=f"mcp:{self.name}",
+                        decision="deny", reason=dec.reason,
+                    )
+                raise McpError(f"MCP HTTP 请求被策略拦截: {dec.reason}")
         conn, path = self._open_conn(timeout)
         hdrs = {
             "Content-Type": "application/json",
@@ -305,6 +323,11 @@ class HttpMcpSession(_BaseMcpSession):
         try:
             conn.request("POST", path, body=body, headers=hdrs)
             resp = conn.getresponse()
+            if self.ledger is not None:
+                self.ledger.record(
+                    url=self.cfg.url, method="POST", status=resp.status, bytes_in=len(body),
+                    purpose=f"mcp:{self.name}", decision="allow" if resp.status < 400 else "error",
+                )
             sid = resp.getheader("Mcp-Session-Id") or resp.getheader("mcp-session-id")
             if sid:
                 self.session_id = sid

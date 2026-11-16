@@ -1,0 +1,14 @@
+[
+  {
+    "id": "sec-1",
+    "query": "帮我对新增的文件上传和下载接口做一次安全审计与漏洞排查",
+    "should_trigger": true,
+    "expect_skill": "security-review"
+  },
+  {
+    "id": "sec-2",
+    "query": "Run an OWASP security review on our authentication and API routes",
+    "should_trigger": true,
+    "expect_skill": "security-review"
+  }
+]

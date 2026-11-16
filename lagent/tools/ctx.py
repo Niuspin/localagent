@@ -27,6 +27,8 @@ class SessionState:
     swarm_id: str | None = None                         # 当前会话关联的活跃 Swarm ID
     agent_id: str = "main"                              # 当前执行主体 ID
     allowed_tools: set[str] | None = None               # Swarm 角色白名单（None 表示不限制）
+    skill_allowed_tools: set[str] | None = None         # 当前技能工具白名单（只收窄，不放宽）
+    model_tier: str = "standard"                        # 当前激活模型档位：compact / standard / large
 
 
 @dataclass
@@ -42,6 +44,7 @@ class ToolCtx:
     outputs: Any = None      # OutputStore：大输出落盘（见 outputs.py）
     artifacts: Any = None    # ArtifactStore：会话多媒体/结构化产物仓储（见 artifacts.py）
     swarms: Any = None       # SwarmManager：多代理 DAG 集群管理器（见 swarm/）
+    research: Any = None     # ResearchManager：M5 联网调研与策略/账本管理器（见 research/）
     emit: Callable[[str, dict], None] | None = None
     ask: Callable[[str, list[str]], Awaitable[str]] | None = None
     cancel: asyncio.Event | None = None

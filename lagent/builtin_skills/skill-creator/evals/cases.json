@@ -1,0 +1,14 @@
+[
+  {
+    "id": "sc-1",
+    "query": "帮我把这套接口验收流程沉淀为一个标准的新技能",
+    "should_trigger": true,
+    "expect_skill": "skill-creator"
+  },
+  {
+    "id": "sc-2",
+    "query": "Use skill creator to author a new Spec v2 SKILL.md with evals",
+    "should_trigger": true,
+    "expect_skill": "skill-creator"
+  }
+]

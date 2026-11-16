@@ -1,0 +1,14 @@
+[
+  {
+    "id": "cr-1",
+    "query": "帮我做一次代码审查，检查最近的 git diff 有没有安全或边界问题",
+    "should_trigger": true,
+    "expect_skill": "code-review"
+  },
+  {
+    "id": "cr-2",
+    "query": "Please do a thorough code review of this PR before merging",
+    "should_trigger": true,
+    "expect_skill": "code-review"
+  }
+]

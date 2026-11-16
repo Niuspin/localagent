@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16 — "Swarm & Mission"
+
 ### Added
+- **Multi-Agent Swarm Orchestration (`lagent/swarm/`)**:
+  - Added DAG task scheduling (`TaskGraph`, 4-level priority `SwarmScheduler`), 7 monotonically constrained role specs (`RoleSpec`), per-swarm hierarchical budget ledger, JSONL `Mailbox`, `FileLeaseManager`, serialized 3-way `MergeQueue` with conflict cards, `SwarmStore` crash recovery, adaptive `engine.slots="auto"` planning, Swarm inspector drawer (`web/js/swarm.js`), and `/api/swarms*` HTTP/SSE APIs.
+- **Autonomous Long-Horizon Missions (`lagent/mission/`)**:
+  - Added segmented episode runner (`Agent.run_mission_episode`), bidirectional `.localagent/missions/<id>/MISSION.md` sync, deterministic `gates.py` verification, Git branch `mission/<id>` milestone rollback, 4-tier `StallWatchdog`, `MissionPolicy` approval queues, 4D budget tracking, sleep prevention (`power.py`), `--resume-missions` crash recovery, `/mission` commands, and `/api/missions*` HTTP/SSE APIs.
+- **Sandboxed Multimodal I/O & Artifacts (`lagent/media/`, `lagent/artifacts.py`)**:
+  - Added magic-byte sniffing, `/api/capabilities` negotiation, Win32 Job Object / POSIX `rlimit` isolated ingest workers (EXIF stripping, zip/pixel bomb protection, PDF render & table extraction, Office sanitization, Parquet/CSV/JSONL sampling), SQLite `ArtifactStore`, zero-dependency SVG `make_chart`, sandboxed HTML/PDF/PPTX/table/Zip previews, `bundle_artifacts`, and `md/html/pdf` session export.
+- **Compliant Research Engine & Net Ledger (`lagent/research/`)**:
+  - Added default-off `ResearchPolicy` + `--offline` socket enforcement, RFC 9309 `RobotsCache`, `DomainLimiter` with `429/503` backoff, conditional `ETag` `WebCache`, `extract.py` injection stripping, `EvidenceStore`, `cite_check` claim verification, `NetLedger`, `PageWatchManager`, `research_*` tools, `/research` & `/net` commands, `/api/research*` & `/api/net/ledger`, and UI panels.
+- **UI Design System v2 (`web/css/`, `web/js/`)**:
+  - Refactored stylesheets into modular tokens/base/layout/components/themes (zero `transition: all`), added 6 WCAG 2.2 AA themes verified by `tests/ui_contrast.py`, local SVG sprite `web/icons/sprite.svg`, resizable splitters, Focus Mode, View Transitions, and `zh-CN`/`en` i18n.
+- **Skill Library v2 (`lagent/skills.py`, `lagent/builtin_skills/`)**:
+  - Upgraded to Spec v2 metadata, 38 built-in skills across 7 packs (12 default-enabled core skills, prompt index cap `<= 14`), hybrid keyword/glob/MIME/`local_embed` skill router, `SKILL.compact.md` profiles for small models, monotonic `allowed_tools` narrowing, SHA-256 `skills.lock`, enhanced `scan_warnings`, `python -m lagent.skills lint` CI gate, and pack-filter Skills modal.
+- **Local Runtime Observability & Release Hardening (`lagent/metrics.py`)**:
+  - Added local-only `GET /api/metrics` aggregator (`steps_per_hour`, `tokens`, `verify_pass_rate`, `stall_count`, `denied_requests`, `merge_conflict_rate`, engine telemetry) and Settings → 运行指标 panel; bumped version to `0.2.0` and updated PyInstaller spec (`packaging/localagent.spec`) and `THIRD_PARTY_LICENSES.md`.
+- **Previous Pre-0.2.0 Engine & Workbench Enhancements**:
 - **Inference Scheduling, Multi-Role Routing & KV Cache Protection**:
   - Added multi-slot scheduling (`engine.slots`, `_SlotScheduler` foreground priority queue) and `ModelRouter` (`lagent/router.py`) supporting OpenAI-compatible and Anthropic `/v1/messages` compaction endpoints plus external/local embeddings.
   - Added append-only KV prefix cache projection (`project_api_messages` & `advance_prune_watermark` in `lagent/context.py`), `llama-server` `/slots` save/restore checkpoints, keep-alive connection pooling (`lagent/net.py`), multi-GPU `--tensor-split` / `--split-mode`, `--reasoning-format` / `--reasoning-budget`, and `schema_to_gbnf()` fallback.

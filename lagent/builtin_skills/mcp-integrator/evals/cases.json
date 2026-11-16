@@ -1,0 +1,14 @@
+[
+  {
+    "id": "mcp-1",
+    "query": "外部 MCP 服务器连接失败且工具拉取为空，帮我诊断并安全集成这个 MCP 工具",
+    "should_trigger": true,
+    "expect_skill": "mcp-integrator"
+  },
+  {
+    "id": "mcp-2",
+    "query": "Diagnose MCP server handshake timeout and safely invoke its read resources",
+    "should_trigger": true,
+    "expect_skill": "mcp-integrator"
+  }
+]

@@ -1,71 +1,58 @@
-# LocalAgent
+# LocalAgent (`v0.2.0` — *"Swarm & Mission"*)
 
-**Local-first AI workspace agent powered by local `gguf` + `llama.cpp`, packaged with a standalone desktop window, Claude Code-grade workflow capabilities, frontier MoE inference optimization, and hardened security boundaries.**
+**Local-first AI workspace agent powered by local `gguf` + `llama.cpp`, packaged with a standalone desktop window, multi-agent DAG Swarm orchestration, autonomous long-horizon Missions, sandboxed multimodal I/O & Artifact previews, compliant web Research Engine, UI Design System v2, and a 38-skill Spec v2 library.**
 
-All data, sessions, SQLite memory, audit logs, and inference stay strictly on `127.0.0.1` unless you explicitly opt in to web search, web fetch, or external MCP servers.
+All sessions, SQLite memory, evidence databases, artifacts, audit logs, and inference stay strictly on `127.0.0.1` unless you explicitly enable web search, Research mode (`ask` / `allowlist` / `open`), or external MCP servers. Passing `--offline` guarantees zero outbound network connections at runtime.
 
 [![CI](https://github.com/Niuspin/localagent/actions/workflows/ci.yml/badge.svg)](https://github.com/Niuspin/localagent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
-## Key Features
+## Key Capabilities (`v0.2.0`)
 
-### Standalone Desktop UI Window
-- **Native Desktop Shell (`lagent/appwindow.py`)**: Launches in a dedicated native desktop window via `pywebview` (Edge WebView2 on Windows, WebKit on macOS, WebKitGTK on Linux), with automatic fallback to Edge/Chrome `--app=` isolated window mode or the system browser (`--browser`).
-- **Single-Instance & Clean Lifecycle (`lagent/launcher.py`)**: Closing the desktop window stops the local Starlette/uvicorn server and terminates child `llama-server` processes cleanly.
-- **100% Offline Frontend & Strict CSP**: Warm light/dark theme UI (`web/`) with zero external CDNs, fonts, or inline scripts. Includes a welcome canvas, streaming thinking blocks, diff approval cards, session search/grouping, file tree & diff drawer, and `@`/`/` popups.
+### 1. Multi-Agent Swarm Orchestration (`lagent/swarm/`)
+- **DAG Topology & Priority Scheduling**: `spawn_agent`, `swarm_plan`, `await_agents`, `agent_status`, `cancel_agent`, and `send_message` orchestrated via topological dependencies, cycle rejection, 4-level priority aging queues, and `/api/swarms*` HTTP/SSE streams.
+- **Monotonic Role Isolation & MergeQueue**: 7 role presets (`explorer`, `planner`, `coder`, `verifier`, `reviewer`, `researcher`, `summarizer`) that only narrow permissions, isolated `git worktree` authoring branches, serialized 3-way `MergeQueue` with interactive conflict resolution cards, and per-swarm token/step budgets.
 
-### Claude Code-Standard Agent Capabilities
-- **Slash Command Engine (`lagent/commands.py`)**:
-  - Instant & session commands: `/help`, `/status`, `/model`, `/cost`, `/context`, `/compact`, `/clear`, `/undo`, `/doctor`, `/permissions`, `/hooks`, `/plan [task]`, `/mode <ask|auto_edit|plan|auto>`.
-  - Prompt workflows: `/init` (generate/update `AGENTS.md`), `/review [files]` (code/security review).
-  - Custom project commands loaded from `.localagent/commands/*.md` and `.claude/commands/*.md` with `$ARGUMENTS` expansion.
-- **`@file` / `@dir` Context Mentions**: Autocomplete in the composer injects workspace files safely within sandbox boundaries.
-- **Granular Permission Rules (`lagent/permissions.py`)**: Configurable `allow` / `ask` / `deny` pattern rules over tools, paths, and commands, layered strictly beneath immutable security boundaries (`PathGuard`, hard-deny shell patterns, sensitive file blocks).
-- **Lifecycle Hooks (`lagent/hooks.py`)**: Workspace & user hooks (`PreToolUse`, `PostToolUse`, `Stop`, `UserPromptSubmit`) with safe environment sanitization.
-- **Read-Only Subagent (`delegate_task`)**: Isolated read-only exploration subagent for focused codebase analysis without polluting the main conversation.
-- **Turn Checkpoints & Rewind (`/undo`)**: Atomic journal snapshots allow rewinding workspace edits made in the last turn via `/undo` or `POST /api/sessions/{sid}/undo`.
+### 2. Autonomous Long-Horizon Missions (`lagent/mission/`)
+- **Segmented Episodes & `MISSION.md` Sync**: Runs across sessions in bounded episodes with crash recovery (`--resume-missions`), bidirectional `.localagent/missions/<id>/MISSION.md` milestone checklists, deterministic acceptance gates (`pytest` / command checks), Git branch `mission/<id>` milestone rollback, and `/mission` commands.
+- **Watchdog, Sleep Prevention & Unattended Policy**: 4-tier `StallWatchdog` (`nudge -> replan -> review -> pause`), 4-dimensional budget tracking (wall/tokens/steps/disk), quiet-hours sleep prevention, and strict allowlist queues blocking unsafe actions for human approval.
 
-### Frontier MoE & Speculative Inference Optimization
-- **Hybrid CPU+GPU MoE Planning (`lagent/inference.py`, `lagent/engine.py`)**:
-  - Automatic VRAM & KV budget analysis (`kv_budget_analysis`), `--fit on`, or explicit `--n-cpu-moe` / `--cpu-moe` / `-ot` expert offloading with `--moe-cache-mib` and `--moe-cache-cpu-share`.
-  - Automatic `--load-mode none` for hybrid CPU-MoE models when system RAM headroom permits, eliminating mmap page-fault overhead during CPU expert routing.
-- **Speculative Decoding (`spec_mode: auto | draft | ngram-mod | off`)**:
-  - Automatic matching of compatible EAGLE3 / draft `.gguf` models (`-md` + `--spec-type draft-eagle3` / `draft-simple`) when VRAM fits without spilling active layers, plus zero-VRAM `ngram-mod` fallback (`--spec-draft-n-max`, `--spec-draft-n-min`).
-- **Batching, Prefix Cache & Telemetry**:
-  - Asymmetric batch threading (`--threads-batch`), KV prefix reuse (`--cache-reuse`), MoE-aware `ubatch` scaling, and real-time `TelemetryTracker` (`prompt_tps`, `eval_tps`, `spec_accept_rate`, `cache_hit_rate`).
-- **Flag Guarding**: Every flag is checked against `llama-server --help` output before emission so older builds never fail to boot.
+### 3. Sandboxed Multimodal I/O & Artifacts (`lagent/media/`, `lagent/artifacts.py`)
+- **Subprocess-Isolated Ingestion**: Magic-byte sniffing (`sniff.py`), hardware/backend capability negotiation (`/api/capabilities`), Win32 Job Object / POSIX `rlimit` worker isolation against zip bombs/pixel bombs, EXIF stripping, PDF rendering/table extraction, Office (`docx`/`xlsx`/`pptx`) sanitization, CSV/JSONL/Parquet sampling, and optional offline Whisper transcription.
+- **Multi-Format Artifacts & Previews**: SQLite-indexed `ArtifactStore` (`GET /api/artifacts`), zero-dependency SVG `make_chart`, sandboxed HTML previews (default scripts off, `connect-src 'none'`), paginated PDF/table/PPTX previews, `bundle_artifacts` Zip export with `MANIFEST.json`, and `md/html/pdf` session exports.
 
-### Self-Validating Startup (`start.bat` & `start.sh` + `lagent/bootstrap.py`)
-- Verifies Python `>= 3.10`, creates/reuses `.venv`, and syncs `requirements.txt` via `.venv/.req.sha256` hash stamping.
-- Runs `python -m lagent.bootstrap --ensure` to detect CPU, RAM, and GPU backends (NVIDIA CUDA, AMD ROCm, Vulkan, Apple Silicon), then downloads, SHA-256 verifies, and safely extracts matching `llama.cpp` release binaries into `bin/`.
+### 4. Compliant Research Engine & Net Ledger (`lagent/research/`)
+- **Default-Off Compliance Gates**: `research.mode = "off"` by default (`ask` / `allowlist` / `open` require explicit opt-in), RFC 9309 `RobotsCache` with `Crawl-delay`, per-domain rate limiting and circuit breaking, conditional `ETag` `WebCache`, outbound credential/query guard, PII redaction, Dual-LLM untrusted reader isolation, `cite_check` claim verification, and full SQLite/CSV `NetLedger` auditability (`/api/net/ledger`).
+
+### 5. UI Design System v2 & Local Observability (`web/`, `lagent/metrics.py`)
+- **100% Offline Frontend & Strict CSP**: Modular token/component stylesheets (zero `transition: all`), 6 WCAG 2.2 AA themes (`light`, `dark`, `paper`, `midnight`, `hc`, `colorblind`), bespoke local SVG icon sprite (`web/icons/sprite.svg`), resizable side/inspector splitters, Focus Mode, View Transitions, i18n (`zh-CN` / `en`), and dedicated Swarm / Mission / Artifact / Research / Net Ledger inspector panels.
+- **Local Runtime Metrics (`GET /api/metrics`)**: Tracks `steps_per_hour`, token counts, verification pass rate, stall counts, denied tool/network requests, Swarm merge conflict rate, and live `llama-server` telemetry (`ttft_ms`, KV cache hit rate, `eval_tps`) completely offline in Settings → 运行指标.
+
+### 6. Skill Library v2 (`lagent/skills.py`, `lagent/builtin_skills/`)
+- **38 Built-in Skills Across 7 Packs** (`core`, `dev`, `research`, `office`, `media`, `ops`, `meta`) with Spec v2 bilingual metadata, `default_enabled_limit` (12 core skills active by default, hard cap `<= 14` in system prompt), hybrid keyword/glob/MIME/`local_embed` auto-routing, `SKILL.compact.md` profiles for smaller models, `allowed_tools` monotonic tightening, SHA-256 `skills.lock` verification, and CI-enforced `python -m lagent.skills lint`.
 
 ---
 
 ## Quick Start
 
 ### One-Command Launch (Recommended)
-- **Windows**: Double-click `start.bat` or run:
-  ```bat
-  start.bat
-  ```
-- **Linux / macOS**:
-  ```bash
-  ./start.sh
-  ```
+- **Windows**: `start.bat` (or double-click `LocalAgent.exe` from PyInstaller build)
+- **Linux / macOS**: `./start.sh`
 
-Both scripts automatically validate Python, set up `.venv`, verify/install dependencies, download and verify `llama.cpp` into `bin/` if missing, and open the standalone desktop UI window.
+Both launchers validate Python (`>= 3.10`), manage `.venv`, sync `requirements.txt`, probe hardware (`NVIDIA CUDA` / `AMD ROCm` / `Vulkan` / `Apple Silicon`), verify/install `llama.cpp` binaries into `bin/`, and launch the standalone desktop window.
 
-### Manual Launch & CLI Flags
+### CLI Options
 ```bash
-python run.py                     # Open standalone native desktop window (fallback: Edge/Chrome app -> browser)
+python run.py                     # Open standalone native desktop window (Edge/Chrome --app or browser fallback)
 python run.py --port 8765         # Bind specific loopback port
 python run.py --workspace ./proj  # Pre-select workspace directory
 python run.py --load              # Auto-load last configured model on startup
-python run.py --browser           # Open in system default browser instead of native window
-python run.py --no-browser        # Headless API/UI server mode (prints authenticated loopback URL)
-python run.py --version           # Print LocalAgent version
+python run.py --offline           # Enforce zero outbound network connections (socket-level block)
+python run.py --resume-missions   # Resume interrupted autonomous Missions after restart
+python run.py --no-browser        # Headless loopback server mode
+python run.py --version           # Print LocalAgent version (0.2.0)
 ```
 
 Place `.gguf` models (and optional `mmproj` / `eagle3` draft `.gguf` files) inside `models/`.
@@ -78,42 +65,23 @@ Place `.gguf` models (and optional `mmproj` / `eagle3` draft `.gguf` files) insi
 localagent/
 ├── run.py                  # Unified entry point
 ├── start.bat / start.sh    # Self-validating bootstrap & launch scripts
-├── requirements*.txt       # Runtime, dev/test, and PyInstaller build dependencies
-├── lagent/                 # Backend core package
-│   ├── appwindow.py        # Native pywebview & Edge/Chrome app-mode window shell
-│   ├── bootstrap.py        # Dependency check, hardware probe & verified llama.cpp installer
-│   ├── commands.py         # Claude Code slash commands & @file/@dir context mentions
-│   ├── config.py           # Atomic config persistence, ranges & defaults
-│   ├── context.py          # Context budgeting & auto-compaction
-│   ├── engine.py           # llama-server lifecycle, planning, flag guarding & streaming
-│   ├── gguf.py             # GGUF header parser, MoE detection & draft model pairing
-│   ├── hooks.py            # PreToolUse / PostToolUse / Stop / UserPromptSubmit hooks
-│   ├── hw.py               # CPU / RAM / GPU / VRAM detection
-│   ├── inference.py        # MoE/EAGLE3 advisor, KV budget analysis & TelemetryTracker
-│   ├── launcher.py         # Single-instance lock, stdio setup & server orchestration
-│   ├── loop.py             # Multi-step agent loop, approvals & checkpoint tracking
-│   ├── memory.py           # Persistent SQLite FTS5 long-term memory
-│   ├── permissions.py      # Granular allow/ask/deny permission rules
-│   ├── security.py         # PathGuard, sensitive file blocks, command policy, SSRF guard
-│   ├── server.py           # Starlette/ASGI HTTP & SSE API + strict CSP static serving
-│   ├── mcp/                # MCP stdio/HTTP client & tool bridge
-│   └── tools/              # File, edit, grep, search, shell, office, web & delegate_task tools
-├── web/                    # Offline static UI (index.html, app.css, js/*.js)
-├── tests/                  # Unit, integration, inference, bootstrap, Playwright UI & eval tests
-├── packaging/              # PyInstaller spec & Windows build helper
-├── docs/                   # HTTP/SSE API & real-environment testing docs
-└── .github/                # CI workflows, issue templates & PR template
+├── packaging/              # PyInstaller spec & Windows executable builder
+├── lagent/                 # Backend core package (v0.2.0)
+│   ├── swarm/              # Multi-agent DAG orchestration, MergeQueue & budgets
+│   ├── mission/            # Long-horizon Missions, Watchdog, Gates & Policy
+│   ├── media/              # Sandboxed multimodal ingest, SVG charts, preview & export
+│   ├── research/           # Compliant Research Engine, robots, limiter & NetLedger
+│   ├── builtin_skills/     # 38 Spec v2 built-in skills across 7 packs + skills.lock
+│   ├── mcp/                # MCP stdio/HTTP clients, Resources, Prompts & Roots
+│   ├── tools/              # Built-in tools (files, edit, shell, web, swarm, research, etc.)
+│   ├── metrics.py          # Local runtime observability aggregator
+│   ├── security.py         # PathGuard, AuditLog hash chains, Win32 Job / Seatbelt / bwrap
+│   └── server.py           # Starlette/ASGI HTTP & SSE API + strict CSP static serving
+├── web/                    # Offline modular UI (css/, js/, icons/, i18n/)
+├── tests/                  # Unit, integration, security, Playwright UI & eval suites
+├── docs/                   # HTTP/SSE API specification & real-env guides
+└── .github/                # CI workflows (lint, contrast, pytest, Playwright, build-exe)
 ```
-
----
-
-## Security Model
-
-- **Local-only binding & auth**: Server binds to `127.0.0.1` with a per-launch random token exchanged for an `HttpOnly` cookie, `Host` header check, and strict CSP (`default-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'`).
-- **Workspace confinement (`PathGuard`)**: Every path is normalized via `os.path.realpath` to reject traversal and symlink escapes. Sensitive files (`.env`, `.git/config`, `~/.ssh`, AWS/GCP/Azure credentials, `config.json`) are denied unconditionally.
-- **Command safety & taint tracking**: Destructive shell patterns are hard-denied; untrusted web/document content marks the session tainted so subsequent sensitive operations always require explicit approval even in `auto` mode.
-- **SSRF defense**: Rejects non-HTTP(S) schemes and redirects/resolutions into loopback, link-local, RFC1918, or cloud metadata (`169.254.169.254`) endpoints.
-- **Verified downloads**: `lagent.bootstrap` verifies SHA-256 checksums and blocks Zip Slip / symlink escapes during archive extraction.
 
 ---
 
@@ -123,21 +91,27 @@ localagent/
 # Install dev/test dependencies
 pip install -r requirements.txt -r requirements-dev.txt
 
-# Run full pytest suite (unit, inference, Claude Code features, bootstrap, MCP, E2E)
+# Validate Skill Library v2 Spec, compact budgets & skills.lock integrity
+python -m lagent.skills lint
+
+# Check WCAG 2.2 AA contrast across all 6 UI themes & CSS rules
+python tests/ui_contrast.py
+
+# Run full pytest regression suite (M0-M8, security, unit, E2E with mock llama-server)
 python -m pytest tests -q -p no:cacheprovider
 
-# Check frontend JavaScript syntax (requires Node.js)
-node --check web/js/*.js
-
-# Run Chromium Playwright UI smoke test (offline & CSP check included)
+# Run headless Chromium Playwright UI smoke test (offline & CSP check included)
 python tests/ui_smoke.py
 
-# Run real-model regression evaluation (auto-skips if no llama-server or GGUF model)
+# Check frontend JavaScript syntax (requires Node.js)
+node --check web/js/*.js web/js/i18n/*.js
+
+# Run real-model regression evaluation (auto-skips if no llama-server / GGUF present)
 python tests/eval/run_eval.py
 ```
 
 ---
 
-## License
-
-Released under the [MIT License](LICENSE).
+## License & Security
+- Licensed under the [MIT License](LICENSE). See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for bundled and optional dependencies.
+- Security boundaries and reporting guidelines are documented in [SECURITY.md](SECURITY.md).

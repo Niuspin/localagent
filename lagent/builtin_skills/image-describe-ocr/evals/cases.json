@@ -1,0 +1,26 @@
+[
+  {
+    "id": "img-1",
+    "query": "请用 OCR 提取这张报错截图里的文字并分析异常界面状态",
+    "files": [
+      "error.png"
+    ],
+    "mimes": [
+      "image/png"
+    ],
+    "should_trigger": true,
+    "expect_skill": "image-describe-ocr"
+  },
+  {
+    "id": "img-2",
+    "query": "Extract text from image scan.jpg and convert its table to Markdown",
+    "files": [
+      "scan.jpg"
+    ],
+    "mimes": [
+      "image/jpeg"
+    ],
+    "should_trigger": true,
+    "expect_skill": "image-describe-ocr"
+  }
+]

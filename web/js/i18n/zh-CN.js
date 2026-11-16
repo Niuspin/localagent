@@ -54,6 +54,14 @@
     'mission.rollback': '回滚到此点',
     'mission.md.title': 'MISSION.md（编辑后将在下一 Episode 自动生效）',
     'mission.md.save': '保存 MISSION.md',
-    'mission.detail.title': 'Mission 运行监控'
+    'mission.detail.title': 'Mission 运行监控',
+    'drawer.tab.research': '调研',
+    'drawer.tab.net': '网络账本',
+    'research.start': '开始调研',
+    'research.policy': '策略设置',
+    'research.placeholder': '输入需要多源调研与交叉验证的问题…',
+    'research.empty': '暂无调研任务。输入问题并点击「开始调研」，或使用 /research 命令。',
+    'net.empty': '暂无出站联网记录。',
+    'metrics.title': '本地运行指标（仅本地存储，绝不上传）'
   };
 })();

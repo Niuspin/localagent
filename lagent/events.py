@@ -62,6 +62,8 @@ EVENT_KINDS: tuple[str, ...] = (
     "research_query",
     "research_fetch",
     "research_blocked",
+    "research_plan",
+    "research_done",
     "artifact_created",
 )
 

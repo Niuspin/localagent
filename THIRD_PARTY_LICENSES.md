@@ -2,7 +2,7 @@
 
 LocalAgent adheres to a strict local-first, offline-bundle policy: all runtime assets and dependencies must carry permissive or compatible open-source licenses and must be inspectable offline.
 
-> Updated: `2026-11-15` (Baseline established in M0 of v0.2.0 iteration)
+> Updated: `2026-11-16` (Audited for `v0.2.0` Release in M8)
 
 ---
 
@@ -37,6 +37,21 @@ LocalAgent adheres to a strict local-first, offline-bundle policy: all runtime a
 | `pypdf` | `>=4.0,<7` | BSD-3-Clause | Fallback `.pdf` text extraction |
 | `pdfplumber` | `>=0.11,<1` | MIT | Layout- and table-aware `.pdf` extraction |
 | `reportlab` | `>=4.0,<6` | BSD-3-Clause | `.pdf` generation |
+| `pypdfium2` | optional (`>=4.0`) | Apache-2.0 / BSD-3-Clause | High-fidelity `.pdf` page rendering for Multimodal I/O |
+| `xlsxwriter` | optional (`>=3.0`) | BSD-2-Clause | Fast `.xlsx` export writing fallback |
+
+---
+
+## 2. Optional Native / Runtime Media & Code-Intel Extensions (Graceful Degradation)
+
+These binaries and libraries are optional; LocalAgent runs cleanly and degrades gracefully when absent:
+
+| Tool / Library | License | Purpose |
+|---|---|---|
+| `whisper.cpp` / `faster-whisper` | MIT | Offline speech transcription (`lagent/media/ingest`) |
+| `ffmpeg` / `ffprobe` | LGPL-2.1+ / GPL-2+ (user-provided binary) | Audio/video keyframe probing |
+| `piper` (TTS) | MIT | Optional local speech synthesis (`lagent/media/artifacts/tts.py`) |
+| `tree-sitter` | MIT | Optional multi-language AST syntax skeletal analysis (`lagent/repomap.py`) |
 
 ---
 
@@ -66,5 +81,6 @@ No external CDN requests are permitted by LocalAgent CSP (`default-src 'none'; f
 | **System CJK + Mono Typography Stack** | `web/css/tokens.css`, `web/fonts/README.md` | OS-provided system fonts | Active (M6, zero extra bundle weight) |
 | **Inter Variable** (optional offline drop-in subset) | `web/fonts/Inter-Variable.woff2` | SIL Open Font License 1.1 (OFL-1.1) | Optional slot (M6 drop-in documented in `web/fonts/README.md`) |
 | **JetBrains Mono** (optional offline drop-in subset) | `web/fonts/JetBrainsMono.woff2` | SIL Open Font License 1.1 (OFL-1.1) | Optional slot (M6 drop-in documented in `web/fonts/README.md`) |
+| **Built-in Skill Library v2** (38 skills + `skills.lock`) | `lagent/builtin_skills/` | MIT | Bundled first-party Spec v2 skills & SHA-256 lockfile |
 
 *(Whenever any new font, icon set, WASM runtime, or third-party JS library is added in M1–M8, its exact version, source URL, copyright notice, and full license text or SPDX identifier must be recorded in this file before merge.)*

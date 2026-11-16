@@ -226,3 +226,27 @@
 .art-slide-notes { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); font-size: .78em; color: var(--muted); }
 .art-md-box { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg-elev); max-height: 70vh; overflow: auto; }
 .art-pre { margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-code); max-height: 70vh; overflow: auto; font-size: .8em; }
+
+/* ---------- Research & Net Ledger (M5) ---------- */
+.res-head { margin-bottom: 8px; }
+.res-mode-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.res-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.res-task-head { border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; background: var(--bg-soft); }
+.res-task-title { font-weight: 600; font-size: .9em; }
+.res-sec { display: flex; flex-direction: column; gap: 4px; }
+.res-sq { font-size: .82em; padding: 4px 8px; border-radius: 6px; background: var(--bg-soft); border: 1px solid var(--border); }
+.res-blk-row { display: flex; gap: 8px; align-items: center; font-size: .8em; padding: 4px 8px; border-radius: 6px; background: var(--warn-soft); }
+.res-report { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg-elev); max-height: 45vh; overflow: auto; }
+.res-cite-link { display: inline; border: 0; background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 0 4px; font-family: var(--mono); font-size: .85em; cursor: pointer; }
+.res-src-card { border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; background: var(--bg-elev); display: flex; flex-direction: column; gap: 4px; transition: border-color var(--dur-2) var(--ease-standard), background-color var(--dur-2) var(--ease-standard); }
+.res-src-card.flash { border-color: var(--accent); background: var(--accent-soft); }
+.res-src-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.res-src-link { font-size: .85em; font-weight: 500; color: var(--accent); text-decoration: none; word-break: break-all; }
+.res-src-link:hover { text-decoration: underline; }
+.res-src-excerpt { font-size: .8em; color: var(--muted); line-height: 1.45; }
+.net-summary { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
+.net-list { display: flex; flex-direction: column; gap: 5px; }
+.net-row { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; background: var(--bg-elev); font-size: .8em; }
+.net-row-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.net-dom { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net-row-sub { color: var(--muted); font-size: .92em; margin-top: 2px; word-break: break-all; }

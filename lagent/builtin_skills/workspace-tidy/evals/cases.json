@@ -1,0 +1,14 @@
+[
+  {
+    "id": "wtd-1",
+    "query": "帮我整理工作区杂乱的下载目录，清理临时文件并按类型归档",
+    "should_trigger": true,
+    "expect_skill": "workspace-tidy"
+  },
+  {
+    "id": "wtd-2",
+    "query": "Organize files and clean workspace temporary artifacts safely",
+    "should_trigger": true,
+    "expect_skill": "workspace-tidy"
+  }
+]

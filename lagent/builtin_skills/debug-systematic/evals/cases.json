@@ -1,0 +1,14 @@
+[
+  {
+    "id": "ds-1",
+    "query": "进程偶现卡死且没有明显异常堆栈，帮我系统排查并定位根因",
+    "should_trigger": true,
+    "expect_skill": "debug-systematic"
+  },
+  {
+    "id": "ds-2",
+    "query": "Troubleshoot crash systematically and isolate the root cause",
+    "should_trigger": true,
+    "expect_skill": "debug-systematic"
+  }
+]

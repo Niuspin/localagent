@@ -1,0 +1,14 @@
+[
+  {
+    "id": "mp-1",
+    "query": "我要跑一个过夜自主重构任务，帮我规划 Mission 里程碑和预算护栏",
+    "should_trigger": true,
+    "expect_skill": "mission-planner"
+  },
+  {
+    "id": "mp-2",
+    "query": "Configure an autonomous mission planner schedule with milestone budgets and rollback gates",
+    "should_trigger": true,
+    "expect_skill": "mission-planner"
+  }
+]

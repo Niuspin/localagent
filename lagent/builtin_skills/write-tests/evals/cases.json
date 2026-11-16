@@ -1,0 +1,17 @@
+[
+  {
+    "id": "wt-1",
+    "query": "给新写的限流器补充单元测试和边界测试用例",
+    "should_trigger": true,
+    "expect_skill": "write-tests"
+  },
+  {
+    "id": "wt-2",
+    "query": "Write unit tests covering edge cases and failure modes in test_router.py",
+    "files": [
+      "tests/test_router.py"
+    ],
+    "should_trigger": true,
+    "expect_skill": "write-tests"
+  }
+]

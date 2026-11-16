@@ -49,6 +49,7 @@ class CommandContext:
     cfg: Any = None
     journal: Any = None
     missions: Any = None
+    research: Any = None
 
 
 BUILTIN_COMMANDS: list[dict[str, str]] = [
@@ -68,6 +69,8 @@ BUILTIN_COMMANDS: list[dict[str, str]] = [
     {"name": "hooks", "description": "查看当前配置的生命周期钩子", "kind": "builtin"},
     {"name": "doctor", "description": "诊断工作区、引擎、沙箱与环境状态", "kind": "builtin"},
     {"name": "mission", "description": "管理超长期自主任务 (/mission start|status|pause|resume|stop|budget|log|edit)", "kind": "builtin"},
+    {"name": "research", "description": "安全合规联网调研 (/research <问题> | status | stop | report)", "kind": "builtin"},
+    {"name": "net", "description": "查看网络账本与拦截摘要 (/net [domain|blocked])", "kind": "builtin"},
 ]
 
 
@@ -390,6 +393,12 @@ def dispatch_command(text: str, ctx: CommandContext) -> CommandResult | None:
     if cmd == "mission":
         return _handle_mission_command(args_str, ctx)
 
+    if cmd == "research":
+        return _handle_research_command(args_str, ctx)
+
+    if cmd == "net":
+        return _handle_net_command(args_str, ctx)
+
     # 未知命令：提示用户 /help
     return CommandResult(
         handled=True,
@@ -563,6 +572,90 @@ def _handle_mission_command(arg: str, ctx: CommandContext) -> CommandResult:
         is_prompt=False,
         text="用法: `/mission start <目标> | status | pause | resume | stop | budget | log | edit | rollback <target>`",
     )
+
+
+def _handle_research_command(arg: str, ctx: CommandContext) -> CommandResult:
+    mgr = ctx.research or (getattr(ctx.agent, "research", None) if ctx.agent else None)
+    if mgr is None:
+        return CommandResult(handled=True, is_prompt=False, text="⚠️ Research Engine 尚未初始化。")
+    raw = (arg or "").strip()
+    if not raw:
+        tasks = mgr.evidence.list_tasks(session_id=getattr(ctx.session, "id", None), limit=5)
+        if not tasks:
+            return CommandResult(handled=True, is_prompt=False, text="暂无调研任务。用法: `/research <问题>` | `/research status [id]` | `/research stop [id]` | `/research report [id]`")
+        lines = ["### 🔎 近期联网调研任务", ""]
+        for t in tasks:
+            lines.append(f"- `{t['id']}` [{t['status']}] ({t['mode']}) {t['question'][:60]}")
+        return CommandResult(handled=True, is_prompt=False, text="\n".join(lines))
+
+    parts = raw.split(maxsplit=1)
+    sub = parts[0].lower()
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in ("status", "stop", "report"):
+        rid = rest.split()[0] if rest else ""
+        if not rid:
+            tasks = mgr.evidence.list_tasks(session_id=getattr(ctx.session, "id", None), limit=1)
+            rid = tasks[0]["id"] if tasks else ""
+        if not rid:
+            return CommandResult(handled=True, is_prompt=False, text="未找到调研任务。")
+        if sub == "stop":
+            ok = mgr.stop_research(rid)
+            return CommandResult(handled=True, is_prompt=False, text=f"⏹️ 调研 `{rid}` {'已停止' if ok else '不存在'}。")
+        snap = mgr.snapshot(rid)
+        if not snap:
+            return CommandResult(handled=True, is_prompt=False, text=f"调研任务 `{rid}` 不存在。")
+        t = snap["task"]
+        if sub == "report":
+            return CommandResult(handled=True, is_prompt=False, text=t.get("report_md") or f"调研 `{rid}` 尚未生成报告（状态 `{t['status']}`）。")
+        return CommandResult(
+            handled=True,
+            is_prompt=False,
+            text=(
+                f"### 🔎 调研 `{t['id']}`\n"
+                f"- **状态**: `{t['status']}` | **模式**: `{t['mode']}` | **来源**: `{len(snap['sources'])}` | **论断**: `{len(snap['claims'])}`\n"
+                f"- **问题**: {t['question']}\n"
+                f"- **被拦截域**: `{len(t.get('blocked_domains') or {})}`"
+            ),
+        )
+
+    sid = getattr(ctx.session, "id", "") if ctx.session else ""
+    try:
+        snap = mgr.start_research(raw, session_id=sid)
+    except Exception as e:  # noqa: BLE001
+        return CommandResult(handled=True, is_prompt=False, text=f"❌ 无法启动调研: {e}")
+    t = snap["task"]
+    return CommandResult(
+        handled=True,
+        is_prompt=False,
+        text=(
+            f"### 🔎 已启动联网调研 `{t['id']}`\n"
+            f"- **问题**: {t['question']}\n"
+            f"- **模式**: `{t['mode']}` | 可在右侧「调研」面板或 `/research status {t['id']}` 查看实时进展。"
+        ),
+    )
+
+
+def _handle_net_command(arg: str, ctx: CommandContext) -> CommandResult:
+    mgr = ctx.research or (getattr(ctx.agent, "research", None) if ctx.agent else None)
+    if mgr is None:
+        return CommandResult(handled=True, is_prompt=False, text="⚠️ 网络账本尚未初始化。")
+    raw = (arg or "").strip()
+    decision = "deny" if raw == "blocked" else None
+    domain = raw if (raw and raw != "blocked") else None
+    res = mgr.ledger.query(domain=domain, decision=decision, limit=15)
+    sm = res["summary"]
+    lines = [
+        "### 🌐 网络账本摘要",
+        f"- **总请求**: `{sm['total']}` | **放行**: `{sm['allowed']}` | **拦截**: `{sm['blocked']}` | **缓存命中**: `{sm['cached']}` | **流量**: `{sm['total_bytes']} B`",
+        "",
+    ]
+    for e in res["entries"][:10]:
+        tag = "⚡缓存" if e["cached"] else e["decision"]
+        lines.append(f"- `[{tag}]` `{e['method']}` `{e['domain'] or e['url'][:40]}` ({e['status']}) {e['purpose']} {e['reason'][:60]}")
+    if not res["entries"]:
+        lines.append("- （暂无出站请求记录）")
+    return CommandResult(handled=True, is_prompt=False, text="\n".join(lines))
 
 
 # ------------------------------------------------------------------ @ 上下文文件引用解析

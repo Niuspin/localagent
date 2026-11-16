@@ -5,6 +5,7 @@ import asyncio
 import http.client
 import ipaddress
 import json
+import os
 import re
 import socket
 import ssl
@@ -179,6 +180,8 @@ def fetch_sync(url: str, *, method: str = "GET", headers: dict | None = None, da
         if sp.username or sp.password:
             raise NetError("拒绝带用户名密码的 URL")
         host = sp.hostname or ""
+        if os.environ.get("LOCALAGENT_OFFLINE") == "1" and host.lower().strip("[]") not in ("127.0.0.1", "::1", "localhost"):
+            raise NetError("离线模式（--offline）已禁用所有外部网络连接")
         port = sp.port or (443 if sp.scheme == "https" else 80)
         path = (sp.path or "/") + (("?" + sp.query) if sp.query else "")
         conn: http.client.HTTPConnection

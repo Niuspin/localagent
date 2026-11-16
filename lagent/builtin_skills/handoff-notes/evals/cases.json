@@ -1,0 +1,14 @@
+[
+  {
+    "id": "hn-1",
+    "query": "写一份会话交接文档和进度备忘，方便下次继续做",
+    "should_trigger": true,
+    "expect_skill": "handoff-notes"
+  },
+  {
+    "id": "hn-2",
+    "query": "Write handoff notes so another engineer can resume this work cleanly",
+    "should_trigger": true,
+    "expect_skill": "handoff-notes"
+  }
+]

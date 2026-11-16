@@ -1,0 +1,20 @@
+[
+  {
+    "id": "dat-1",
+    "query": "帮我分析一下 sales_2026.csv 里的月度趋势和异常订单",
+    "files": [
+      "sales_2026.csv"
+    ],
+    "should_trigger": true,
+    "expect_skill": "data-analysis"
+  },
+  {
+    "id": "dat-2",
+    "query": "Run exploratory data analysis on metrics.xlsx and summarize key trends",
+    "files": [
+      "metrics.xlsx"
+    ],
+    "should_trigger": true,
+    "expect_skill": "data-analysis"
+  }
+]

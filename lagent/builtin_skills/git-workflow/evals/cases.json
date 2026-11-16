@@ -1,0 +1,14 @@
+[
+  {
+    "id": "gw-1",
+    "query": "帮我检查 git 改动、解决合并冲突并整理规范的 git 提交",
+    "should_trigger": true,
+    "expect_skill": "git-workflow"
+  },
+  {
+    "id": "gw-2",
+    "query": "Help me resolve merge conflict cleanly following safe git workflow",
+    "should_trigger": true,
+    "expect_skill": "git-workflow"
+  }
+]

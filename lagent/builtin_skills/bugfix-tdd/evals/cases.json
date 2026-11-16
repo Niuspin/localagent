@@ -1,0 +1,14 @@
+[
+  {
+    "id": "bf-1",
+    "query": "登录超时会抛出 KeyError，帮我用 TDD 方式修复 bug 并加回归测试",
+    "should_trigger": true,
+    "expect_skill": "bugfix-tdd"
+  },
+  {
+    "id": "bf-2",
+    "query": "Fix bug where empty payloads crash the parser using a failing test first",
+    "should_trigger": true,
+    "expect_skill": "bugfix-tdd"
+  }
+]

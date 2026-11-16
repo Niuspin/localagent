@@ -28,10 +28,12 @@ from .store import MASK, McpStore, ServerConfig
 
 class McpManager:
     def __init__(self, data_dir: Path, audit: sec.AuditLog | None = None,
-                 on_change: Callable[[str, dict], None] | None = None):
+                 on_change: Callable[[str, dict], None] | None = None,
+                 research: Any = None):
         self.data_dir = Path(data_dir)
         self.audit = audit
         self._on_change = on_change
+        self.research = research
         self.store = McpStore(self.data_dir / "mcp.json", self.data_dir)
         self.sessions: dict[str, McpSession | HttpMcpSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -174,7 +176,10 @@ class McpManager:
                     pass
             try:
                 if cfg.transport == "http":
-                    s = HttpMcpSession(name, cfg, workspace=workspace if cfg.workspace else None, on_tools_changed=_notify_changed)
+                    pol = getattr(self.research, "policy", None) if self.research is not None else None
+                    ldg = getattr(self.research, "ledger", None) if self.research is not None else None
+                    s = HttpMcpSession(name, cfg, workspace=workspace if cfg.workspace else None,
+                                       on_tools_changed=_notify_changed, policy=pol, ledger=ldg)
                     await s.start()
                     self._audit("mcp_start", name, transport="http", url=cfg.url)
                 else:

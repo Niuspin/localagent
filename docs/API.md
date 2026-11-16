@@ -129,6 +129,15 @@
 - `GET /api/missions/{id}/mission-md` / `PUT /api/missions/{id}/mission-md`: 在线读取或编辑 `<workspace>/.localagent/missions/<id>/MISSION.md`；外部编辑会在下一个 Episode 启动前自动重载生效。
 - `GET /api/missions/{id}/events`: Mission 专属 SSE 事件流（支持 `Last-Event-ID` 断点续传；事件包含 `mission_started`、`episode_started`、`handoff_saved`、`milestone_done`、`gate_result`、`stall_detected`、`mission_blocked`、`budget_warn`、`mission_budget`、`mission_paused`、`mission_resumed`、`mission_rollback`、`mission_done`）。
 
+### Research Engine 与网络账本 API（`/api/research*`, `/api/net/ledger`）
+
+- `GET /api/research?session_id=...&limit=30` / `POST /api/research`: 列出或启动合规自主联网调研任务（请求体 `{"question": str, "depth"?: "quick"|"standard"|"deep", "budget"?: dict, "urls"?: list[str], "session_id"?: str}`；`research.mode=off` 或 `--offline` 时拒绝）。
+- `GET /api/research/{id}` / `GET /api/research/{id}/events`: 获取调研快照（含子问题、来源、论断、待批域名与报告）或订阅 SSE 实时事件流。
+- `GET /api/research/{id}/evidence`: 读取 SQLite 证据库完整来源与交叉验证论断清单。
+- `POST /api/research/{id}/stop` / `POST /api/research/{id}/approve-domain`: 停止调研任务或在 `ask` 模式下批准指定新域名。
+- `GET|PUT /api/research/policy`: 查看或更新 `research.*` 策略配置与 `search.html_scrapers_ack`（禁止非 `allowlist` 模式关闭 `respect_robots` 或伪装浏览器/爬虫 UA）。
+- `GET /api/net/ledger?domain=...&decision=...&agent_id=...&research_id=...&q=...&limit=200&format=json|csv`: 查询或导出出站网络账本与策略拦截记录。
+
 ---
 
 ## MCP 生态、Model Hub、记忆、技能与系统控制
@@ -137,6 +146,6 @@
 - **MCP Resources / Prompts**: `GET /api/mcp/{name}/resources`、`POST /api/mcp/{name}/resources/read`、`GET /api/mcp/{name}/prompts`、`POST /api/mcp/{name}/prompts/get`。
 - **Model Hub (`/api/hub/recommend`, `/api/hub/downloads`, `/api/hub/download`, `/api/hub/downloads/{tid}/cancel`)**: 硬件显存/内存自适应推荐、官方/国内镜像（`hf-mirror`）切换、HTTP `Range` 断点续传与 SHA-256 校验（离线模式严格拦截）。
 - **记忆 (`/api/memory`, `/api/memory/export`, `/api/memory/import`, `/api/memory/{mid}`, `/api/memory/{mid}/approve`)**: SQLite FTS5 + `mem_vectors` 混合向量 RRF 检索与污染记忆人工审批。
-- **技能 (`/api/skills`, `/api/skills/install`, `/api/skills/create`, `/api/skills/{name}`, `/api/skills/{name}/enable`)**: 本地及内置技能包管理。
-- **审计与检索自测 (`GET /api/audit`, `GET /api/audit/verify`, `POST /api/search/test`)**: 哈希链防篡改日志校验及联网搜索引擎连通性测试。
+- **技能 (`/api/skills`, `/api/skills/packs`, `/api/skills/pack`, `/api/skills/lint`, `/api/skills/route`, `/api/skills/install`, `/api/skills/create`, `/api/skills/{name}`, `/api/skills/{name}/enable`)**: Spec v2 内置技能包与自定义技能管理：`/api/skills` 返回 `pack`/`tags`/`risk`/`version`/`description_en`/`allowed_tools` 等元数据；`/api/skills/packs` 返回 7 大技能包统计与 `skills.lock` SHA-256 校验状态；`/api/skills/pack`（`{"pack": str, "enabled": bool}`）按包批量启停；`/api/skills/route`（`{"text": str, "files"?: list, "mimes"?: list, "top_k"?: int}`）执行自动路由匹配；`/api/skills/lint` 运行规范与完整性检查。
+- **审计、指标与检索自测 (`GET /api/audit`, `GET /api/audit/verify`, `GET /api/metrics`, `POST /api/search/test`)**: 哈希链防篡改日志校验、纯本机运行可观测指标汇总（`steps_per_hour`、`tokens`、`verify_pass_rate`、`stall_count`、`denied_requests`、`merge_conflict_rate`、引擎遥测与 `skills.lock` 状态）及联网搜索引擎连通性测试。
 - **应用退出 (`POST /api/app/quit`)**: 安全停止 `llama-server` 并退出本地桌面应用或服务进程。

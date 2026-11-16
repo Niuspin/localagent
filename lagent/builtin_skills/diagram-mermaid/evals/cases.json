@@ -1,0 +1,14 @@
+[
+  {
+    "id": "dm-1",
+    "query": "根据代码调用关系用 Mermaid 画一张系统架构图和请求时序图",
+    "should_trigger": true,
+    "expect_skill": "diagram-mermaid"
+  },
+  {
+    "id": "dm-2",
+    "query": "Draw a clean Mermaid sequence diagram and flowchart for auth flow",
+    "should_trigger": true,
+    "expect_skill": "diagram-mermaid"
+  }
+]

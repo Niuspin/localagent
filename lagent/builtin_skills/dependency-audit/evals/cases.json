@@ -1,0 +1,20 @@
+[
+  {
+    "id": "da-1",
+    "query": "审计一下项目的 requirements.txt 有没有依赖冲突和多余依赖",
+    "files": [
+      "requirements.txt"
+    ],
+    "should_trigger": true,
+    "expect_skill": "dependency-audit"
+  },
+  {
+    "id": "da-2",
+    "query": "Perform a dependency audit on package.json before releasing",
+    "files": [
+      "package.json"
+    ],
+    "should_trigger": true,
+    "expect_skill": "dependency-audit"
+  }
+]

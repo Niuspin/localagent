@@ -1,0 +1,18 @@
+[
+  {
+    "id": "lr-1",
+    "query": "把工作区里这 4 篇 RAG 论文整理成一份文献综述和对比矩阵",
+    "files": [
+      "paper1.pdf",
+      "paper2.pdf"
+    ],
+    "should_trigger": true,
+    "expect_skill": "literature-review"
+  },
+  {
+    "id": "lr-2",
+    "query": "Write a literature review comparing the methodologies across these papers",
+    "should_trigger": true,
+    "expect_skill": "literature-review"
+  }
+]

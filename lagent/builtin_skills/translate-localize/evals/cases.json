@@ -1,0 +1,14 @@
+[
+  {
+    "id": "tl-1",
+    "query": "把这份英文用户手册翻译成地道中文并做本地化润色，附术语对照表",
+    "should_trigger": true,
+    "expect_skill": "translate-localize"
+  },
+  {
+    "id": "tl-2",
+    "query": "Translate to English and localize our release notes while preserving markdown",
+    "should_trigger": true,
+    "expect_skill": "translate-localize"
+  }
+]

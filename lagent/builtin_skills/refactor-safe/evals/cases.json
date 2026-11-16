@@ -1,0 +1,14 @@
+[
+  {
+    "id": "rs-1",
+    "query": "这段解析逻辑有两处重复代码，帮我安全重构并抽取公共函数",
+    "should_trigger": true,
+    "expect_skill": "refactor-safe"
+  },
+  {
+    "id": "rs-2",
+    "query": "Refactor this oversized handler into clean helpers without breaking existing callers",
+    "should_trigger": true,
+    "expect_skill": "refactor-safe"
+  }
+]

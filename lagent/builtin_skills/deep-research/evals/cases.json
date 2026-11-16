@@ -1,0 +1,14 @@
+[
+  {
+    "id": "dr-1",
+    "query": "帮我联网深度调研一下 2026 年本地推理引擎 llama.cpp 与 vLLM 的最新进展并给出引文",
+    "should_trigger": true,
+    "expect_skill": "deep-research"
+  },
+  {
+    "id": "dr-2",
+    "query": "Run deep research comparing local embedding models with verified citations",
+    "should_trigger": true,
+    "expect_skill": "deep-research"
+  }
+]

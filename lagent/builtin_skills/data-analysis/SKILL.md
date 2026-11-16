@@ -1,11 +1,35 @@
 ---
 name: data-analysis
-description: 分析 CSV/Excel 等表格数据：清洗、统计、汇总并输出新表格或图表说明。用户给了数据文件并要“分析/汇总/找规律/做透视”时使用。
+description: "分析 CSV/Excel/JSON 表格数据：检查脏数据、用 Python 精确计算指标并产出汇总表与关键业务洞察。"
+description_en: "Perform reproducible exploratory analysis, cleaning, aggregation, and reporting on CSV/Excel/JSON datasets."
+version: "1.0.0"
+pack: office
+default_enabled: true
+tags: ["csv", "excel", "statistics", "pandas", "eda"]
+when_to_use: "用户提供或工作区存在 `.csv` / `.xlsx` / 数据表并要求清洗、统计、透视或找规律时使用。"
+triggers:
+  keywords: ["数据分析", "分析数据", "数据清洗", "数据透视", "统计规律", "csv分析", "data analysis", "analyze dataset", "exploratory analysis"]
+  globs: ["*.csv", "*.tsv", "*.xlsx", "*.xls", "*.parquet"]
+  mimes: ["text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]
+requires:
+  tools: ["read_file", "run_command", "write_spreadsheet"]
+  capabilities: ["office"]
+  binaries: []
+  python: []
+risk: write
+profiles:
+  compact: "SKILL.compact.md"
+license: "MIT"
 ---
-# 数据分析
 
-1. **先看数据**：`read_file` 读表头和前几十行，弄清每列含义、类型、缺失值和异常值。把观察到的问题先告诉用户。
-2. **不要心算**：求和、均值、占比、排序、分组等一律用 `run_command` 运行 Python（pandas 不可用时用标准库 csv/statistics）计算，把脚本放在工作区 `scratch/` 下，便于复查。
-3. **保留原件**：永远不要覆盖原始数据文件；结果写入新文件（`write_spreadsheet` 或 CSV）。
-4. **汇报**：先给 3~5 条关键发现，再给方法（过滤条件、口径、剔除了多少行），最后列出结果文件位置。
-5. 有歧义的口径（如“销售额含不含税”）要明确写出你采用的假设。
+# 可复现数据分析（v2）
+
+可读取 `references/checklist.md` 核对数据质量检查项。
+
+1. **先探查再算数**：用 `read_file` 看样本行与字段名，检查编码、日期格式、缺失值、重复主键及极端异常值，并先向用户提示明显数据瑕疵。
+2. **禁止心算**：所有求和、均值、中位数、同比/环比、分组透视和相关性一律在工作区 `scratch/` 编写干净 Python 脚本通过 `run_command` 运行（优先用 `pandas`/`numpy` 或标准库 `csv`/`statistics`），保证完全可复现。
+3. **只读原始文件**：绝不覆盖原始 CSV/Excel；清洗表与透视结果输出到 `output/`（CSV 或用 `write_spreadsheet` 生成多 Sheet Excel）。
+4. **透明口径与汇报**：
+   - 先列 3~5 条可操作核心发现（带具体数字、样本量与单位）；
+   - 写明数据清洗规则（剔除了多少空行/异常行、歧义口径采用了什么假设）；
+   - 附上输出产物与分析脚本路径。

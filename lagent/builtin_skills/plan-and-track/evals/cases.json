@@ -1,0 +1,14 @@
+[
+  {
+    "id": "pt-1",
+    "query": "帮我制定分步骤实施计划并拆解任务来重构认证模块",
+    "should_trigger": true,
+    "expect_skill": "plan-and-track"
+  },
+  {
+    "id": "pt-2",
+    "query": "Create a task breakdown and roadmap for migrating the database",
+    "should_trigger": true,
+    "expect_skill": "plan-and-track"
+  }
+]

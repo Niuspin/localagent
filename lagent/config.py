@@ -224,6 +224,17 @@ def _tensor_split(path: str, v: Any) -> str:
     return ",".join(cleaned)
 
 
+def _research_user_agent(path: str, v: Any) -> str:
+    if not isinstance(v, str):
+        raise _bad(path, v, "(需要字符串)")
+    ua = v.strip()[:200]
+    if not ua:
+        return DEFAULTS["research"]["user_agent"]
+    if re.search(r"\b(mozilla|chrome|safari|firefox|edg|edge|opera|googlebot|bingbot|baiduspider|duckduckbot|slurp|gptbot|bytespider|claudebot)\b", ua, re.I):
+        raise _bad(path, v, "(不允许伪装成浏览器或第三方搜索引擎爬虫)")
+    return ua
+
+
 SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "engine.ctx": _auto_int(2048, 4_194_304),
     "engine.slots": _auto_int(1, 8),
@@ -247,6 +258,7 @@ SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "search.safe": _enum("off", "moderate", "strict"),
     "search.providers": _providers,
     "research.mode": _enum("off", "ask", "allowlist", "open"),
+    "research.user_agent": _research_user_agent,
     "research.allow_domains": _str_list,
     "research.deny_domains": _str_list,
     "research.deny_categories": _str_list,
@@ -428,6 +440,8 @@ class Config:
                     else:
                         new_secrets["swarm_worker_api_key"] = val.strip()
             _merge(new, clean_partial)
+            if not new.get("research", {}).get("respect_robots", True) and new.get("research", {}).get("mode") != "allowlist":
+                raise ValueError("仅在 research.mode=allowlist（用户自有域名）时才允许关闭 respect_robots")
             keys = (partial.get("search") or {}).get("keys") if isinstance(partial.get("search"), dict) else None
             if keys is not None:
                 if not isinstance(keys, dict):

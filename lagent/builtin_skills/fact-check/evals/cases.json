@@ -1,0 +1,14 @@
+[
+  {
+    "id": "fc-1",
+    "query": "帮我对这段新闻里提到的三个性能数据和发布时间做事实核查",
+    "should_trigger": true,
+    "expect_skill": "fact-check"
+  },
+  {
+    "id": "fc-2",
+    "query": "Fact check these claims and verify each statistic with primary sources",
+    "should_trigger": true,
+    "expect_skill": "fact-check"
+  }
+]

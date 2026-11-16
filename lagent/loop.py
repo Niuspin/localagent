@@ -36,7 +36,7 @@ from .journal import Journal
 from .permissions import PermissionManager
 from .router import ModelRouter
 from .sessions import Session, SessionStore
-from .tools import agentic, files, jobs, media_out, office, search, swarm_tools, web  # noqa: F401  (导入即注册)
+from .tools import agentic, files, jobs, media_out, office, research_tools, search, swarm_tools, web  # noqa: F401  (导入即注册)
 from .tools.base import TOOLS, Tool, ToolResult, clip, coerce_args, repair_json
 from .tools.ctx import SessionState, ToolCtx
 from .tools.files import rewind_to_turn
@@ -186,13 +186,14 @@ def make_title(text: str, files_: list[str]) -> str:
 class Agent:
     def __init__(self, *, cfg: Config, engine: Engine, store: SessionStore, journal: Journal, audit: sec.AuditLog,
                  memory: Any, skills: Any, protected: list[Path], hidden: list[Path], notify: Any = None, mcp: Any = None,
-                 outputs: Any = None, artifacts: Any = None, swarms: Any = None, missions: Any = None):
+                 outputs: Any = None, artifacts: Any = None, swarms: Any = None, missions: Any = None, research: Any = None):
         self.cfg, self.engine, self.store, self.journal, self.audit = cfg, engine, store, journal, audit
         self.memory, self.skills, self.mcp = memory, skills, mcp
         self.outputs = outputs                                # OutputStore | None：大输出落盘（见 outputs.py）
         self.artifacts = artifacts                            # ArtifactStore | None：多媒体与结构化产物仓储（见 artifacts.py）
         self.swarms = swarms                                  # SwarmManager | None：多代理 DAG 集群管理器（见 swarm/）
         self.missions = missions                              # MissionManager | None：超长期 Mission 运行时（见 mission/）
+        self.research = research                              # ResearchManager | None：M5 联网调研与策略/账本管理器
         self.protected, self.hidden = protected, hidden
         self.runs: dict[str, Run] = {}
         self.allow_keys: dict[str, set[str]] = {}
@@ -302,7 +303,8 @@ class Agent:
             "## 记忆与技能\n"
             "- <memory> 是自动召回的用户记忆（可能不完整）。用户要求“记住…”，或发现稳定的偏好/项目约定时，用 memory_save 保存（一条一个要点）。",
         ]
-        idx = self.skills.index_text() if self.skills else ""
+        limit = self.cfg.get("skills", "default_enabled_limit", default=14)
+        idx = self.skills.index_text(limit=limit) if self.skills else ""
         if idx:
             p.append("- 可用技能（任务匹配时先 use_skill 加载完整说明）:\n" + idx)
         if mode == "plan":
@@ -318,6 +320,19 @@ class Agent:
         if sess.summary:
             s += "\n\n## 此前对话的摘要（早期内容已被压缩）\n" + sess.summary
         return s
+
+    @staticmethod
+    def _eff_allowed(
+        role_allowed: set[str] | frozenset[str] | None,
+        skill_allowed: set[str] | frozenset[str] | None,
+    ) -> set[str] | None:
+        if role_allowed is None and skill_allowed is None:
+            return None
+        if role_allowed is None:
+            return set(skill_allowed)  # type: ignore[arg-type]
+        if skill_allowed is None:
+            return set(role_allowed)
+        return set(role_allowed) & set(skill_allowed)
 
     def tools_for(
         self,
@@ -394,7 +409,7 @@ class Agent:
                     return
 
             # 2. 斜杠命令处理
-            cmd_ctx = CommandContext(agent=self, session=sess, workspace=ws, cfg=cfg, journal=self.journal, missions=self.missions)
+            cmd_ctx = CommandContext(agent=self, session=sess, workspace=ws, cfg=cfg, journal=self.journal, missions=self.missions, research=self.research)
             cmd_res = dispatch_command(text, cmd_ctx)
             if cmd_res and cmd_res.handled:
                 if not cmd_res.is_prompt:
@@ -473,8 +488,20 @@ class Agent:
             sess.updated = time.time()
             self.store.save(sess)
             stats = run.stats.nonzero()
-            if stats:
-                self.audit.append(event="run_stats", session=sess.id, status=status, friction=run.stats.friction, **stats, **self._audit_ctx(run))
+            u_turn = ui_ast.get("usage") or {}
+            pt = int(u_turn.get("prompt_tokens") or 0)
+            ct = int(u_turn.get("completion_tokens") or 0)
+            if stats or pt or ct:
+                self.audit.append(
+                    event="run_stats",
+                    session=sess.id,
+                    status=status,
+                    friction=run.stats.friction,
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                    **stats,
+                    **self._audit_ctx(run),
+                )
             run.emit("run_end", {"status": status, **({"error": err} if err else {}), **({"stats": stats} if stats else {})})
             await run.finish()
 
@@ -534,7 +561,7 @@ class Agent:
                 return "（用户未回答）"
         ctx = ToolCtx(cfg=self.cfg, guard=guard, journal=self.journal, session=st, audit=self.audit, vision=self.engine.vision,
                        memory=self.memory, skills=self.skills, outputs=self.outputs, artifacts=self.artifacts, swarms=self.swarms,
-                       emit=run.emit, ask=ask, cancel=run.cancel_evt,
+                       research=self.research, emit=run.emit, ask=ask, cancel=run.cancel_evt,
                        sandbox_kind=sec.sandbox_info()["kind"])
         ctx.agent = self
         ctx.run = run
@@ -548,6 +575,7 @@ class Agent:
 
         parts = text
         images_eff = list(images or [])
+        ingested_mimes: list[str] = []
         if files_:
             plain_files: list[str] = []
             rich_exts = IMG_EXT | OFFICE_EXT | RICH_MEDIA_EXT
@@ -557,6 +585,8 @@ class Agent:
                     try:
                         p = ctx.guard.resolve(f, write=False)
                         res = await ingest_file_async(p, cfg=self.cfg, engine=self.engine)
+                        if res.mime:
+                            ingested_mimes.append(res.mime)
                         summary = res.render_summary(max_chars=3500)
                         if not ctx.session.tainted:
                             ctx.session.tainted = True
@@ -576,12 +606,32 @@ class Agent:
             if plain_files:
                 parts += "\n\n[用户上传的文件（在工作区内，可用 read_file 读取）]\n" + "\n".join(f"- {f}" for f in plain_files)
         images = images_eff
+        ctx.session.skill_allowed_tools = None
+        ctx.session.model_tier = self.engine.tuned().tier
         for name in skills_:
             try:
-                body, _meta = self.skills.load_for_model(name, ctx.guard.ws if sess.workspace else None)
+                try:
+                    body, _meta = self.skills.load_for_model(
+                        name, ctx.guard.ws if sess.workspace else None, tier=ctx.session.model_tier
+                    )
+                except TypeError:
+                    body, _meta = self.skills.load_for_model(name, ctx.guard.ws if sess.workspace else None)
                 parts += f"\n\n<skill name=\"{name}\">\n{body}\n</skill>\n（用户显式选择了上面的技能，请按其指引工作）"
+                allowed = _meta.get("allowed_tools") if isinstance(_meta, dict) else None
+                if allowed:
+                    aset = set(allowed)
+                    cur = ctx.session.skill_allowed_tools
+                    ctx.session.skill_allowed_tools = aset if cur is None else (cur & aset)
             except (KeyError, AttributeError):
                 parts += f"\n\n（技能 {name} 不可用）"
+        if self.skills and self.cfg.get("skills", "auto_route", default=True) and text.strip():
+            try:
+                routed = [r for r in self.skills.route(text, files=files_, mimes=ingested_mimes, top_k=3) if r["name"] not in skills_]
+                if routed:
+                    hints = "；".join(f"{r['name']}（{'/'.join(r['reasons'])}）" for r in routed)
+                    parts += f"\n\n[技能路由器建议（任务匹配，按需调用 use_skill 加载）: {hints}]"
+            except Exception:  # noqa: BLE001
+                pass
         if self.memory and self.cfg.get("agent", "memory_auto_recall", default=True):
             k = self.engine.tuned().recall_k
             qvec = None
@@ -654,7 +704,8 @@ class Agent:
             ws = sess.workspace or cfg.get("workspace", default="")
             if self.outputs is not None and "outputs" not in st.tool_groups and any((m.get("_pruned") or i < getattr(sess, "kv_prune_upto", 0)) and m.get("_out") for i, m in enumerate(sess.history)):
                 self._ensure_outputs_group(sess, st)       # 历史里已有“可取回”的占位（上一轮或更早精简的）
-            tools = self.tools_for(mode, bool(ws), st.tool_groups, getattr(st, "allowed_tools", None))
+            eff_allowed = self._eff_allowed(getattr(st, "allowed_tools", None), getattr(st, "skill_allowed_tools", None))
+            tools = self.tools_for(mode, bool(ws), st.tool_groups, eff_allowed)
             schemas = [t.schema() for t in tools]
             await self.engine.ensure_ready()
             ctx.vision = self.engine.vision
@@ -938,7 +989,8 @@ class Agent:
             finish("error", f"未知工具 {name}")
             ws_now = sess.workspace or self.cfg.get("workspace", default="")
             mode_now = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else self._session_mode(sess)
-            avail = [t.name for t in self.tools_for(mode_now, bool(ws_now), st.tool_groups, getattr(st, "allowed_tools", None))]
+            eff_allowed = self._eff_allowed(getattr(st, "allowed_tools", None), getattr(st, "skill_allowed_tools", None))
+            avail = [t.name for t in self.tools_for(mode_now, bool(ws_now), st.tool_groups, eff_allowed)]
             near = toolcall.suggest(name, avail)
             return (f"错误: 没有名为 {name} 的工具。" + (f"你是不是想用 {' / '.join(near)}？" if near else "")
                     + f"当前可用工具: {', '.join(avail)}（其余低频工具用 load_tools 加载）"), []
@@ -955,6 +1007,14 @@ class Agent:
             msg = f"当前代理角色不允许使用工具 {name}。"
             finish("denied", msg)
             self.audit.append(event="denied", session=sess.id, tool=name, reason="role_allowed_tools", **self._audit_ctx(run))
+            return f"拒绝: {msg}", []
+        skill_allowed = getattr(st, "skill_allowed_tools", None)
+        if skill_allowed is not None and name not in skill_allowed:
+            blk["title"] = tool.describe(args if isinstance(args, dict) else {})
+            run.emit("tool_start", {"id": tid, "name": name, "title": blk["title"], "args": args, "risk": "high"})
+            msg = f"当前技能的 allowed_tools 白名单不允许使用工具 {name}。"
+            finish("denied", msg)
+            self.audit.append(event="denied", session=sess.id, tool=name, reason="skill_allowed_tools", **self._audit_ctx(run))
             return f"拒绝: {msg}", []
         g = toolset.group_of(name)
         if g and g not in st.tool_groups:      # 模型直接调用了未列出的扩展工具：放行并把整组加载进后续请求
@@ -1022,6 +1082,13 @@ class Agent:
         if eff_kind == "net_fetch":
             u = urlsplit(args.get("url", "") if "://" in args.get("url", "") else "https://" + args.get("url", ""))
             domain_ok = (net.domain_of(u.geturl()) in st.user_domains) and len(u.query) <= 200 and not u.username
+            if self.research is not None:
+                pdec = self.research.policy.evaluate_url(u.geturl(), purpose="web_fetch", approved_domains=st.user_domains)
+                if pdec.action == "deny":
+                    finish("denied", pdec.reason)
+                    return f"拒绝: {pdec.reason}", []
+                if pdec.action == "ask":
+                    domain_ok = False
         sandboxed = call_ctx.sandbox_kind != "none" and self.cfg.get("security", "command_sandbox", default="auto") == "auto"
         if eff_kind == "mcp":      # MCP 服务器是否“被隔离”看它自己的沙箱与联网设置，而不是命令沙箱
             sandboxed = bool(self.mcp is not None and self.mcp.contained(str(tool.extra.get("server", ""))))

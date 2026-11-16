@@ -1,0 +1,14 @@
+[
+  {
+    "id": "se-1",
+    "query": "评估这几篇性能评测文章的来源可信度和利益相关性，看看哪篇可采信",
+    "should_trigger": true,
+    "expect_skill": "source-evaluation"
+  },
+  {
+    "id": "se-2",
+    "query": "Perform a source evaluation to assess credibility and bias of these references",
+    "should_trigger": true,
+    "expect_skill": "source-evaluation"
+  }
+]

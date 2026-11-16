@@ -198,6 +198,7 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
 .list-row .warns { color: var(--warn); font-size: .8em; margin-top: 3px; }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0 10px; }
 .tabs2 { display: flex; gap: 4px; margin: 4px 0 8px; }
+.tabs2.pack-tabs { flex-wrap: wrap; margin-top: 8px; }
 .tabs2 button { padding: 4px 12px; border-radius: var(--radius-pill); color: var(--muted); border: 1px solid transparent; font-size: .9em; }
 .tabs2 button.on { background: var(--bg-user); color: var(--text); font-weight: 500; }
 .mem-text { white-space: pre-wrap; word-break: break-word; line-height: 1.5; font-size: .92em; }
@@ -269,3 +270,9 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
 }
 .toast.err { background: var(--danger); color: #fff; }
 .toast.ok { background: var(--ok); color: var(--accent-fg); }
+
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 10px 0 14px; }
+.metric-card { padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-elev); }
+.metric-lbl { font-size: .8em; color: var(--muted); margin-bottom: 4px; }
+.metric-val { font-size: 1.35em; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.metric-sub { font-size: .78em; color: var(--muted); margin-top: 4px; }

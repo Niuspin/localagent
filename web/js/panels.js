@@ -82,6 +82,16 @@
     previewing = null;
     P.toggleDrawer(true);
   };
+  P.openResearch = function () {
+    dtab = 'research';
+    previewing = null;
+    P.toggleDrawer(true);
+  };
+  P.openNet = function () {
+    dtab = 'net';
+    previewing = null;
+    P.toggleDrawer(true);
+  };
   P.openArtifact = function (aid) {
     dtab = 'artifacts';
     previewing = null;
@@ -95,15 +105,19 @@
     LA.$('#btnDrawer').classList.toggle('on', LA.S.drawerOpen);
     try { localStorage.setItem('la.drawer', LA.S.drawerOpen ? '1' : '0'); } catch (e) {}
     if (LA.S.drawerOpen) renderDrawer();
-    else if (LA.swarmPanel && LA.swarmPanel.close) LA.swarmPanel.close();
+    else {
+      if (LA.swarmPanel && LA.swarmPanel.close) LA.swarmPanel.close();
+      if (LA.researchPanel && LA.researchPanel.close) LA.researchPanel.close();
+    }
   };
   function renderDrawer() {
     if (LA.swarmPanel && LA.swarmPanel.close && dtab !== 'swarm') LA.swarmPanel.close();
     if (LA.missionPanel && LA.missionPanel.close && dtab !== 'mission') LA.missionPanel.close();
+    if (LA.researchPanel && LA.researchPanel.close && dtab !== 'research') LA.researchPanel.close();
     if (LA.artifacts && LA.artifacts.close && dtab !== 'artifacts') LA.artifacts.close();
     LA.clear(drawer);
     var tabs = el('div', { class: 'dr-tabs' });
-    [['files', LA.t('drawer.tab.files', '文件')], ['changes', LA.t('drawer.tab.changes', '变更')], ['artifacts', LA.t('drawer.tab.artifacts', '产物')], ['tasks', LA.t('drawer.tab.tasks', '任务')], ['swarm', LA.t('drawer.tab.swarm', '集群')], ['mission', LA.t('drawer.tab.mission', '任务线')]].forEach(function (t) {
+    [['files', LA.t('drawer.tab.files', '文件')], ['changes', LA.t('drawer.tab.changes', '变更')], ['artifacts', LA.t('drawer.tab.artifacts', '产物')], ['tasks', LA.t('drawer.tab.tasks', '任务')], ['swarm', LA.t('drawer.tab.swarm', '集群')], ['mission', LA.t('drawer.tab.mission', '任务线')], ['research', LA.t('drawer.tab.research', '调研')], ['net', LA.t('drawer.tab.net', '网络账本')]].forEach(function (t) {
       tabs.appendChild(el('button', { class: 'dr-tab' + (dtab === t[0] ? ' on' : ''), type: 'button', text: t[1], on: { click: function () {
         var go = function () {
           dtab = t[0]; previewing = null;
@@ -123,6 +137,8 @@
     else if (dtab === 'artifacts' && LA.artifacts) LA.artifacts.renderPanel(drawBody);
     else if (dtab === 'swarm' && LA.swarmPanel) LA.swarmPanel.render(drawBody);
     else if (dtab === 'mission' && LA.missionPanel) LA.missionPanel.renderDrawer(drawBody);
+    else if (dtab === 'research' && LA.researchPanel) LA.researchPanel.renderResearch(drawBody);
+    else if (dtab === 'net' && LA.researchPanel) LA.researchPanel.renderNetLedger(drawBody);
     else drawTasks();
   }
 
@@ -330,23 +346,77 @@
   }
 
   /* ================================================================ 技能 */
+  var PACK_NAMES = { core: '核心', dev: '开发', research: '研究', office: '办公', media: '媒体', ops: '运维', meta: '元技能', custom: '自定义' };
+  var RISK_CLS = { read: '', write: 'warn', network: 'danger' };
   P.openSkills = function () {
-    var listBox = el('div'), m;
+    var listBox = el('div'), packTabs = el('div', { class: 'tabs2 pack-tabs' }), lockBar = el('div', { class: 'hint2', style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap', marginTop: '6px' } });
+    var curPack = 'all', cachedPacks = [];
     var fileInp = el('input', { type: 'file', accept: '.zip', hidden: true });
+    function renderTabs() {
+      LA.clear(packTabs);
+      var totalEn = LA.S.skills ? LA.S.skills.filter(function (x) { return x.enabled; }).length : 0;
+      var totalAll = LA.S.skills ? LA.S.skills.length : 0;
+      packTabs.appendChild(el('button', {
+        class: curPack === 'all' ? 'on' : '', type: 'button',
+        text: '全部 (' + totalEn + '/' + totalAll + ')',
+        on: { click: function () { curPack = 'all'; load(); } }
+      }));
+      cachedPacks.forEach(function (pk) {
+        if (!pk.total && pk.id === 'custom') return;
+        packTabs.appendChild(el('button', {
+          class: curPack === pk.id ? 'on' : '', type: 'button',
+          text: (PACK_NAMES[pk.id] || pk.label || pk.id) + ' (' + pk.enabled + '/' + pk.total + ')',
+          on: { click: function () { curPack = pk.id; load(); } }
+        }));
+      });
+    }
+    function renderLockAndBatch(lockInfo) {
+      LA.clear(lockBar);
+      var lockBadge = lockInfo && lockInfo.ok
+        ? el('span', { class: 'badge vis', text: 'skills.lock 校验通过 (' + (lockInfo.verified || 0) + ')' })
+        : el('span', { class: 'badge warn', text: 'skills.lock 异常/缺失' });
+      lockBar.appendChild(lockBadge);
+      if (curPack !== 'all') {
+        var pk = cachedPacks.filter(function (x) { return x.id === curPack; })[0];
+        if (pk && pk.total > 0) {
+          var box = el('span', { style: { display: 'inline-flex', gap: '6px' } },
+            btn('启用整包', function () {
+              LA.post('/api/skills/pack', { pack: curPack, enabled: true }).then(load).catch(LA.fail);
+            }, 'sm'),
+            btn('停用整包', function () {
+              LA.post('/api/skills/pack', { pack: curPack, enabled: false }).then(load).catch(LA.fail);
+            }, 'sm'));
+          lockBar.appendChild(box);
+        }
+      }
+    }
     function load() {
-      LA.refreshSkills().then(function (l) {
+      Promise.all([LA.refreshSkills(), LA.get('/api/skills/packs').catch(function () { return { packs: [], lock: null }; })]).then(function (res) {
+        var l = res[0] || [], meta = res[1] || {};
+        cachedPacks = meta.packs || [];
+        renderTabs();
+        renderLockAndBatch(meta.lock);
         LA.clear(listBox);
-        if (!l.length) listBox.appendChild(el('div', { class: 'dr-empty', text: '还没有安装任何技能' }));
-        l.forEach(function (s) {
+        var filtered = curPack === 'all' ? l : l.filter(function (s) { return (s.pack || 'custom') === curPack; });
+        if (!filtered.length) listBox.appendChild(el('div', { class: 'dr-empty', text: '当前分类下没有技能' }));
+        filtered.forEach(function (s) {
           var c = el('input', { type: 'checkbox' }); c.checked = s.enabled;
           c.addEventListener('change', function () {
             var go = function () { return LA.post('/api/skills/' + encodeURIComponent(s.name) + '/enable', { enabled: c.checked }).then(load).catch(function (e) { c.checked = !c.checked; LA.fail(e); }); };
             if (c.checked && s.warnings && s.warnings.length) LA.confirm('此技能有以下安全提示：\n\n• ' + s.warnings.join('\n• ') + '\n\n技能内容会进入模型上下文，其中的脚本可能被 Agent 执行（仍需你批准）。确认启用？', { okText: '启用' }).then(function (ok) { if (ok) go(); else c.checked = false; });
             else go();
           });
+          var packLabel = PACK_NAMES[s.pack] || s.pack || (s.source === 'builtin' ? 'core' : 'custom');
+          var riskBadge = s.risk && s.risk !== 'read' ? el('span', { class: 'badge ' + (RISK_CLS[s.risk] || ''), text: s.risk }) : null;
           listBox.appendChild(el('div', { class: 'list-row' }, c,
-            el('div', { class: 'main' }, el('b', { text: s.name }), el('span', { class: 'badge ' + (s.source === 'builtin' ? '' : 'user'), text: s.source === 'builtin' ? '内置' : '自定义' }),
+            el('div', { class: 'main' },
+              el('b', { text: s.name }),
+              el('span', { class: 'badge ' + (s.source === 'builtin' ? '' : 'user'), text: s.source === 'builtin' ? '内置' : '自定义' }),
+              el('span', { class: 'badge', text: packLabel }),
+              s.version ? el('span', { class: 'badge', text: 'v' + s.version }) : null,
+              riskBadge,
               el('p', { text: s.description || '（无描述）' }),
+              s.tags && s.tags.length ? el('div', null, s.tags.slice(0, 5).map(function (t) { return el('span', { class: 'tag', text: '#' + t }); })) : null,
               s.warnings && s.warnings.length ? el('div', { class: 'warns', text: '⚠ ' + s.warnings.join('；') }) : null),
             iconBtn('eye', s.source === 'builtin' ? '查看' : '查看/编辑', function () { editSkill(s.name, load); }),
             s.source === 'user' ? iconBtn('trash', '删除', function () { LA.confirm('删除技能「' + s.name + '」及其文件？', { danger: true, okText: '删除' }).then(function (ok) { if (ok) LA.del('/api/skills/' + encodeURIComponent(s.name)).then(load).catch(LA.fail); }); }) : null));
@@ -361,12 +431,13 @@
       LA.toast('已安装「' + s.name + '」，默认未启用——请检查内容后再启用', 'ok', 4500);
       if (s.warnings && s.warnings.length) LA.toast('安全提示：' + s.warnings.join('；'), 'err', 7000);
     }
-    m = LA.modal({ title: '技能管理', width: 640, onClose: function () { LA.refreshSkills(); },
-      body: [el('div', { class: 'hint2', text: '技能是一份 SKILL.md 说明书（可附带脚本/资料）。启用后模型能看到名称与简介，需要时再按需读取全文；也可在输入框用 / 指定。新安装的技能默认不启用。' }),
+    LA.modal({ title: '技能管理', width: 720, onClose: function () { LA.refreshSkills(); },
+      body: [el('div', { class: 'hint2', text: '技能包支持 Spec v2 分包启停与自动路由：默认仅激活高频核心技能（≤14 条进常驻提示），其余按需整包启用或经任务匹配加载。' }),
         el('div', { class: 'toolbar', style: { marginTop: '10px' } },
           btn('安装 .zip', function () { fileInp.click(); }, 'primary'),
           btn('从文件夹安装', function () { LA.prompt('技能文件夹的绝对路径', '', { placeholder: '例如 /home/me/skills/pdf-tools' }).then(function (p) { if (p && p.trim()) LA.post('/api/skills/install', { path: p.trim() }).then(function (s) { afterInstall(s); load(); }).catch(LA.fail); }); }),
-          btn('新建技能', function () { editSkill(null, load); }), fileInp), listBox] });
+          btn('新建技能', function () { editSkill(null, load); }), fileInp),
+        packTabs, lockBar, listBox] });
     load();
   };
 
@@ -377,7 +448,21 @@
     var info = el('div', { class: 'hint2' }), save = btn('保存', function () {}, 'primary'), m, readonly = false;
     function field(l, c) { return el('div', { class: 'field stack' }, el('label', { text: l }), c); }
     m = LA.modal({ title: name ? '技能：' + name : '新建技能', width: 680, body: [info, field('名称', nm), field('描述', desc), field('SKILL.md 正文', body)], footer: [btn('取消', function () { m.close(); }), save] });
-    function go(s) { desc.value = s.description || ''; body.value = s.body || ''; readonly = s.source === 'builtin'; if (readonly) { desc.readOnly = true; body.readOnly = true; save.hidden = true; info.textContent = '内置技能只读。想修改请新建一个同功能的自定义技能。'; } else if (s.files && s.files.length > 1) info.textContent = '包含文件：' + s.files.join('、'); }
+    function go(s) {
+      desc.value = s.description || ''; body.value = s.body || ''; readonly = s.source === 'builtin';
+      var metaLine = [];
+      if (s.pack) metaLine.push('包: ' + (PACK_NAMES[s.pack] || s.pack));
+      if (s.risk) metaLine.push('风险: ' + s.risk);
+      if (s.est_tokens) metaLine.push('约 ' + s.est_tokens + ' tokens');
+      if (s.allowed_tools && s.allowed_tools.length) metaLine.push('收窄工具: ' + s.allowed_tools.join(', '));
+      if (readonly) {
+        desc.readOnly = true; body.readOnly = true; save.hidden = true;
+        info.textContent = '内置技能只读（' + metaLine.join(' · ') + '）。想修改请新建同名外自定义技能。';
+      } else {
+        var extra = (s.files && s.files.length > 1) ? ('包含文件：' + s.files.join('、')) : '';
+        info.textContent = [extra, metaLine.join(' · ')].filter(Boolean).join(' | ');
+      }
+    }
     if (name) { nm.value = name; LA.get('/api/skills/' + encodeURIComponent(name)).then(go).catch(LA.fail); }
     save.addEventListener('click', function () {
       save.disabled = true;

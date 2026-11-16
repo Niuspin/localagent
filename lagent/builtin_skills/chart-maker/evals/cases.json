@@ -1,0 +1,14 @@
+[
+  {
+    "id": "cm-1",
+    "query": "把这份季度营收数据可视化，画一张清晰的对比柱状图和趋势折线图",
+    "should_trigger": true,
+    "expect_skill": "chart-maker"
+  },
+  {
+    "id": "cm-2",
+    "query": "Plot a clean matplotlib chart comparing latency across model sizes",
+    "should_trigger": true,
+    "expect_skill": "chart-maker"
+  }
+]

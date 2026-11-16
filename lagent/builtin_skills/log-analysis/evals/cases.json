@@ -1,0 +1,20 @@
+[
+  {
+    "id": "la-1",
+    "query": "帮我分析一下 server_crash.log 的报错日志并找出最先触发异常的时间线",
+    "files": [
+      "server_crash.log"
+    ],
+    "should_trigger": true,
+    "expect_skill": "log-analysis"
+  },
+  {
+    "id": "la-2",
+    "query": "Run log analysis on build_output.log to cluster failures and find root cause",
+    "files": [
+      "build_output.log"
+    ],
+    "should_trigger": true,
+    "expect_skill": "log-analysis"
+  }
+]

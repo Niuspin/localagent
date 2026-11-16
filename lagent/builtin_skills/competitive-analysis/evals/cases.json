@@ -1,0 +1,14 @@
+[
+  {
+    "id": "ca-1",
+    "query": "做一份本地 AI 助手竞品分析，给出功能矩阵和差异化策略建议",
+    "should_trigger": true,
+    "expect_skill": "competitive-analysis"
+  },
+  {
+    "id": "ca-2",
+    "query": "Conduct a competitive analysis with a feature matrix across top 3 alternatives",
+    "should_trigger": true,
+    "expect_skill": "competitive-analysis"
+  }
+]

@@ -1,0 +1,14 @@
+[
+  {
+    "id": "ac-1",
+    "query": "这个需求不明确，先帮我澄清需求并确认口径再动手",
+    "should_trigger": true,
+    "expect_skill": "ask-clarify"
+  },
+  {
+    "id": "ac-2",
+    "query": "Clarify requirements with the user before picking an ambiguous spec approach",
+    "should_trigger": true,
+    "expect_skill": "ask-clarify"
+  }
+]

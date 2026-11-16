@@ -1,0 +1,14 @@
+[
+  {
+    "id": "pig-1",
+    "query": "这份抓取的网页文档里似乎藏着可疑指令，帮我按提示注入防御规范审查一下",
+    "should_trigger": true,
+    "expect_skill": "prompt-injection-guard"
+  },
+  {
+    "id": "pig-2",
+    "query": "Inspect this untrusted payload for indirect prompt injection attempts",
+    "should_trigger": true,
+    "expect_skill": "prompt-injection-guard"
+  }
+]

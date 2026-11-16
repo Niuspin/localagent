@@ -4,7 +4,7 @@
   var LA = window.LA, el = LA.el, icon = LA.icon;
   var modal = null, pane = null, nav = null, tab = 'engine', timers = [], savedEl = null, bannerSlot = null, engineRedraw = null;
 
-  var TABS = [['engine', '模型与引擎'], ['gen', '生成'], ['security', '安全'], ['search', '搜索'], ['mcp', '扩展'], ['ui', '外观']];
+  var TABS = [['engine', '模型与引擎'], ['gen', '生成'], ['security', '安全'], ['search', '搜索'], ['mcp', '扩展'], ['ui', '外观'], ['metrics', '运行指标']];
   var SEARCH_ENGINES = {
     duckduckgo: { name: 'DuckDuckGo', note: '无需密钥' }, bing: { name: 'Bing', note: '无需密钥' }, baidu: { name: '百度', note: '无需密钥' }, yahoo: { name: 'Yahoo', note: '无需密钥' },
     brave: { name: 'Brave Search', note: '需要 API Key', key: 'brave' }, google_cse: { name: 'Google 可编程搜索', note: '需要 API Key 与 CX', key: 'google_cse' },
@@ -101,7 +101,7 @@
     tab = t; stopTimers(); engineRedraw = null;
     LA.$$('button', nav).forEach(function (b) { b.classList.toggle('on', b.dataset.tab === t); });
     LA.clear(pane); pane.scrollTop = 0;
-    ({ engine: tabEngine, gen: tabGen, security: tabSecurity, search: tabSearch, mcp: tabMcp, ui: tabUi })[t]();
+    ({ engine: tabEngine, gen: tabGen, security: tabSecurity, search: tabSearch, mcp: tabMcp, ui: tabUi, metrics: tabMetrics })[t]();
     renderBanner();
   }
   function renderBanner() {
@@ -488,7 +488,20 @@
       });
     }
     pane.appendChild(sec('搜索引擎'));
-    pane.appendChild(el('div', { class: 'hint2', style: { marginBottom: '8px' }, text: '勾选启用并上下调整优先级。无密钥的引擎通过解析网页结果页实现，页面改版时可能失效——此时请改用 SearXNG 或 API 类引擎。' }));
+    pane.appendChild(el('div', { class: 'hint2', style: { marginBottom: '8px' }, text: '优先使用自建 SearXNG 或官方 API 引擎。未确认前不会静默启用 HTML 解析类引擎。' }));
+    var ackWrap = el('label', { class: 'chk-row', style: { marginBottom: '8px' } });
+    var ackCb = el('input', { type: 'checkbox', checked: !!LA.cfg('search.html_scrapers_ack', false) });
+    ackCb.addEventListener('change', function () {
+      if (ackCb.checked) {
+        if (!confirm('启用 DuckDuckGo/Bing/百度/Yahoo 等 HTML 解析类搜索可能违反搜索引擎服务条款，且仅“尽力而为”（易触发验证码）。确定启用？')) {
+          ackCb.checked = false;
+          return;
+        }
+      }
+      LA.cfgSet('search.html_scrapers_ack', ackCb.checked, { immediate: true });
+    });
+    ackWrap.append(ackCb, el('span', { text: '允许使用 HTML 解析类搜索引擎（已知晓仅尽力而为及条款提示）' }));
+    pane.appendChild(ackWrap);
     pane.appendChild(listBox); drawList();
     pane.appendChild(F('多引擎策略', sel('search.mode', [['merge', '合并（RRF 融合多引擎结果）'], ['first', '依次尝试，取第一个成功的']])));
     pane.appendChild(F('每次结果数', num('search.max_results', { min: 1, max: 30 })));
@@ -496,6 +509,32 @@
     pane.appendChild(F('安全搜索', sel('search.safe', [['moderate', '适中'], ['strict', '严格'], ['off', '关闭']])));
     pane.appendChild(F('代理', txt('search.proxy', { wide: true, ph: 'http://127.0.0.1:7890（可选，访问 Google/DDG 等需要时填写）' }), '仅支持 HTTP 代理。对搜索与网页抓取生效。'));
     pane.appendChild(F('SearXNG 地址', txt('search.searxng_url', { wide: true, ph: 'http://127.0.0.1:8080' }), '自建实例需在 settings.yml 中启用 json 格式。'));
+
+    pane.appendChild(sec('联网调研策略（Research Engine）'));
+    pane.appendChild(F('调研模式', sel('research.mode', [
+      ['off', '关闭（默认，禁止自主调研）'],
+      ['ask', '逐域批准（新域名需确认）'],
+      ['allowlist', '仅白名单域名'],
+      ['open', '公开网页（受策略/robots/限速约束）']
+    ]), '--offline 启动时强制覆盖为 off。'));
+    pane.appendChild(F('遵守 robots.txt', sw('research.respect_robots', 'RFC 9309 规则与 Crawl-delay'), '仅在 allowlist 模式下才允许关闭。'));
+    pane.appendChild(F('每域速率 (req/s)', num('research.per_domain_rps', { min: 0.1, max: 5, step: 0.1 })));
+    pane.appendChild(F('每域并发连接', num('research.per_domain_conc', { min: 1, max: 4 })));
+    pane.appendChild(F('单任务请求上限', num('research.max_requests_per_task', { min: 1, max: 2000 })));
+    pane.appendChild(F('PII 最小化脱敏', sw('research.pii_redact', '落盘前脱敏邮箱/手机号/证件号')));
+    pane.appendChild(F('Dual-LLM 隔离读取', sw('research.reader_isolation', '无工具 reader 角色隔离抽取证据')));
+    function domainListField(key, label, ph) {
+      var inp = el('input', { class: 'inp wide', value: (LA.cfg(key, []) || []).join(', '), placeholder: ph, spellcheck: false });
+      inp.addEventListener('change', function () {
+        var arr = inp.value.split(/[,，\s]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+        LA.cfgSet(key, arr, { immediate: true });
+      });
+      return F(label, inp);
+    }
+    pane.appendChild(domainListField('research.allow_domains', '允许域名白名单', '例如 docs.python.org, arxiv.org'));
+    pane.appendChild(domainListField('research.deny_domains', '拒绝域名黑名单', '逗号分隔域名'));
+    pane.appendChild(domainListField('research.deny_categories', '拒绝内容类别', 'adult, malware, paywall_bypass, piracy'));
+
     pane.appendChild(sec('API 密钥'));
     pane.appendChild(el('div', { class: 'hint2', style: { marginBottom: '4px' }, text: '密钥单独保存在 data/secrets.json（权限 0600），界面不会回显。' }));
     [['brave', 'Brave Search Key'], ['google_cse', 'Google API Key'], ['google_cx', 'Google 搜索引擎 ID (cx)'], ['tavily', 'Tavily Key'], ['serper', 'Serper Key']].forEach(function (k) {
@@ -600,5 +639,59 @@
       LA.post('/api/app/quit').then(function () { document.body.textContent = '已退出，可以关闭此窗口。'; }).catch(LA.fail);
     })));
     pane.appendChild(el('div', { class: 'hint2', text: 'LocalAgent ' + ((LA.S.state && LA.S.state.version) || '') + ' · 所有数据保存在本机 data/ 目录；界面不加载任何外部资源。' }));
+  }
+
+  /* ------------------------------------------------------------ 运行指标（§8.4 本地可观测性） */
+  function tabMetrics() {
+    pane.appendChild(sec(LA.t('metrics.title', '本地运行指标（仅本地存储，绝不上传）')));
+    var hours = 24;
+    var winSel = el('select', { class: 'inp' },
+      el('option', { value: '1', text: '最近 1 小时' }),
+      el('option', { value: '24', text: '最近 24 小时' }),
+      el('option', { value: '168', text: '最近 7 天' })
+    );
+    winSel.value = '24';
+    var box = el('div', { class: 'hint2', text: '正在加载本地运行指标…' });
+    function card(title, value, sub) {
+      return el('div', { class: 'metric-card' },
+        el('div', { class: 'metric-lbl', text: title }),
+        el('div', { class: 'metric-val', text: String(value) }),
+        sub ? el('div', { class: 'metric-sub', text: sub }) : null);
+    }
+    function load() {
+      LA.get('/api/metrics?hours=' + hours).then(function (m) {
+        if (!box.isConnected) return;
+        LA.clear(box);
+        var tok = m.tokens || {};
+        var vc = m.verify_counts || {};
+        var mc = m.merge_counts || {};
+        var db = m.denied_breakdown || {};
+        var eng = m.engine || {};
+        var inv = m.inventory || {};
+        var grid = el('div', { class: 'metric-grid' },
+          card('步数 / 小时', m.steps_per_hour != null ? m.steps_per_hour : '0', '总工具调用 ' + (m.tool_steps_total || 0) + ' · 运行 ' + (m.runs_total || 0)),
+          card('累计 Token', LA.fmtN(tok.total || 0), '输入 ' + LA.fmtN(tok.prompt || 0) + ' / 输出 ' + LA.fmtN(tok.completion || 0)),
+          card('验证通过率', m.verify_pass_rate != null ? (m.verify_pass_rate + '%') : '—', (vc.passed || 0) + '/' + (vc.total || 0) + ' 次命令/门控验证'),
+          card('卡死 / 重复次数', m.stall_count || 0, 'Watchdog 与重复调用统计'),
+          card('拒绝请求数', m.denied_requests || 0, '工具策略 ' + (db.tool_policy || 0) + ' / 联网拦截 ' + (db.network_policy || 0)),
+          card('合并冲突率', (m.merge_conflict_rate != null ? m.merge_conflict_rate : 0) + '%', '冲突 ' + (mc.conflicts || 0) + ' / 合并 ' + (mc.merges || 0))
+        );
+        box.appendChild(grid);
+        box.appendChild(sec('引擎遥测与本机资产摘要'));
+        var grid2 = el('div', { class: 'metric-grid' },
+          card('推理与首字延迟', eng.eval_tps ? (eng.eval_tps + ' tok/s') : (eng.status || 'stopped'), (eng.ttft_ms ? ('TTFT ' + eng.ttft_ms + 'ms') : '等待引擎运行') + (eng.cache_hit_rate != null ? (' · KV 复用 ' + Math.round(eng.cache_hit_rate * 100) + '%') : '')),
+          card('多代理与任务线', (inv.swarms || 0) + ' / ' + (inv.missions || 0), '会话 ' + (inv.sessions || 0) + ' · 联网账本 ' + (inv.net_requests || 0)),
+          card('技能与安全状态', (inv.skills_enabled || 0) + '/' + (inv.skills_total || 0) + ' 启用', (inv.skills_lock_ok ? 'skills.lock 完整' : 'skills.lock 异常') + ' · 审计 ' + (inv.audit_entries || 0) + ' 条')
+        );
+        box.appendChild(grid2);
+      }).catch(function (e) {
+        LA.clear(box);
+        box.appendChild(banner('warn', '加载运行指标失败：' + e.message));
+      });
+    }
+    winSel.addEventListener('change', function () { hours = parseFloat(winSel.value) || 24; load(); });
+    pane.appendChild(el('div', { class: 'toolbar' }, winSel, btn('刷新指标', load)));
+    pane.appendChild(box);
+    load();
   }
 })();

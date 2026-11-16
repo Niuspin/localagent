@@ -1,0 +1,20 @@
+[
+  {
+    "id": "dw-1",
+    "query": "把刚加的新接口同步到 docs/API.md 并更新 README 使用示例",
+    "files": [
+      "docs/API.md"
+    ],
+    "should_trigger": true,
+    "expect_skill": "docs-writer"
+  },
+  {
+    "id": "dw-2",
+    "query": "Update README and write clear API documentation for the new config options",
+    "files": [
+      "README.md"
+    ],
+    "should_trigger": true,
+    "expect_skill": "docs-writer"
+  }
+]

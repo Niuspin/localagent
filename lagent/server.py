@@ -23,7 +23,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import __version__, appwindow, gguf, hub as hub_mod, hw
+from . import __version__, appwindow, gguf, hub as hub_mod, hw, metrics as metrics_mod
 from .paths import FROZEN
 from . import security as sec
 from .artifacts import ArtifactStore
@@ -44,6 +44,7 @@ from .sessions import SessionStore
 from .skills import Skills
 from .swarm import SwarmManager, SwarmStore
 from .mission import MissionManager, MissionStore
+from .research import ResearchManager
 from .media import (
     build_artifact_preview,
     create_artifact_bundle,
@@ -93,20 +94,28 @@ class State:
         self.artifacts.sweep({m["id"] for m in self.store.list()})
         self.audit = sec.AuditLog(data / "audit.jsonl")
         self.memory = Memory(data / "memory.db")
-        self.skills = Skills(root / "skills", CODE_DIR / "lagent" / "builtin_skills", data / "skills_state.json")
+        self.skills = Skills(
+            root / "skills",
+            CODE_DIR / "lagent" / "builtin_skills",
+            data / "skills_state.json",
+            default_limit=self.cfg.get("skills", "default_enabled_limit", default=14),
+        )
         protected = [root / "config.json", root / "skills", root / "models", root / "bin", CODE_DIR / "lagent", CODE_DIR / "web", root / "run.py"]
         if FROZEN:      # 打包运行：程序本体（exe 与其资源目录）同样只读
             protected += [Path(sys.executable), CODE_DIR]
         hidden = [data]
         self._loop: asyncio.AbstractEventLoop | None = None
-        self.mcp = McpManager(data, self.audit, on_change=lambda _n, v: self.broadcast("mcp", {"server": v}))
-        self.hub = hub_mod.DownloadManager(root / "models", on_event=self.broadcast_threadsafe)
         self.swarms = SwarmManager(cfg=self.cfg, store=SwarmStore(data / "swarms"), journal=self.journal, audit=self.audit, notify=self.broadcast)
         self.missions = MissionManager(cfg=self.cfg, store=MissionStore(data / "missions"), journal=self.journal, audit=self.audit,
                                        memory=self.memory, swarms=self.swarms, notify=self.broadcast)
+        self.research = ResearchManager(cfg=self.cfg, data_dir=data, audit=self.audit, artifacts=self.artifacts,
+                                        swarms=self.swarms, notify=self.broadcast)
+        self.mcp = McpManager(data, self.audit, on_change=lambda _n, v: self.broadcast("mcp", {"server": v}), research=self.research)
+        self.hub = hub_mod.DownloadManager(root / "models", on_event=self.broadcast_threadsafe)
         self.agent = Agent(cfg=self.cfg, engine=self.engine, store=self.store, journal=self.journal, audit=self.audit, memory=self.memory,
                            skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp,
-                           outputs=self.outputs, artifacts=self.artifacts, swarms=self.swarms, missions=self.missions)
+                           outputs=self.outputs, artifacts=self.artifacts, swarms=self.swarms, missions=self.missions, research=self.research)
+        self.research.router = self.agent.router
         self.swarms.default_runner = self.agent.run_swarm_node
         self.missions.default_episode_runner = self.agent.run_mission_episode
         self.root = root
@@ -270,6 +279,8 @@ def make_app(st: State) -> Starlette:
                 raise ValueError("工作区请通过 PUT /api/workspace 设置")
             out = st.cfg.patch(d)
             st.swarms.sync_scheduler_from_cfg()
+            st.research.sync_from_cfg()
+            st.skills.set_default_limit(st.cfg.get("skills", "default_enabled_limit", default=14))
             st.audit.append(event="config", keys=sorted(d.keys()))
             st.broadcast("config", {"config": out})
             return J({"config": out})
@@ -1245,6 +1256,147 @@ def make_app(st: State) -> Starlette:
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    # ------------------------------------------------------------ Research Engine & 网络账本 (M5)
+    @route("/api/research", ["GET", "POST"])
+    async def research_root(req: Request) -> Response:
+        if req.method == "POST":
+            d = await jbody(req)
+            question = str(d.get("question") or "").strip()
+            if not question:
+                raise ValueError("question 不能为空")
+            sid = str(d.get("session_id") or "")
+            depth = str(d.get("depth") or "standard").strip().lower()
+            budget = d.get("budget") if isinstance(d.get("budget"), dict) else None
+            urls = d.get("urls") if isinstance(d.get("urls"), list) else None
+            snap = st.research.start_research(question, session_id=sid, depth=depth, budget=budget, urls=urls)
+            return J(snap)
+        sid = req.query_params.get("session_id") or None
+        limit = int(req.query_params.get("limit") or 30)
+        return J({"tasks": st.research.evidence.list_tasks(session_id=sid, limit=limit)})
+
+    @route("/api/research/policy", ["GET", "PUT"])
+    async def research_policy(req: Request) -> Response:
+        if req.method == "PUT":
+            d = await jbody(req)
+            patch_obj: dict[str, Any] = {}
+            if "research" in d and isinstance(d["research"], dict):
+                patch_obj["research"] = d["research"]
+            else:
+                r_keys = {k: v for k, v in d.items() if k != "html_scrapers_ack"}
+                if r_keys:
+                    patch_obj["research"] = r_keys
+            if "html_scrapers_ack" in d:
+                patch_obj.setdefault("search", {})["html_scrapers_ack"] = bool(d["html_scrapers_ack"])
+            if patch_obj:
+                out = st.cfg.patch(patch_obj)
+                st.research.sync_from_cfg()
+                st.audit.append(event="research_policy", keys=sorted(d.keys()))
+                st.broadcast("config", {"config": out})
+        return J({
+            "research": st.cfg.get("research"),
+            "html_scrapers_ack": bool(st.cfg.get("search", "html_scrapers_ack", default=False)),
+            "offline": os.environ.get("LOCALAGENT_OFFLINE") == "1",
+        })
+
+    @route("/api/research/{rid}", ["GET"])
+    async def research_one(req: Request) -> Response:
+        rid = req.path_params["rid"]
+        want_sse = req.query_params.get("stream") in ("1", "true") or "text/event-stream" in (req.headers.get("accept") or "").lower()
+        if want_sse:
+            return await research_events(req)
+        snap = st.research.snapshot(rid)
+        if not snap:
+            return bad("research 任务不存在", 404)
+        return J(snap)
+
+    @route("/api/research/{rid}/events", ["GET"])
+    async def research_events(req: Request) -> Response:
+        rid = req.path_params["rid"]
+        snap = st.research.snapshot(rid)
+        if not snap:
+            return bad("research 任务不存在", 404)
+        after = int(req.headers.get("last-event-id") or req.query_params.get("after") or 0)
+        run = st.research.runs.get(rid)
+        done = snap["task"]["status"] in ("completed", "failed", "stopped")
+        q = None if (done or run is None) else st.research.subscribe(rid)
+
+        async def gen():
+            last_seq = after
+            try:
+                if run is not None:
+                    for seq, kind, payload in list(run.events):
+                        if seq <= after:
+                            continue
+                        last_seq = max(last_seq, seq)
+                        yield f"id: {seq}\nevent: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                if q is None:
+                    yield f"event: research_done\ndata: {json.dumps({'research_id': rid, 'status': snap['task']['status']}, ensure_ascii=False)}\n\n"
+                    return
+                while True:
+                    try:
+                        seq, kind, payload = await asyncio.wait_for(q.get(), 15)
+                        if seq <= last_seq:
+                            continue
+                        last_seq = seq
+                        yield f"id: {seq}\nevent: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        if kind == "research_done":
+                            return
+                    except asyncio.TimeoutError:
+                        cur = st.research.evidence.get_task(rid)
+                        if cur and cur["status"] in ("completed", "failed", "stopped"):
+                            return
+                        yield ": ping\n\n"
+            finally:
+                if q is not None:
+                    st.research.unsubscribe(rid, q)
+
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @route("/api/research/{rid}/stop", ["POST"])
+    async def research_stop(req: Request) -> Response:
+        ok = st.research.stop_research(req.path_params["rid"])
+        return J({"ok": ok})
+
+    @route("/api/research/{rid}/approve-domain", ["POST"])
+    async def research_approve_domain(req: Request) -> Response:
+        d = await jbody(req)
+        dom = str(d.get("domain") or "").strip()
+        snap = st.research.approve_domain(req.path_params["rid"], dom)
+        if not snap:
+            return bad("research 任务不存在", 404)
+        return J(snap)
+
+    @route("/api/research/{rid}/evidence", ["GET"])
+    async def research_evidence(req: Request) -> Response:
+        bundle = st.research.evidence.get_evidence_bundle(req.path_params["rid"])
+        if not bundle:
+            return bad("research 任务不存在", 404)
+        return J(bundle)
+
+    @route("/api/net/ledger", ["GET"])
+    async def net_ledger(req: Request) -> Response:
+        qp = req.query_params
+        filt = {
+            "domain": qp.get("domain") or None,
+            "decision": qp.get("decision") or None,
+            "agent_id": qp.get("agent_id") or None,
+            "research_id": qp.get("research_id") or None,
+            "q": qp.get("q") or None,
+            "limit": int(qp.get("limit") or 200),
+        }
+        if (qp.get("format") or "").lower() == "csv":
+            csv_txt = st.research.ledger.export_csv(**filt)
+            return Response(
+                csv_txt,
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": 'attachment; filename="net-ledger.csv"',
+                    "X-Content-Type-Options": "nosniff",
+                    "Cache-Control": "no-store",
+                },
+            )
+        return J(st.research.ledger.query(**filt))
+
     @route("/api/journal", ["GET"])
     async def journal(req: Request) -> Response:
         sid = req.query_params.get("session_id") or ""
@@ -1288,6 +1440,36 @@ def make_app(st: State) -> Starlette:
     @route("/api/skills", ["GET"])
     async def skills_list(req: Request) -> Response:
         return J(st.skills.list())
+
+    @route("/api/skills/packs", ["GET"])
+    async def skills_packs(req: Request) -> Response:
+        return J({"packs": st.skills.packs(), "lock": st.skills.verify_lock()})
+
+    @route("/api/skills/pack", ["POST"])
+    async def skills_pack_toggle(req: Request) -> Response:
+        d = await jbody(req)
+        pack = str(d.get("pack", "")).strip()
+        enabled = bool(d.get("enabled", True))
+        updated = st.skills.set_pack_enabled(pack, enabled)
+        st.audit.append(event="skill_pack", pack=pack, enabled=enabled, count=len(updated))
+        return J({"pack": pack, "enabled": enabled, "skills": updated, "packs": st.skills.packs()})
+
+    @route("/api/skills/lint", ["GET"])
+    async def skills_lint(req: Request) -> Response:
+        return J(st.skills.lint())
+
+    @route("/api/skills/route", ["POST"])
+    async def skills_route(req: Request) -> Response:
+        d = await jbody(req)
+        return J({
+            "matches": st.skills.route(
+                str(d.get("text", "")),
+                files=d.get("files") or [],
+                mimes=d.get("mimes") or [],
+                top_k=int(d.get("top_k") or 3),
+                include_disabled=bool(d.get("include_disabled", False)),
+            )
+        })
 
     @route("/api/skills/install", ["POST"])
     async def skills_install(req: Request) -> Response:
@@ -1478,7 +1660,7 @@ def make_app(st: State) -> Starlette:
         if not q:
             raise ValueError("请输入关键词")
         prov = [d["provider"]] if d.get("provider") else None
-        res, errs = await search_mod.run_search(st.cfg, q, providers=prov)
+        res, errs = await search_mod.run_search(st.cfg, q, providers=prov, research=st.research)
         return J({"results": res, "errors": errs})
 
     @route("/api/app/quit", ["POST"])
@@ -1495,6 +1677,11 @@ def make_app(st: State) -> Starlette:
     @route("/api/audit/verify", ["GET"])
     async def audit_verify(req: Request) -> Response:
         return J(st.audit.verify())
+
+    @route("/api/metrics", ["GET"])
+    async def api_metrics(req: Request) -> Response:
+        hrs = float(req.query_params.get("hours") or 24.0)
+        return J(metrics_mod.collect_runtime_metrics(st, window_hours=hrs))
 
     @route("/api/commands", ["GET"])
     async def api_commands(req: Request) -> Response:
@@ -1550,11 +1737,13 @@ def make_app(st: State) -> Starlette:
         try:
             yield
         finally:
+            await st.research.stop_all()
             await st.missions.stop_all()
             await st.swarms.stop_all()
             st.hub.cancel_all()
             await st.mcp.stop_all()
             await st.engine.stop()
+            st.research.close()
 
     app = Starlette(routes=R, lifespan=lifespan)
     atexit.register(st.engine.shutdown_sync)

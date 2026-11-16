@@ -15,10 +15,13 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urlsplit
 
 from .. import net
+from ..research.policy import ResearchPolicy, safe_user_agent
 from .base import P, Tool, ToolResult, obj, register
 from .ctx import ToolCtx
 
 Result = dict  # {title, url, snippet, engine}
+HTML_SCRAPERS = frozenset({"duckduckgo", "bing", "baidu", "yahoo"})
+OFFICIAL_ORDER = ("searxng", "brave", "google_cse", "tavily", "serper")
 
 
 def _soup(html: str):
@@ -50,9 +53,12 @@ class Env:
         self.timeout = float(cfg.get("web", "timeout_s", default=20))
         self.sec = cfg.secret
         self.time_range = ""
+        self.ua = safe_user_agent(cfg)
 
     def get(self, url: str, **kw: Any) -> net.Response:
-        return net.fetch_sync(url, timeout=min(self.timeout, 20), max_bytes=1_500_000, proxy=self.proxy, **kw)
+        hdrs = {"User-Agent": self.ua}
+        hdrs.update(kw.pop("headers", None) or {})
+        return net.fetch_sync(url, timeout=min(self.timeout, 20), max_bytes=1_500_000, proxy=self.proxy, headers=hdrs, **kw)
 
 
 def _http_ok(r: net.Response, name: str) -> None:
@@ -328,22 +334,96 @@ def fuse(lists: list[list[Result]], limit: int) -> list[Result]:
     return [best[k] for k in ordered[:limit]]
 
 
+def _configured_official(cfg: Any, s: dict) -> list[str]:
+    out: list[str] = []
+    if s.get("searxng_url"):
+        out.append("searxng")
+    if cfg.secret("brave"):
+        out.append("brave")
+    if cfg.secret("google_cse") and cfg.secret("google_cx"):
+        out.append("google_cse")
+    if cfg.secret("tavily"):
+        out.append("tavily")
+    if cfg.secret("serper"):
+        out.append("serper")
+    return out
+
+
 async def run_search(cfg: Any, query: str, *, limit: int | None = None, providers: list[str] | None = None,
-                     time_range: str = "") -> tuple[list[Result], dict[str, str]]:
+                     time_range: str = "", research: Any = None, session_id: str | None = None,
+                     agent_id: str = "main") -> tuple[list[Result], dict[str, str]]:
+    policy = research.policy if research is not None else ResearchPolicy(cfg)
+    ledger = research.ledger if research is not None else None
+    q_dec = policy.evaluate_query(query)
+    if not q_dec.allowed:
+        if ledger is not None:
+            ledger.record(
+                url=f"search://blocked?q={quote_plus(query[:60])}",
+                method="QUERY",
+                status=0,
+                purpose="web_search",
+                agent_id=agent_id,
+                session_id=session_id,
+                decision="deny",
+                reason=q_dec.reason,
+            )
+        return [], {"policy": q_dec.reason}
+
     s = cfg.get("search")
-    provs = providers or s.get("providers") or ["duckduckgo"]
+    html_ack = bool(s.get("html_scrapers_ack", False))
+    provs = list(providers or s.get("providers") or [])
+    if not providers:
+        off_cfg = _configured_official(cfg, s)
+        # 若用户未确认 HTML 解析类且配置了官方/自建引擎，自动优先切换为官方/自建引擎
+        if not html_ack and off_cfg and all(p in HTML_SCRAPERS for p in provs):
+            provs = off_cfg
+        elif not provs:
+            provs = off_cfg
+    # 永远让官方 API / 自建 SearXNG 排在 HTML 解析类前面
+    provs = [p for p in provs if p not in HTML_SCRAPERS] + [p for p in provs if p in HTML_SCRAPERS]
     n = int(limit or s.get("max_results", 8))
     env = Env(cfg)
     env.time_range = time_range if time_range in ("day", "week", "month", "year") else ""
     errors: dict[str, str] = {}
+
+    if not provs:
+        errors["search"] = "未启用任何搜索引擎；请配置 SearXNG / API 密钥，或在 设置→搜索 中确认启用 HTML 解析引擎。"
+        return [], errors
 
     async def one(name: str) -> list[Result]:
         fn = PROVIDERS.get(name)
         if not fn:
             errors[name] = "未知引擎"
             return []
+        if name in HTML_SCRAPERS and not html_ack:
+            msg = "HTML 解析类搜索可能违反服务条款（仅尽力而为）；请先在 设置→搜索 中确认启用，或改用 SearXNG / API 引擎"
+            errors[name] = msg
+            if ledger is not None:
+                ledger.record(
+                    url=f"search://{name}?q={quote_plus(query[:80])}",
+                    method="GET",
+                    status=0,
+                    purpose="web_search",
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    decision="deny",
+                    reason="html_scrapers_not_acknowledged",
+                )
+            return []
         try:
-            return await asyncio.wait_for(asyncio.to_thread(fn, query, env, max(n, 5)), timeout=env.timeout + 15)
+            got = await asyncio.wait_for(asyncio.to_thread(fn, query, env, max(n, 5)), timeout=env.timeout + 15)
+            if ledger is not None:
+                ledger.record(
+                    url=f"search://{name}?q={quote_plus(query[:80])}",
+                    method="GET",
+                    status=200,
+                    bytes_in=len(json.dumps(got, ensure_ascii=False)),
+                    purpose="web_search",
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    decision="allow",
+                )
+            return got
         except asyncio.TimeoutError:
             errors[name] = "超时"
         except net.NetError as e:
@@ -352,6 +432,17 @@ async def run_search(cfg: Any, query: str, *, limit: int | None = None, provider
             errors[name] = f"缺少依赖 {e.name}（pip install beautifulsoup4 lxml）"
         except Exception as e:  # noqa: BLE001
             errors[name] = f"{type(e).__name__}: {e}"
+        if ledger is not None:
+            ledger.record(
+                url=f"search://{name}?q={quote_plus(query[:80])}",
+                method="GET",
+                status=0,
+                purpose="web_search",
+                agent_id=agent_id,
+                session_id=session_id,
+                decision="error",
+                reason=errors.get(name, ""),
+            )
         return []
 
     if s.get("mode") == "first" and not providers:
@@ -374,7 +465,11 @@ async def web_search(ctx: ToolCtx, a: dict) -> ToolResult:
     q = a["query"].strip()
     if a.get("site"):
         q += f" site:{a['site'].strip()}"
-    results, errors = await run_search(ctx.cfg, q, limit=a.get("max_results"), time_range=a.get("time_range", ""))
+    research = getattr(ctx, "research", None)
+    results, errors = await run_search(
+        ctx.cfg, q, limit=a.get("max_results"), time_range=a.get("time_range", ""),
+        research=research, session_id=ctx.sid, agent_id=getattr(ctx.session, "agent_id", "main"),
+    )
     for r in results:
         d = net.domain_of(r["url"])
         if d:

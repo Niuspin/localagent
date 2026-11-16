@@ -1,0 +1,14 @@
+[
+  {
+    "id": "sr-1",
+    "query": "做一次交付前自检和验收检查，确认没有遗漏",
+    "should_trigger": true,
+    "expect_skill": "self-review"
+  },
+  {
+    "id": "sr-2",
+    "query": "Run a self review pre-delivery check on what we changed",
+    "should_trigger": true,
+    "expect_skill": "self-review"
+  }
+]
