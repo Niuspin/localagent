@@ -34,6 +34,7 @@
         <button type="button" class="sb-search-clear" id="sbSearchClear" title="清除搜索" hidden aria-label="清除搜索">&times;</button>
       </div>
     </div>
+    <div class="sb-missions" id="missionList"></div>
     <div class="sb-list" id="sessionList"></div>
     <div class="sb-foot">
       <button class="foot-btn" id="btnSkills"><span class="fi"></span><span>技能</span></button>
@@ -76,7 +77,8 @@
               <textarea id="input" rows="1" placeholder="给 LocalAgent 布置任务…（Enter 发送，Shift+Enter 换行，输入 / 选择技能）" spellcheck="false"></textarea>
               <div class="comp-row">
                 <div class="comp-left">
-                  <button class="icon-btn" id="btnAttach" title="添加图片或文件"></button>
+                  <button class="icon-btn" id="btnAttach" title="添加图片、文档或媒体文件"></button>
+                  <button class="icon-btn" id="btnRecord" title="录制音频输入" hidden></button>
                   <input type="file" id="fileInput" multiple hidden>
                   <div class="seg-wrap"><button class="pill" id="modePill" title="权限模式"></button></div>
                   <button class="pill" id="thinkPill" title="思考模式"></button>
@@ -111,6 +113,7 @@
 <script src="/js/settings.js"></script>
 <script src="/js/mcp.js"></script>
 <script src="/js/swarm.js"></script>
+<script src="/js/mission.js"></script>
 <script src="/js/panels.js"></script>
 <script src="/js/main.js"></script>
 </body>

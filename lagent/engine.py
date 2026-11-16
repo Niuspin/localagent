@@ -160,6 +160,7 @@ class Engine:
         self.ctx = 0
         self.ctx_cap = 0
         self.vision = False
+        self.audio = False
         self.plan_info: dict = {}
         self.profile: prof_mod.Profile | None = None     # 当前已加载模型的档位（未叠加用户覆盖）
         self.log: collections.deque[str] = collections.deque(maxlen=600)
@@ -606,7 +607,7 @@ class Engine:
     def state(self) -> dict:
         ls = list(self.log)[-40:]
         return {"status": self.status, "model": self.model["file"] if self.model else None, "mmproj": self.mmproj_file,
-                "ctx": self.ctx, "ctx_max": self.ctx_cap, "vision": self.vision, "error": self.error,
+                "ctx": self.ctx, "ctx_max": self.ctx_cap, "vision": self.vision, "audio": self.audio, "error": self.error,
                 "binary": str(self.binary) if self.binary else None, "binary_version": self.binary_version,
                 "load_log_tail": ls, "plan": self.plan_info, "tps": round(self.tps, 1),
                 "perf": self.telemetry.benchmark_summary(),
@@ -640,6 +641,7 @@ class Engine:
             self.profile = prof_mod.for_model(self.cfg, self.model)
             self.mmproj_file, self.ctx, self.ctx_cap, self.plan_info = plan["mmproj"], plan["ctx"], plan["ctx_cap"], plan
             self.vision = False
+            self.audio = False
             self.log.clear()
             args = self.build_args(plan)
             self.plan_info["command"] = self.display_command(args)
@@ -709,9 +711,10 @@ class Engine:
                     self.ctx_cap = max(self.ctx_cap, n_ctx) if self.cfg.get("engine", "ctx_auto_grow") else n_ctx
                 mod = props.get("modalities") or {}
                 self.vision = bool(mod.get("vision")) or (bool(self.plan_info.get("mmproj_path")) and "vision" not in mod)
+                self.audio = bool(mod.get("audio"))
         except net.NetError:
             pass
-        self.log.append(f"[LocalAgent] 引擎就绪：ctx={self.ctx} vision={self.vision}")
+        self.log.append(f"[LocalAgent] 引擎就绪：ctx={self.ctx} vision={self.vision} audio={self.audio}")
         self._set("ready")
 
     def _auth(self) -> dict:

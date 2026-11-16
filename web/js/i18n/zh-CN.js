@@ -27,6 +27,23 @@
     'ui.accent': '强调色预设',
     'ui.locale': '界面语言',
     'ui.colwidth': '正文阅读宽度',
-    'swarm.section': 'Swarm 集群并发'
+    'swarm.section': 'Swarm 集群并发',
+    'drawer.tab.mission': '任务线',
+    'mission.sidebar': 'Missions',
+    'mission.new': '新建长期 Mission',
+    'mission.empty': '输入 /mission start 或点击 + 启动',
+    'mission.pause': '暂停',
+    'mission.resume': '恢复',
+    'mission.cancel': '终止',
+    'mission.budget': '预算监控',
+    'mission.milestones': '里程碑与验收门控',
+    'mission.timeline': '执行时间线',
+    'mission.approvals': '阻塞待批清单',
+    'mission.approve': '批准并续跑',
+    'mission.deny': '拒绝',
+    'mission.rollback': '回滚到此点',
+    'mission.md.title': 'MISSION.md（编辑后将在下一 Episode 自动生效）',
+    'mission.md.save': '保存 MISSION.md',
+    'mission.detail.title': 'Mission 运行监控'
   };
 })();

@@ -48,6 +48,7 @@ class CommandContext:
     workspace: str | Path | None = None
     cfg: Any = None
     journal: Any = None
+    missions: Any = None
 
 
 BUILTIN_COMMANDS: list[dict[str, str]] = [
@@ -66,6 +67,7 @@ BUILTIN_COMMANDS: list[dict[str, str]] = [
     {"name": "permissions", "description": "查看细粒度权限规则列表与生效状态", "kind": "builtin"},
     {"name": "hooks", "description": "查看当前配置的生命周期钩子", "kind": "builtin"},
     {"name": "doctor", "description": "诊断工作区、引擎、沙箱与环境状态", "kind": "builtin"},
+    {"name": "mission", "description": "管理超长期自主任务 (/mission start|status|pause|resume|stop|budget|log|edit)", "kind": "builtin"},
 ]
 
 
@@ -385,11 +387,181 @@ def dispatch_command(text: str, ctx: CommandContext) -> CommandResult | None:
 
         return CommandResult(handled=True, is_prompt=False, text="\n".join(lines))
 
+    if cmd == "mission":
+        return _handle_mission_command(args_str, ctx)
+
     # 未知命令：提示用户 /help
     return CommandResult(
         handled=True,
         is_prompt=False,
         text=f"未知命令 `/{cmd}`。输入 `/help` 查看所有支持的内置与自定义命令。"
+    )
+
+
+def _resolve_target_mission(mgr: Any, ctx: CommandContext, explicit_id: str | None = None) -> Any:
+    if explicit_id:
+        m = mgr.get_mission(explicit_id)
+        if m is not None:
+            return m
+    sid_mid = getattr(ctx.session, "mission_id", None) if ctx.session else None
+    if sid_mid:
+        m = mgr.get_mission(sid_mid)
+        if m is not None:
+            return m
+    all_ms = mgr.store.list()
+    return all_ms[0] if all_ms else None
+
+
+def _handle_mission_command(arg: str, ctx: CommandContext) -> CommandResult:
+    mgr = ctx.missions or (getattr(ctx.agent, "missions", None) if ctx.agent else None)
+    if mgr is None:
+        return CommandResult(handled=True, is_prompt=False, text="⚠️ Mission 运行时未初始化。")
+
+    raw = (arg or "").strip()
+    if not raw:
+        sub, rest = "status", ""
+    else:
+        parts = raw.split(maxsplit=1)
+        sub = parts[0].lower()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub == "start":
+        tokens = rest.split()
+        mode = ""
+        use_swarm = False
+        goal_tokens: list[str] = []
+        for tok in tokens:
+            if tok == "--unattended":
+                mode = "unattended"
+            elif tok == "--attended":
+                mode = "attended"
+            elif tok == "--swarm":
+                use_swarm = True
+            else:
+                goal_tokens.append(tok)
+        goal = " ".join(goal_tokens).strip()
+        if not goal:
+            return CommandResult(handled=True, is_prompt=False, text="用法: `/mission start [--unattended] [--swarm] <任务目标>`")
+        ws = str(ctx.workspace or (ctx.cfg.get("workspace") if ctx.cfg else "") or "")
+        sid = getattr(ctx.session, "id", None) if ctx.session else None
+        m = mgr.create_mission(goal=goal, workspace=ws, mode=mode, use_swarm=use_swarm, session_id=sid, auto_start=True)
+        if ctx.session is not None:
+            ctx.session.mission_id = m.id
+        md_path = mgr.store.mission_md_path(m)
+        return CommandResult(
+            handled=True,
+            is_prompt=False,
+            text=(
+                f"### 🚀 Mission 已启动 (`{m.id}`)\n\n"
+                f"- **标题**: {m.title}\n"
+                f"- **模式**: `{m.mode}` | **分支**: `{m.branch or '-'}` | **里程碑**: `{len(m.milestones)}`\n"
+                f"- **计划文件**: `{md_path}`"
+            ),
+        )
+
+    if sub == "status":
+        explicit = rest.split()[0] if rest else None
+        m = _resolve_target_mission(mgr, ctx, explicit)
+        if m is None:
+            return CommandResult(handled=True, is_prompt=False, text="暂无 Mission。输入 `/mission start <目标>` 创建一个超长期自主任务。")
+        prog = m.progress()
+        lines = [
+            f"### 🛰️ Mission `{m.id}` — {m.title}",
+            f"- **状态**: `{m.status}` | **模式**: `{m.mode}` | **Episode**: `{m.current_episode}` | **进度**: `{prog['done']}/{prog['total']}`",
+        ]
+        if m.branch:
+            lines.append(f"- **分支**: `{m.branch}`")
+        if m.pause_reason:
+            lines.append(f"- **暂停原因**: `{m.pause_reason}`")
+        if m.last_error:
+            lines.append(f"- **最近错误**: `{m.last_error[:200]}`")
+        lines.append("")
+        for ms in m.milestones:
+            mark = "✅" if ms.status == "done" else ("⏳" if ms.status == "running" else ("⛔" if ms.status == "blocked" else ("❌" if ms.status == "failed" else "⬜")))
+            sha = f" (`{ms.commit_sha[:8]}`)" if ms.commit_sha else ""
+            lines.append(f"- {mark} `{ms.id}` {ms.title}{sha}")
+        return CommandResult(handled=True, is_prompt=False, text="\n".join(lines))
+
+    if sub == "pause":
+        m = _resolve_target_mission(mgr, ctx, rest.split()[0] if rest else None)
+        if m is None:
+            return CommandResult(handled=True, is_prompt=False, text="未找到可暂停的 Mission。")
+        m = mgr.pause_mission(m.id, reason="slash_command")
+        return CommandResult(handled=True, is_prompt=False, text=f"⏸️ Mission `{m.id}` 已暂停（status=`{m.status}`）。")
+
+    if sub == "resume":
+        m = _resolve_target_mission(mgr, ctx, rest.split()[0] if rest else None)
+        if m is None:
+            return CommandResult(handled=True, is_prompt=False, text="未找到可恢复的 Mission。")
+        m = mgr.resume_mission(m.id)
+        return CommandResult(handled=True, is_prompt=False, text=f"▶️ Mission `{m.id}` 已恢复执行。")
+
+    if sub == "stop":
+        m = _resolve_target_mission(mgr, ctx, rest.split()[0] if rest else None)
+        if m is None:
+            return CommandResult(handled=True, is_prompt=False, text="未找到可停止的 Mission。")
+        m = mgr.cancel_mission(m.id)
+        return CommandResult(handled=True, is_prompt=False, text=f"⏹️ Mission `{m.id}` 已终止（status=`{m.status}`）。")
+
+    if sub == "budget":
+        m = _resolve_target_mission(mgr, ctx, rest.split()[0] if rest else None)
+        if m is None:
+            return CommandResult(handled=True, is_prompt=False, text="未找到目标 Mission。")
+        b = m.budget
+        return CommandResult(
+            handled=True,
+            is_prompt=False,
+            text=(
+                f"### 📊 Mission `{m.id}` 预算使用\n\n"
+                f"- **Wall**: `{b.get('used_wall_s', 0):.1f}s / {b.get('wall_s', 0):.0f}s`\n"
+                f"- **Tokens**: `{b.get('used_tokens', 0)} / {b.get('tokens', 0)}`\n"
+                f"- **Steps**: `{b.get('used_steps', 0)} / {b.get('steps', 0)}`\n"
+                f"- **Disk**: `{b.get('used_disk_mb', 0):.2f} MB / {b.get('disk_mb', 0):.0f} MB`"
+            ),
+        )
+
+    if sub == "log":
+        m = _resolve_target_mission(mgr, ctx, rest.split()[0] if rest else None)
+        if m is None:
+            return CommandResult(handled=True, is_prompt=False, text="未找到目标 Mission。")
+        evs = mgr.store.read_events(m.id, limit=15)
+        if not evs:
+            return CommandResult(handled=True, is_prompt=False, text=f"Mission `{m.id}` 暂无事件日志。")
+        lines = [f"### 📜 Mission `{m.id}` 最近事件 ({len(evs)})", ""]
+        for ev in evs:
+            lines.append(f"- `#{ev.get('seq')}` **{ev.get('kind')}** `{str(ev.get('data') or {})[:140]}`")
+        return CommandResult(handled=True, is_prompt=False, text="\n".join(lines))
+
+    if sub == "edit":
+        m = _resolve_target_mission(mgr, ctx, rest.split()[0] if rest else None)
+        if m is None:
+            return CommandResult(handled=True, is_prompt=False, text="未找到目标 Mission。")
+        md_path = mgr.store.mission_md_path(m)
+        txt = mgr.store.read_mission_md(m)
+        return CommandResult(
+            handled=True,
+            is_prompt=False,
+            text=f"### 📝 MISSION.md (`{md_path}`)\n\n```markdown\n{txt[:2500]}\n```",
+        )
+
+    if sub == "rollback":
+        toks = rest.split()
+        if not toks:
+            return CommandResult(handled=True, is_prompt=False, text="用法: `/mission rollback <milestone_id|commit_sha|base> [mission_id]`")
+        target = toks[0]
+        m = _resolve_target_mission(mgr, ctx, toks[1] if len(toks) > 1 else None)
+        if m is None:
+            return CommandResult(handled=True, is_prompt=False, text="未找到目标 Mission。")
+        try:
+            m = mgr.rollback(m.id, target)
+            return CommandResult(handled=True, is_prompt=False, text=f"⏪ Mission `{m.id}` 已回滚到 `{target}`。")
+        except Exception as e:
+            return CommandResult(handled=True, is_prompt=False, text=f"❌ 回滚失败: {e}")
+
+    return CommandResult(
+        handled=True,
+        is_prompt=False,
+        text="用法: `/mission start <目标> | status | pause | resume | stop | budget | log | edit | rollback <target>`",
     )
 
 

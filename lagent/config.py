@@ -121,6 +121,10 @@ DEFAULTS: dict[str, Any] = {
         "max_pdf_pages": 50,
         "max_archive_entries": 500,
         "html_scripts_default": False,
+        "recorder_enabled": False,
+        "max_image_pixels": 40_000_000,
+        "max_archive_mb": 64,
+        "max_video_frames": 6,
     },
     "skills": {
         "default_enabled_limit": 14,
@@ -278,6 +282,7 @@ RANGES: dict[str, tuple[float, float]] = {
     "mission.budget.wall_s": (60, 604_800), "mission.budget.tokens": (10_000, 50_000_000),
     "mission.budget.steps": (10, 5000), "mission.budget.disk_mb": (64, 65536),
     "media.subprocess_timeout_s": (5, 300), "media.max_pdf_pages": (1, 500), "media.max_archive_entries": (1, 5000),
+    "media.max_image_pixels": (1_000_000, 120_000_000), "media.max_archive_mb": (1, 1024), "media.max_video_frames": (1, 24),
     "skills.default_enabled_limit": (1, 50),
     "ui.font_size": (12, 22),
 }

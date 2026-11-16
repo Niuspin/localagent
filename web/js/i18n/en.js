@@ -27,6 +27,23 @@
     'ui.accent': 'Accent Preset',
     'ui.locale': 'Language',
     'ui.colwidth': 'Reading Width',
-    'swarm.section': 'Swarm Concurrency'
+    'swarm.section': 'Swarm Concurrency',
+    'drawer.tab.mission': 'Missions',
+    'mission.sidebar': 'Missions',
+    'mission.new': 'New Mission',
+    'mission.empty': 'Run /mission start or click +',
+    'mission.pause': 'Pause',
+    'mission.resume': 'Resume',
+    'mission.cancel': 'Cancel',
+    'mission.budget': 'Budget Monitor',
+    'mission.milestones': 'Milestones & Gates',
+    'mission.timeline': 'Timeline',
+    'mission.approvals': 'Blocked Approvals',
+    'mission.approve': 'Approve & Resume',
+    'mission.deny': 'Deny',
+    'mission.rollback': 'Rollback Here',
+    'mission.md.title': 'MISSION.md (applied on next Episode)',
+    'mission.md.save': 'Save MISSION.md',
+    'mission.detail.title': 'Mission Inspector'
   };
 })();

@@ -74,6 +74,23 @@ SCENARIOS: list[Scenario] = [
               "mod_b.py": "def old_b():\n    return 2\n",
               "mod_c.py": "def old_c():\n    return 3\n"},
              lambda ws, t: "new_a" in _read(ws, "mod_a.py") and "new_b" in _read(ws, "mod_b.py") and "new_c" in _read(ws, "mod_c.py")),
+    Scenario("long_refactor",
+             "执行跨文件长期重构：将 legacy_auth.py 和 legacy_store.py 中的 LegacyToken 统一迁移为 ModernSession，更新 app_entry.py 调用，并运行 pytest test_modern.py 验证全部通过。",
+             {"legacy_auth.py": "class LegacyToken:\n    def issue(self):\n        return 'tok'\n",
+              "legacy_store.py": "from legacy_auth import LegacyToken\ndef make():\n    return LegacyToken().issue()\n",
+              "app_entry.py": "from legacy_store import make\ndef run():\n    return make()\n",
+              "test_modern.py": "from app_entry import run\nfrom legacy_auth import ModernSession\ndef test_ok():\n    assert isinstance(ModernSession().issue(), str) and run() == 'tok'\n"},
+             lambda ws, t: "ModernSession" in _read(ws, "legacy_auth.py") and "ModernSession" in _read(ws, "legacy_store.py") and "LegacyToken" not in _read(ws, "legacy_store.py")),
+    Scenario("resume_after_crash",
+             "检查工作区中未完成的 MISSION.md 里程碑清单，保留已完成的步骤 m1.txt，直接补齐未完成的 m2.txt（内容包含 STEP2_DONE）与验证摘要。",
+             {"m1.txt": "STEP1_DONE\n",
+              ".localagent/missions/demo/MISSION.md": "# Mission: Demo\n\n## Milestones\n- [x] m1: Create m1.txt\n- [ ] m2: Create m2.txt containing STEP2_DONE\n"},
+             lambda ws, t: "STEP1_DONE" in _read(ws, "m1.txt") and "STEP2_DONE" in _read(ws, "m2.txt")),
+    Scenario("stall_recovery",
+             "运行 pytest test_service.py 定位 calc_rate 的除零与边界 bug；第一次修复后再次运行 pytest 验证全部断言通过并写入 DONE_FIXED 到 status.txt。",
+             {"service.py": "def calc_rate(ok, total):\n    return ok / total\n",
+              "test_service.py": "from service import calc_rate\ndef test_zero():\n    assert calc_rate(0, 0) == 0.0\n    assert calc_rate(3, 6) == 0.5\n"},
+             lambda ws, t: "DONE_FIXED" in _read(ws, "status.txt") and "total == 0" in _read(ws, "service.py")),
 ]
 
 

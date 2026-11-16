@@ -186,12 +186,13 @@ def make_title(text: str, files_: list[str]) -> str:
 class Agent:
     def __init__(self, *, cfg: Config, engine: Engine, store: SessionStore, journal: Journal, audit: sec.AuditLog,
                  memory: Any, skills: Any, protected: list[Path], hidden: list[Path], notify: Any = None, mcp: Any = None,
-                 outputs: Any = None, artifacts: Any = None, swarms: Any = None):
+                 outputs: Any = None, artifacts: Any = None, swarms: Any = None, missions: Any = None):
         self.cfg, self.engine, self.store, self.journal, self.audit = cfg, engine, store, journal, audit
         self.memory, self.skills, self.mcp = memory, skills, mcp
         self.outputs = outputs                                # OutputStore | None：大输出落盘（见 outputs.py）
         self.artifacts = artifacts                            # ArtifactStore | None：多媒体与结构化产物仓储（见 artifacts.py）
         self.swarms = swarms                                  # SwarmManager | None：多代理 DAG 集群管理器（见 swarm/）
+        self.missions = missions                              # MissionManager | None：超长期 Mission 运行时（见 mission/）
         self.protected, self.hidden = protected, hidden
         self.runs: dict[str, Run] = {}
         self.allow_keys: dict[str, set[str]] = {}
@@ -385,7 +386,7 @@ class Agent:
                     return
 
             # 2. 斜杠命令处理
-            cmd_ctx = CommandContext(agent=self, session=sess, workspace=ws, cfg=cfg, journal=self.journal)
+            cmd_ctx = CommandContext(agent=self, session=sess, workspace=ws, cfg=cfg, journal=self.journal, missions=self.missions)
             cmd_res = dispatch_command(text, cmd_ctx)
             if cmd_res and cmd_res.handled:
                 if not cmd_res.is_prompt:
@@ -534,9 +535,39 @@ class Agent:
         return ctx
 
     async def _append_user(self, run: Run, sess: Session, ctx: ToolCtx, text: str, images: list[str], files_: list[str], skills_: list[str]) -> None:
+        from .media import ingest_file_async
+        from .tools.files import IMG_EXT, OFFICE_EXT, RICH_MEDIA_EXT
+
         parts = text
+        images_eff = list(images or [])
         if files_:
-            parts += "\n\n[用户上传的文件（在工作区内，可用 read_file 读取）]\n" + "\n".join(f"- {f}" for f in files_)
+            plain_files: list[str] = []
+            rich_exts = IMG_EXT | OFFICE_EXT | RICH_MEDIA_EXT
+            for f in files_:
+                ext = Path(str(f)).suffix.lower()
+                if ext in rich_exts:
+                    try:
+                        p = ctx.guard.resolve(f, write=False)
+                        res = await ingest_file_async(p, cfg=self.cfg, engine=self.engine)
+                        summary = res.render_summary(max_chars=3500)
+                        if not ctx.session.tainted:
+                            ctx.session.tainted = True
+                            sess.tainted = True
+                            run.emit("taint", {"tainted": True, "reason": f"媒体摄取 {f}"})
+                        parts += f"\n\n[已受限摄取附件 {f} ({res.kind}/{res.mime})]\n{sec.wrap_untrusted(summary, f'media:{f}', ctx.session.nonce)}"
+                        if self.engine.vision and res.images:
+                            for img_item in res.images:
+                                if len(images_eff) >= 8:
+                                    break
+                                if img_item.get("data_url"):
+                                    images_eff.append(img_item["data_url"])
+                    except Exception as e:  # noqa: BLE001
+                        plain_files.append(f"{f} (预解析跳过: {e})")
+                else:
+                    plain_files.append(f)
+            if plain_files:
+                parts += "\n\n[用户上传的文件（在工作区内，可用 read_file 读取）]\n" + "\n".join(f"- {f}" for f in plain_files)
+        images = images_eff
         for name in skills_:
             try:
                 body, _meta = self.skills.load_for_model(name, ctx.guard.ws if sess.workspace else None)
@@ -990,6 +1021,25 @@ class Agent:
         if dec.action == "deny":
             finish("denied", dec.reason)
             return f"拒绝: {dec.reason}", []
+        m_guard = getattr(call_ctx, "mission_guard", None)
+        if m_guard is not None:
+            verdict = m_guard["policy"].evaluate(name, args, tainted=tainted_eff, approved_actions=m_guard.get("approved"))
+            if not verdict.allowed:
+                if verdict.action == "deny":
+                    finish("denied", verdict.reason)
+                    self.audit.append(event="denied", session=sess.id, tool=name, reason=verdict.reason, **self._audit_ctx(run))
+                    return f"拒绝: {verdict.reason}", []
+                m_guard["blocked_out"] = {
+                    "tool": name,
+                    "target": verdict.target,
+                    "reason": verdict.reason,
+                    "signature": f"{name}:{verdict.target}",
+                }
+                finish("denied", f"Mission 边界阻断: {verdict.reason}")
+                self.audit.append(event="mission_blocked", session=sess.id, tool=name, target=verdict.target, reason=verdict.reason, **self._audit_ctx(run))
+                run.cancel_evt.set()
+                return f"操作超出无人值守授权范围（{verdict.reason}），已阻塞并加入待批清单。", []
+            dec = sec.Decision("allow", f"mission_policy:{verdict.reason}", dec.risk, dec.key)
         if dec.action == "ask":
             decision = await self._ask(run, call_ctx, blk, tool, args, dec, tainted_eff)
             if decision == "deny":
@@ -1057,6 +1107,18 @@ class Agent:
                         pass
         if repeat:
             text_for_model += "\n\n（提示：你已连续 3 次发出完全相同的调用。请换个办法，或向用户说明卡在哪里。）"
+        m_guard = getattr(call_ctx, "mission_guard", None)
+        if m_guard is not None and m_guard.get("watchdog") is not None:
+            from .mission.runner import _workspace_diff_fingerprint
+            _, cur_hash = _workspace_diff_fingerprint(Path(ws_curr)) if ws_curr else ("", "")
+            sig = m_guard["watchdog"].observe_step(tool=name, args=args, diff_hash=cur_hash)
+            if sig is not None:
+                run.emit("stall_detected", sig.to_dict())
+                if sig.action == "nudge":
+                    text_for_model += f"\n\n[WATCHDOG 自省提示] {sig.detail}。请停止重复尝试并调整方案。"
+                else:
+                    m_guard["stall_out"] = sig.to_dict()
+                    run.cancel_evt.set()
         finish("error" if res.error else "ok", text, res.meta, dur)
         if res.error:
             self._track_verify_failure(run, sess, tool, args)
@@ -1253,6 +1315,7 @@ class Agent:
             return False
         if len(keep) >= before or not summ:
             return False
+        summ = self._preserve_mission_summary(sess, summ)
         sess.history, sess.summary = keep, summ
         sess.kv_prune_upto = 0
         for m in sess.ui:
@@ -1533,6 +1596,144 @@ class Agent:
             "tainted": bool(sub_st.tainted),
             "artifacts": [],
         }
+
+    def _preserve_mission_summary(self, sess: Session, summ: str) -> str:
+        """摘要压缩时结构化保留 Mission 的 plan / acceptance / open_questions。"""
+        mid = getattr(sess, "mission_id", None)
+        if not mid or self.missions is None:
+            return summ
+        m = self.missions.get_mission(mid)
+        if m is None or "## Mission Preserved State" in summ:
+            return summ
+        plan_lines = [f"- [{ms.status}] {ms.id}: {ms.title}" for ms in m.milestones[:12]]
+        acc_lines = [f"- [{a.kind}] {a.target}" for a in m.acceptance[:8]]
+        for ms in m.milestones:
+            if ms.id == m.current_milestone_id:
+                acc_lines.extend(f"- ({ms.id}) [{a.kind}] {a.target}" for a in ms.acceptance[:6])
+        oq_lines = [f"- {q}" for q in (m.open_questions or [])[-8:]]
+        block = [
+            "",
+            "## Mission Preserved State",
+            f"Mission: {m.id} ({m.title})",
+            "### plan",
+            *(plan_lines or ["- (none)"]),
+            "### acceptance",
+            *(acc_lines or ["- (none)"]),
+            "### open_questions",
+            *(oq_lines or ["- (none)"]),
+        ]
+        return summ.rstrip() + "\n" + "\n".join(block)
+
+    async def run_mission_episode(
+        self,
+        *,
+        mission: Any,
+        milestone: Any,
+        episode: Any,
+        prompt: str,
+        workspace: Path,
+        policy: Any,
+        approved_actions: set[str],
+        watchdog: Any,
+        tracker: Any,
+        cancel_event: asyncio.Event,
+    ) -> Any:
+        """为 Mission 单个 Episode 构建全新干净上下文并执行有限步数代理循环。"""
+        from .mission.runner import EpisodeOutcome
+
+        ep_sid = f"{mission.id}_ep{episode.id}_{uuid.uuid4().hex[:6]}"
+        ep_sess = Session(ep_sid, workspace=str(workspace))
+        ep_sess.title = f"Mission:{mission.title[:24]}#ep{episode.id}"
+        ep_sess.agent_id = "mission"
+        ep_sess.mission_id = mission.id
+
+        ep_st = SessionState(
+            ep_sid,
+            tainted=False,
+            nonce=uuid.uuid4().hex[:8],
+            todos=[],
+            user_domains=set(policy.allow_domains or []),
+            allow_keys=set(),
+            agent_id="mission",
+        )
+        ep_st.sub_mode = "auto" if mission.mode == "unattended" else "ask"
+        ep_st.turn_id = f"ep_{episode.id}"
+
+        ep_run = Run(ep_sid, agent_id="mission", mission_id=mission.id)
+        if cancel_event.is_set():
+            ep_run.cancel_evt.set()
+        orig_cancel_check = ep_run.cancel_evt
+
+        # 将外层 mission cancel_event 同步到 ep_run.cancel_evt
+        async def _watch_cancel() -> None:
+            await cancel_event.wait()
+            orig_cancel_check.set()
+
+        watch_task = asyncio.create_task(_watch_cancel())
+        ep_ctx = self._make_ctx(ep_run, ep_sess, ep_st, str(workspace))
+        ep_ctx.agent = self
+        ep_ctx.turn_id = f"ep_{episode.id}"
+        guard_state: dict[str, Any] = {
+            "policy": policy,
+            "approved": set(approved_actions or set()),
+            "watchdog": watchdog,
+            "blocked_out": None,
+            "stall_out": None,
+        }
+        ep_ctx.mission_guard = guard_state  # type: ignore[attr-defined]
+
+        # 转发关键工具/状态事件
+        if self.notify:
+            orig_emit = ep_run.emit
+
+            def _fwd(ev: str, d: dict) -> None:
+                orig_emit(ev, d)
+                if ev in ("tool_start", "tool_result", "stall_detected"):
+                    self.notify("mission_episode", {"mission_id": mission.id, "episode": episode.id, "event": ev, **d})
+
+            ep_run.emit = _fwd  # type: ignore[method-assign]
+
+        await self._append_user(ep_run, ep_sess, ep_ctx, prompt, [], [], [])
+        ep_ui: dict[str, Any] = {"id": uuid.uuid4().hex[:8], "role": "assistant", "ts": time.time(), "status": "running", "error": None, "blocks": []}
+        max_steps = max(1, min(int((mission.budget or {}).get("episode_max_steps") or 25), 40))
+
+        err: str | None = None
+        try:
+            await self.engine.ensure_ready()
+            _st_res, loop_err = await self._loop(ep_run, ep_sess, ep_st, ep_ctx, ep_ui, max_steps_override=max_steps)
+            err = loop_err or ep_ui.get("error")
+        except asyncio.CancelledError:
+            if guard_state["blocked_out"] is None and guard_state["stall_out"] is None and not cancel_event.is_set():
+                raise
+            err = None
+        except Exception as e:  # noqa: BLE001
+            err = str(e)
+        finally:
+            watch_task.cancel()
+            try:
+                await watch_task
+            except asyncio.CancelledError:
+                pass
+
+        texts = [b["text"] for b in ep_ui.get("blocks", []) if b.get("type") == "text" and b.get("text")]
+        summary = "\n\n".join(texts).strip()
+        if not summary:
+            t_blocks = [b.get("content", "") for b in ep_ui.get("blocks", []) if b.get("type") == "tool" and b.get("content")]
+            summary = "\n".join(t_blocks)[-1500:] or f"Episode #{episode.id} finished."
+        tool_cnt = sum(1 for b in ep_ui.get("blocks", []) if b.get("type") == "tool")
+        tokens_used = int((ep_sess.usage or {}).get("used", 0) or 0)
+        return EpisodeOutcome(
+            steps=max(1, ep_run.stats.steps),
+            tokens=tokens_used,
+            tool_calls=tool_cnt,
+            summary=summary[:2500],
+            milestone_ready=(guard_state["blocked_out"] is None and guard_state["stall_out"] is None and not err and not cancel_event.is_set()),
+            blocked=guard_state["blocked_out"],
+            stall_signal=guard_state["stall_out"],
+            run_id=ep_run.id,
+            error=err,
+            context_chars=len(prompt),
+        )
 
     # ------------------------------------------------------------ 回退/重新生成
     def truncate(self, sess: Session, from_index: int) -> None:

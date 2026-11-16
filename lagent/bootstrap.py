@@ -498,6 +498,49 @@ def install_llama_cpp(
     return server_exe
 
 
+def find_whisper(root: Path = ROOT) -> Path | None:
+    """在 bin/ 目录与系统 PATH 中查找可选 whisper.cpp 可执行文件。"""
+    names = ("whisper-cli.exe", "whisper.exe", "main.exe") if os.name == "nt" else ("whisper-cli", "whisper", "main")
+    bin_dir = root / "bin"
+    for exe in names:
+        for cand in (bin_dir / exe, *bin_dir.glob(f"*/{exe}")):
+            if cand.is_file():
+                return cand
+    for exe in names[:2]:
+        w = shutil.which(exe)
+        if w:
+            return Path(w)
+    return None
+
+
+def install_whisper_cpp(root: Path = ROOT, quiet: bool = False) -> Path:
+    """按 SHA-256 校验获取并安全解压 whisper.cpp 可选离线转写二进制。"""
+    hw = detect_hardware()
+    releases = fetch_github_releases(repo="ggml-org/whisper.cpp", per_page=8)
+    os_tok = "win" if hw.get("os") == "windows" else ("macos" if hw.get("os") == "macos" else "linux")
+    asset = None
+    for rel in releases:
+        for a in rel.get("assets", []):
+            nm = str(a.get("name", "")).lower()
+            if os_tok in nm and (nm.endswith(".zip") or nm.endswith(".tar.gz")) and "bin" in nm:
+                asset = a
+                break
+        if asset:
+            break
+    if not asset:
+        raise RuntimeError("未在 ggml-org/whisper.cpp Releases 找到匹配的预编译资产")
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="lagent_whisper_") as td:
+        arc = Path(td) / asset.get("name", "whisper.zip")
+        download_asset(asset, arc, quiet=quiet)
+        safe_extract(arc, bin_dir)
+    found = find_whisper(root)
+    if not found:
+        raise RuntimeError("解压 whisper.cpp 后未发现可执行文件")
+    return found
+
+
 # ------------------------------------------------------------------ 主入口与 CLI
 def run_bootstrap(
     check_only: bool = False,

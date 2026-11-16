@@ -3,7 +3,7 @@
   'use strict';
   var LA = window.LA = window.LA || {};
 
-  LA.S = { state: null, config: null, sessions: [], cur: null, skills: [], drawerOpen: false, drawerTab: 'files', attachments: [], chosen: [], restartNeeded: false };
+  LA.S = { state: null, config: null, sessions: [], missions: [], cur: null, skills: [], drawerOpen: false, drawerTab: 'files', attachments: [], chosen: [], restartNeeded: false };
 
   /* ---------- 事件总线 ---------- */
   var subs = {};
@@ -96,6 +96,13 @@
   };
   LA.refreshSkills = function () {
     return LA.get('/api/skills').then(function (l) { LA.S.skills = l; return l; });
+  };
+  LA.refreshMissions = function () {
+    return LA.get('/api/missions').then(function (r) {
+      LA.S.missions = (r && r.missions) || [];
+      LA.bus.emit('missions', LA.S.missions);
+      return LA.S.missions;
+    });
   };
   LA.engine = function () { return (LA.S.state && LA.S.state.engine) || { status: 'stopped' }; };
   LA.engineReady = function () { return LA.engine().status === 'ready'; };

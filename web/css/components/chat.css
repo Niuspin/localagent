@@ -122,6 +122,11 @@
 .attach-chip .x:hover { color: var(--danger); background: var(--danger-soft); }
 .attach-chip.skill { color: var(--accent); background: var(--accent-soft); border-color: transparent; font-weight: 500; }
 .attach-chip img { width: 22px; height: 22px; border-radius: 5px; object-fit: cover; }
+.attach-plan { font-size: .72em; padding: 1px 6px; border-radius: var(--radius-pill); background: var(--bg-soft); color: var(--muted); border: 1px solid var(--border); flex: none; }
+.attach-plan.unsupported { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+.attach-res { font-size: .72em; padding: 1px 6px; border-radius: 5px; background: var(--bg-elev); color: var(--muted); border: 1px solid var(--border); cursor: pointer; }
+.attach-res:hover { color: var(--text); border-color: var(--accent); }
+.icon-btn.rec.recording { background: var(--danger-soft); color: var(--danger); animation: pulse 1.2s infinite; }
 
 .msg-acts { display: flex; gap: 4px; opacity: 0; transition: opacity var(--dur-1) var(--ease-standard); margin-top: 6px; }
 .msg:hover .msg-acts, .msg:focus-within .msg-acts { opacity: 1; }

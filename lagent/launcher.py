@@ -109,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--browser", action="store_true", help="用系统默认浏览器，而不是独立应用窗口")
     ap.add_argument("--load", action="store_true", help="启动后立即加载 config 里上次的模型")
     ap.add_argument("--offline", action="store_true", help="纯离线模式启动（不提示联网或在线搜索配置）")
+    ap.add_argument("--resume-missions", action="store_true", help="启动时自动恢复上次运行中未完成的 Mission")
     ap.add_argument("--version", action="version", version=f"LocalAgent {__version__}")
     a = ap.parse_args(argv)
     if a.offline:
@@ -149,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 62, flush=True)
 
     st.autostart = a.load
+    st.resume_missions = bool(getattr(a, "resume_missions", False))
     server = uvicorn.Server(uvicorn.Config(make_app(st), host="127.0.0.1", port=port, log_level="warning", access_log=False,
                                            timeout_graceful_shutdown=3))   # SSE 长连接不能拖住退出
     

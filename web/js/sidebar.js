@@ -232,6 +232,10 @@
       LA.$('#btnSettings').addEventListener('click', function () { LA.settings.open(); });
 
       LA.bus.on('sessions', renderList);
+      LA.bus.on('missions', function () {
+        if (LA.missionPanel && LA.missionPanel.renderSidebar) LA.missionPanel.renderSidebar(LA.$('#missionList'));
+      });
+      if (LA.missionPanel && LA.missionPanel.renderSidebar) LA.missionPanel.renderSidebar(LA.$('#missionList'));
       LA.bus.on('runstate', renderList);
       LA.bus.on('sessionmeta', function () { renderList(); });
     }

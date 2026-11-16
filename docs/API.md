@@ -25,9 +25,10 @@
 - `tainted` (bool)
 - `hw`: `HwInfo`（`cpu_cores`、`cpu_threads`、`ram_gb`、`ram_free_gb`、`gpus`、`gpu_backend` 等）
 - `sandbox`: `{"available": bool, "kind": str, "hardening"?: "win32-job", ...}`
+- `capabilities`: M3 多模态能力矩阵（`vision`、`audio`、`audio_model`、`ocr`、`whisper`、`ffmpeg`、`pdf_render`、`office`、`parquet`、`recorder_enabled`）
 - `engine`:
   - `status`: `"stopped" | "starting" | "ready" | "stopping" | "error"`
-  - `model` (dict | null), `mmproj` (str | null), `ctx` (int), `ctx_cap` (int), `vision` (bool)
+  - `model` (dict | null), `mmproj` (str | null), `ctx` (int), `ctx_cap` (int), `vision` (bool), `audio` (bool)
   - `binary` (str | null), `error` (str | null)
   - `tps` (float), `perf` (`TelemetryTracker` summary: `prompt_tps`, `eval_tps`, `ttft_ms`, `spec_accept_rate`, `spec_recommended`, `cache_hit_rate`, ...)
 - `models`: `ModelInfo[]`（含 `file`, `size_gb`, `arch`, `name`, `moe`, `experts`, `experts_used`, `ctx_train`, `quant`, `mmproj`, `vision`, `is_draft`, `draft_model`, `compatible_drafts`, `error`）
@@ -77,8 +78,10 @@
 - `PATCH /api/sessions/{sid}`: 更新会话字段 `{"title"?, "pinned"?, "workspace"?, "permission_mode"?}`（支持会话级 `"ask" | "auto_edit" | "plan" | "auto" | ""` 权限策略覆盖）。
 
 ### `POST /api/sessions/{sid}/messages` / `upload` / `compact` / `truncate` / `untaint` / `export`
-- `POST /api/sessions/{sid}/messages`: 提交用户消息与附件：`{"text": str, "images"?: list[str], "files"?: list[str], "skills"?: list[str]}` -> `{"run_id": str}`。
-- `POST /api/sessions/{sid}/upload`: 上传附件到工作区 `uploads/`。
+- `POST /api/sessions/{sid}/messages`: 提交用户消息与附件：`{"text": str, "images"?: list[str], "files"?: list[str], "skills"?: list[str]}` -> `{"run_id": str}`（富媒体附件会自动走受限子进程摄取并标记 `tainted`）。
+- `POST /api/sessions/{sid}/upload`: 上传附件到工作区 `uploads/`，同步执行魔数嗅探、处理方式规划（`plan`）与受限预解析（拦截解压炸弹/像素炸弹）。
+- `GET /api/capabilities`: 返回多模态能力协商矩阵；可选传 `?filename=...&mime=...` 获取单文件处理计划。
+- `POST /api/media/ingest`: 对工作区/上传文件执行受限隔离摄取并返回结构化 `IngestResult`（请求体 `{"session_id"?, "path": str, "resolution"?: "low"|"auto"|"high", "select_member"?: str, "render_scanned"?: bool}`，自动标记会话 `tainted`）。
 - `POST /api/sessions/{sid}/compact`: 手动触发上下文摘要压缩（优先通过 `ModelRouter` 调用配置的压缩端点）。
 - `POST /api/sessions/{sid}/truncate`: 请求体 `{"from_index": int}`，按 UI 消息索引回退历史对话并联动回滚多轮文件快照。
 - `POST /api/sessions/{sid}/untaint`: 手动解除当前会话的 `tainted` 污染标记。
@@ -110,6 +113,17 @@
 - `POST /api/swarms/{id}/cancel` / `pause` / `resume`: 取消、暂停或恢复 Swarm（支持服务重启后基于 `data/swarms/<id>/state.json` 续跑）。
 - `POST /api/swarms/{id}/agents/{aid}/message` / `cancel`: 向单个子代理发送邮箱消息或级联取消该节点及下游依赖。
 - `POST /api/swarms/{id}/conflicts/{cid}/resolve`: 处理 `MergeQueue` 冲突卡（`{"decision": "resolved_ours" | "resolved_theirs" | "dismissed"}`）。
+
+### Mission 运行时 API（`/api/missions*`）
+
+- `GET /api/missions` / `POST /api/missions`: 列出所有 Mission 摘要，或创建并启动超长期分段自主任务（请求体 `{"goal": str, "title"?: str, "workspace"?: str, "mode"?: "attended"|"unattended", "milestones"?: list, "acceptance"?: list, "policy"?: dict, "budget"?: dict, "use_swarm"?: bool, "session_id"?: str, "auto_start"?: bool}`）。
+- `GET /api/missions/{id}` / `PATCH /api/missions/{id}` / `DELETE /api/missions/{id}`: 读取完整 Mission 快照（含里程碑、Episode、审批队列、`MISSION.md` 内容与路径）、更新配置/策略/预算或删除。
+- `POST /api/missions/{id}/start` / `pause` / `resume` / `cancel`: 启动、暂停、恢复或终止 Mission；服务启动支持 `--resume-missions` 从崩溃前 `running` 状态续跑。
+- `POST /api/missions/{id}/rollback`: 一键回滚 Git 分支 `mission/<id>` 到指定里程碑提交点（请求体 `{"target": "<milestone_id|commit_sha|base>"}`），并重置后续里程碑状态。
+- `POST /api/missions/{id}/approve/{aid}`: 批准或拒绝无人值守阻塞待批项（`{"decision": "allow" | "deny"}`），批准后自动恢复被阻塞的任务。
+- `GET /api/missions/{id}/timeline`: 获取 Episode、里程碑、停滞升级、门控验证及事件日志（`data/missions/<id>/events.jsonl`）。
+- `GET /api/missions/{id}/mission-md` / `PUT /api/missions/{id}/mission-md`: 在线读取或编辑 `<workspace>/.localagent/missions/<id>/MISSION.md`；外部编辑会在下一个 Episode 启动前自动重载生效。
+- `GET /api/missions/{id}/events`: Mission 专属 SSE 事件流（支持 `Last-Event-ID` 断点续传；事件包含 `mission_started`、`episode_started`、`handoff_saved`、`milestone_done`、`gate_result`、`stall_detected`、`mission_blocked`、`budget_warn`、`mission_budget`、`mission_paused`、`mission_resumed`、`mission_rollback`、`mission_done`）。
 
 ---
 

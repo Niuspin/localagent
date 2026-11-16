@@ -43,6 +43,8 @@ from .permissions import PermissionManager
 from .sessions import SessionStore
 from .skills import Skills
 from .swarm import SwarmManager, SwarmStore
+from .mission import MissionManager, MissionStore
+from .media import detect_capabilities, explain_ingest_plan, ingest_file_async, sniff_magic
 from .tools import search as search_mod
 from .tools.files import SKIP_DIRS, rewind_to_turn
 
@@ -90,12 +92,16 @@ class State:
         self.mcp = McpManager(data, self.audit, on_change=lambda _n, v: self.broadcast("mcp", {"server": v}))
         self.hub = hub_mod.DownloadManager(root / "models", on_event=self.broadcast_threadsafe)
         self.swarms = SwarmManager(cfg=self.cfg, store=SwarmStore(data / "swarms"), journal=self.journal, audit=self.audit, notify=self.broadcast)
+        self.missions = MissionManager(cfg=self.cfg, store=MissionStore(data / "missions"), journal=self.journal, audit=self.audit,
+                                       memory=self.memory, swarms=self.swarms, notify=self.broadcast)
         self.agent = Agent(cfg=self.cfg, engine=self.engine, store=self.store, journal=self.journal, audit=self.audit, memory=self.memory,
                            skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp,
-                           outputs=self.outputs, artifacts=self.artifacts, swarms=self.swarms)
+                           outputs=self.outputs, artifacts=self.artifacts, swarms=self.swarms, missions=self.missions)
         self.swarms.default_runner = self.agent.run_swarm_node
+        self.missions.default_episode_runner = self.agent.run_mission_episode
         self.root = root
         self.autostart = False
+        self.resume_missions = False
         self.exit_cb: Any = None        # 由启动器设置：请求整个应用退出（测试/纯服务模式下为 None）
 
     def broadcast(self, event: str, data: dict) -> None:
@@ -231,9 +237,20 @@ def make_app(st: State) -> Starlette:
         eff_mode = (getattr(sess, "permission_mode", "") if sess else "") or global_mode
         return J({"version": __version__, "workspace": st.workspace_of(sid), "engine": st.engine.state(), "models": models,
                   "mmprojs": mms, "hw": await asyncio.to_thread(hw.detect), "sandbox": sec.sandbox_info(),
+                  "capabilities": detect_capabilities(st.engine, st.cfg, st.engine.bin_dir),
                   "permission_mode": eff_mode, "global_permission_mode": global_mode,
                   "offline": os.environ.get("LOCALAGENT_OFFLINE") == "1",
                   "tainted": bool(sess.tainted) if sess else False})
+
+    @route("/api/capabilities", ["GET"])
+    async def capabilities(req: Request) -> Response:
+        caps = detect_capabilities(st.engine, st.cfg, st.engine.bin_dir)
+        out: dict[str, Any] = dict(caps)
+        fn = (req.query_params.get("filename") or "").strip()
+        mime = (req.query_params.get("mime") or "").strip()
+        if fn or mime:
+            out["plan"] = explain_ingest_plan(fn, mime, caps)
+        return J(out)
 
     @route("/api/config", ["GET", "PATCH"])
     async def config(req: Request) -> Response:
@@ -453,7 +470,59 @@ def make_app(st: State) -> Starlette:
         dest.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(dest, data)
         st.journal.record(s.id, op="write", path=dest, summary=f"上传 {g.rel(dest)}", existed=False)
-        return J({"path": g.rel(dest), "size": len(data)})
+        caps = detect_capabilities(st.engine, st.cfg, st.engine.bin_dir)
+        kind, mime = sniff_magic(data[:16384], name, path=dest)
+        plan = explain_ingest_plan(name, mime, caps, kind=kind)
+        res = await ingest_file_async(dest, cfg=st.cfg, engine=st.engine, caps=caps) if kind not in ("text", "md") else None
+        out: dict[str, Any] = {
+            "path": g.rel(dest),
+            "size": len(data),
+            "kind": res.kind if res else kind,
+            "mime": res.mime if res else mime,
+            "plan": plan,
+        }
+        if res is not None:
+            if not res.ok and res.error and any(k in res.error for k in ("炸弹", "穿越", "符号链接", "上限")):
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise ValueError(res.error)
+            out["ok"] = res.ok
+            out["warnings"] = res.warnings
+            out["meta"] = res.meta
+            out["images"] = res.images[:4]
+            out["summary"] = res.render_summary(max_chars=2500)
+            if not res.ok and res.error:
+                out["error"] = res.error
+        return J(out)
+
+    @route("/api/media/ingest", ["POST"])
+    async def media_ingest(req: Request) -> Response:
+        d = await jbody(req)
+        sid = str(d.get("session_id") or "")
+        raw_path = str(d.get("path") or "").strip()
+        if not raw_path:
+            raise ValueError("path 不能为空")
+        g = st.guard(sid) if sid else sec.PathGuard(sec.validate_workspace(st.cfg.get("workspace") or ""))
+        p = g.resolve(raw_path, write=False)
+        res = await ingest_file_async(
+            p,
+            cfg=st.cfg,
+            engine=st.engine,
+            options={
+                "resolution": str(d.get("resolution") or "auto"),
+                "select_member": str(d.get("select_member") or ""),
+                "render_scanned": bool(d.get("render_scanned", True)),
+            },
+        )
+        sess = st.store.get(sid) if sid else None
+        if sess is not None and not sess.tainted:
+            sess.tainted = True
+            st.store.save(sess)
+        payload = res.to_dict()
+        payload["summary"] = res.render_summary(max_chars=8000)
+        return J(payload)
 
     @route("/api/sessions/{sid}/compact", ["POST"])
     async def compact(req: Request) -> Response:
@@ -863,6 +932,196 @@ def make_app(st: State) -> Starlette:
         st.swarms._persist(sw)
         return J({"ok": True, "conflict": card.to_dict()})
 
+    # ------------------------------------------------------------ Missions (M2)
+    @route("/api/missions", ["GET", "POST"])
+    async def missions_root(req: Request) -> Response:
+        if req.method == "POST":
+            d = await jbody(req)
+            goal = str(d.get("goal") or "").strip()
+            if not goal:
+                raise ValueError("mission goal 不能为空")
+            sid = str(d.get("session_id") or "")
+            sess = st.store.get(sid) if sid else None
+            ws = str(d.get("workspace") or (sess.workspace if sess else st.cfg.get("workspace", default="")) or "")
+            if ws:
+                ws = str(sec.validate_workspace(ws))
+            m = st.missions.create_mission(
+                goal=goal,
+                title=str(d.get("title") or ""),
+                workspace=ws,
+                mode=str(d.get("mode") or ""),
+                milestones=d.get("milestones"),
+                acceptance=d.get("acceptance"),
+                policy=d.get("policy"),
+                budget=d.get("budget"),
+                use_swarm=bool(d.get("use_swarm", False)),
+                session_id=sid or None,
+                auto_start=bool(d.get("auto_start", True)),
+            )
+            if sess:
+                sess.mission_id = m.id
+                st.store.save(sess)
+            return J(st.missions.mission_snapshot(m.id))
+        return J({"missions": st.missions.list_missions()})
+
+    @route("/api/missions/{mid}", ["GET", "PATCH", "DELETE"])
+    async def mission_one(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        if req.method == "DELETE":
+            m = st.missions.get_mission(mid)
+            if m is None:
+                return bad("mission 不存在", 404)
+            st.missions.cancel_mission(mid)
+            return J({"ok": st.missions.store.delete(mid)})
+        if req.method == "PATCH":
+            d = await jbody(req)
+            try:
+                st.missions.update_mission(mid, d)
+            except KeyError:
+                return bad("mission 不存在", 404)
+            return J(st.missions.mission_snapshot(mid))
+        snap = st.missions.mission_snapshot(mid)
+        if not snap:
+            return bad("mission 不存在", 404)
+        return J(snap)
+
+    @route("/api/missions/{mid}/start", ["POST"])
+    async def mission_start(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        try:
+            st.missions.start_mission(mid)
+        except KeyError:
+            return bad("mission 不存在", 404)
+        return J(st.missions.mission_snapshot(mid))
+
+    @route("/api/missions/{mid}/pause", ["POST"])
+    async def mission_pause(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        d = await jbody(req) if req.headers.get("content-length") else {}
+        try:
+            st.missions.pause_mission(mid, reason=str(d.get("reason") or "user"))
+        except KeyError:
+            return bad("mission 不存在", 404)
+        return J(st.missions.mission_snapshot(mid))
+
+    @route("/api/missions/{mid}/resume", ["POST"])
+    async def mission_resume(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        try:
+            st.missions.resume_mission(mid)
+        except KeyError:
+            return bad("mission 不存在", 404)
+        return J(st.missions.mission_snapshot(mid))
+
+    @route("/api/missions/{mid}/cancel", ["POST"])
+    async def mission_cancel(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        try:
+            st.missions.cancel_mission(mid)
+        except KeyError:
+            return bad("mission 不存在", 404)
+        return J(st.missions.mission_snapshot(mid))
+
+    @route("/api/missions/{mid}/rollback", ["POST"])
+    async def mission_rollback(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        d = await jbody(req)
+        target = str(d.get("target") or "").strip()
+        if not target:
+            raise ValueError("必须指定回滚目标 (milestone_id / commit_sha / base)")
+        try:
+            st.missions.rollback(mid, target)
+        except KeyError:
+            return bad("mission 不存在", 404)
+        return J(st.missions.mission_snapshot(mid))
+
+    @route("/api/missions/{mid}/approve/{aid}", ["POST"])
+    async def mission_approve(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        aid = req.path_params["aid"]
+        d = await jbody(req) if req.headers.get("content-length") else {}
+        decision = str(d.get("decision") or "allow")
+        try:
+            st.missions.approve(mid, aid, decision=decision)
+        except KeyError as e:
+            return bad(str(e), 404)
+        return J(st.missions.mission_snapshot(mid))
+
+    @route("/api/missions/{mid}/timeline", ["GET"])
+    async def mission_timeline(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        m = st.missions.get_mission(mid)
+        if m is None:
+            return bad("mission 不存在", 404)
+        after = int(req.query_params.get("after") or 0)
+        return J({
+            "mission_id": mid,
+            "timeline": m.timeline,
+            "episodes": [e.to_dict() for e in m.episodes],
+            "events": st.missions.store.read_events(mid, after_seq=after, limit=300),
+        })
+
+    @route("/api/missions/{mid}/mission-md", ["GET", "PUT"])
+    async def mission_md_rw(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        m = st.missions.get_mission(mid)
+        if m is None:
+            return bad("mission 不存在", 404)
+        if req.method == "PUT":
+            d = await jbody(req)
+            content = str(d.get("content") or "")
+            if not content.strip():
+                raise ValueError("MISSION.md 内容不能为空")
+            st.missions.store.write_mission_md(m, content)
+            return J(st.missions.mission_snapshot(mid))
+        return J({
+            "mission_id": mid,
+            "path": str(st.missions.store.mission_md_path(m)),
+            "content": st.missions.store.read_mission_md(m),
+        })
+
+    @route("/api/missions/{mid}/events", ["GET"])
+    async def mission_events(req: Request) -> Response:
+        mid = req.path_params["mid"]
+        m = st.missions.get_mission(mid)
+        if m is None:
+            return bad("mission 不存在", 404)
+        after = int(req.headers.get("last-event-id") or req.query_params.get("after") or 0)
+        terminal = m.status in ("completed", "failed", "cancelled")
+        q = None if terminal else st.missions.subscribe(mid)
+
+        async def gen():
+            last_seq = after
+            try:
+                for ev in st.missions.store.read_events(mid, after_seq=after, limit=500):
+                    seq = int(ev.get("seq") or 0)
+                    last_seq = max(last_seq, seq)
+                    yield f"id: {seq}\nevent: {ev.get('kind', 'mission')}\ndata: {json.dumps(ev.get('data') or {}, ensure_ascii=False)}\n\n"
+                if q is None:
+                    return
+                while True:
+                    try:
+                        ev = await asyncio.wait_for(q.get(), 15)
+                        seq = int(ev.get("seq") or 0)
+                        if seq <= last_seq:
+                            continue
+                        last_seq = seq
+                        kind = str(ev.get("kind") or "mission")
+                        yield f"id: {seq}\nevent: {kind}\ndata: {json.dumps(ev.get('data') or {}, ensure_ascii=False)}\n\n"
+                        cur = st.missions.get_mission(mid)
+                        if kind == "mission_done" or (cur and cur.status in ("completed", "failed", "cancelled") and q.empty()):
+                            return
+                    except asyncio.TimeoutError:
+                        cur = st.missions.get_mission(mid)
+                        if cur and cur.status in ("completed", "failed", "cancelled"):
+                            return
+                        yield ": ping\n\n"
+            finally:
+                if q is not None:
+                    st.missions.unsubscribe(mid, q)
+
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
     @route("/api/journal", ["GET"])
     async def journal(req: Request) -> Response:
         sid = req.query_params.get("session_id") or ""
@@ -1162,10 +1421,13 @@ def make_app(st: State) -> Starlette:
         await asyncio.to_thread(st.swarms.gc_worktrees, float(st.cfg.get("swarm", "worktree_gc_hours", default=24)))
         if st.autostart:
             asyncio.create_task(_safe(st.engine.start()))
+        if st.resume_missions:
+            st.missions.resume_all()
         st.mcp.start_reaper()
         try:
             yield
         finally:
+            await st.missions.stop_all()
             await st.swarms.stop_all()
             st.hub.cancel_all()
             await st.mcp.stop_all()

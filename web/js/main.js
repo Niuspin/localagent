@@ -12,7 +12,12 @@
     var m = document.documentElement.dataset.motion || 'auto';
     var sysReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     if (document.startViewTransition && m !== 'off' && m !== 'reduced' && !(m === 'auto' && sysReduced)) {
-      try { return document.startViewTransition(fn); } catch (e) {}
+      try {
+        var vt = document.startViewTransition(fn);
+        if (vt && vt.ready && vt.ready.catch) vt.ready.catch(function () {});
+        if (vt && vt.finished && vt.finished.catch) vt.finished.catch(function () {});
+        return vt;
+      } catch (e) {}
     }
     fn();
   };
@@ -174,6 +179,7 @@
       lastStatus = s;
     }
   }
+  var debRefreshMissions = LA.debounce(function () { if (LA.refreshMissions) LA.refreshMissions().catch(function () {}); }, 350);
   function connectEvents() {
     LA.sse('/api/events', {
       engine: function (e) { if (LA.S.state) { LA.S.state.engine = e; LA.bus.emit('state', LA.S.state); } },
@@ -186,7 +192,16 @@
           LA.bus.emit('sessionmeta', LA.S.cur);
         }
       },
-      notice: function (n) { LA.toast(n.text, n.level === 'warn' ? 'err' : null, 4500); }
+      notice: function (n) { LA.toast(n.text, n.level === 'warn' ? 'err' : null, 4500); },
+      mission: function () { debRefreshMissions(); },
+      mission_started: function () { debRefreshMissions(); },
+      milestone_done: function () { debRefreshMissions(); },
+      mission_blocked: function () { debRefreshMissions(); LA.toast('Mission 有操作等待审批', 'err', 5000); },
+      budget_warn: function () { debRefreshMissions(); LA.toast('Mission 预算已达 80%', null, 4500); },
+      mission_paused: function () { debRefreshMissions(); },
+      mission_resumed: function () { debRefreshMissions(); },
+      mission_done: function (d) { debRefreshMissions(); LA.toast('Mission 已结束 (' + ((d && d.status) || '') + ')', d && d.status === 'completed' ? 'ok' : 'err', 5000); },
+      mission_rollback: function () { debRefreshMissions(); }
     }, { onerror: function (final) { if (final) setTimeout(connectEvents, 5000); } });
   }
 
@@ -202,6 +217,7 @@
         { kind: 'act', tag: '操作', title: '新建对话', sub: 'Ctrl+Shift+O', run: function () { LA.newSession(); } },
         { kind: 'act', tag: '面板', title: '打开文件抽屉', sub: '查看工作区文件', run: function () { LA.panels.toggleDrawer(true); } },
         { kind: 'act', tag: '集群', title: '打开 Swarm 集群面板', sub: '查看多代理 DAG 与合并队列', run: function () { if (LA.panels.openSwarm) LA.panels.openSwarm(); } },
+        { kind: 'act', tag: '任务', title: '新建或查看长期 Mission', sub: '超长期断点续跑 / MISSION.md / 回滚', run: function () { if (LA.panels.openMission) LA.panels.openMission(); } },
         { kind: 'act', tag: '视图', title: '切换专注模式', sub: 'Ctrl+Shift+F 隐藏侧栏与检查器', run: function () { toggleFocus(); } },
         { kind: 'act', tag: 'Git', title: '查看 Git 变更与撤销日志', sub: '切换至变更抽屉', run: function () { LA.panels.openChanges(); } },
         { kind: 'act', tag: '设置', title: '打开设置', sub: '模型、引擎、生成与安全配置', run: function () { LA.openSettings(); } },
@@ -309,7 +325,7 @@
     LA.bus.on('config', applyUi);
     LA.bus.on('context', function (c) { if (LA.S.cur) LA.S.cur.context = c; updateTop(); });
 
-    Promise.all([LA.refreshConfig(), LA.refreshState(), LA.refreshSessions(), LA.refreshSkills()]).then(function () {
+    Promise.all([LA.refreshConfig(), LA.refreshState(), LA.refreshSessions(), LA.refreshSkills(), LA.refreshMissions()]).then(function () {
       applyUi(); lastStatus = LA.engine().status;
       var last = ''; try { last = localStorage.getItem('la.lastSession') || ''; } catch (e) {}
       var has = last && LA.S.sessions.some(function (s) { return s.id === last; });

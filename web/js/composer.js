@@ -20,6 +20,12 @@
     { value: 'off', label: '思考：关闭', desc: '响应更快' }
   ];
   var MAX_IMG = 1568, MAX_IMAGES = 6;
+  var RES_TIERS = [
+    { key: 'auto', label: '标准', edge: 1568 },
+    { key: 'high', label: '高清', edge: 2048 },
+    { key: 'low', label: '省流', edge: 768 }
+  ];
+  var recState = { recorder: null, stream: null, chunks: [] };
 
   /* ------------------------------------------------------------ 对外接口 */
   LA.composer = {
@@ -111,6 +117,32 @@
   }
 
   /* ------------------------------------------------------------ 附件 */
+  function getCaps() {
+    return (LA.S.state && LA.S.state.capabilities) || {};
+  }
+  function inferPlan(name, isImg) {
+    var caps = getCaps();
+    var ext = String(name || '').split('.').pop().toLowerCase();
+    if (isImg || /^(png|jpe?g|webp|gif|bmp|heic)$/i.test(ext)) {
+      if (LA.engine().vision || caps.vision) return { label: 'VLM 视觉', supported: true };
+      if (caps.ocr === 'rapidocr' || caps.ocr === 'tesseract') return { label: 'OCR (' + caps.ocr + ')', supported: true };
+      return { label: '缺视觉/OCR', supported: false };
+    }
+    if (ext === 'pdf') return { label: caps.pdf_render && caps.pdf_render !== 'none' ? 'PDF 渲染/文本' : 'PDF 文本', supported: true };
+    if (/^(docx|xlsx|xlsm|pptx)$/.test(ext)) return { label: '文档结构化', supported: true };
+    if (/^(csv|tsv|json|jsonl|yaml|yml)$/.test(ext)) return { label: 'Schema 抽样', supported: true };
+    if (ext === 'parquet') return caps.parquet ? { label: 'Parquet 抽样', supported: true } : { label: '缺 pyarrow', supported: false };
+    if (/^(ipynb|epub|html|htm|mhtml|mht)$/.test(ext)) return { label: '章节/单元解析', supported: true };
+    if (/^(zip|tar|tgz|gz)$/.test(ext)) return { label: '仅列目录', supported: true };
+    if (/^(wav|mp3|m4a|flac|ogg)$/.test(ext)) {
+      if (caps.audio_model) return { label: '音频直读', supported: true };
+      if (caps.whisper) return { label: 'Whisper 转写', supported: true };
+      return { label: '不可转写', supported: false };
+    }
+    if (/^(mp4|mkv|webm|mov)$/.test(ext)) return caps.ffmpeg ? { label: '关键帧抽帧', supported: true } : { label: '缺 ffmpeg', supported: false };
+    return { label: '直读文本', supported: true };
+  }
+
   function renderChips() {
     LA.clear(chipsBox);
     LA.S.chosen.forEach(function (n, i) {
@@ -119,19 +151,42 @@
     });
     LA.S.attachments.forEach(function (a, i) {
       var lead = a.kind === 'image' ? el('img', { src: a.dataUrl, alt: '' }) : el('span', { html: icon(a.uploading ? 'upload' : 'file', 14) });
-      chipsBox.appendChild(el('span', { class: 'attach-chip' }, lead, el('span', { text: a.name + (a.uploading ? ' …' : '') }),
-        el('button', { class: 'x', html: icon('x', 12), title: '移除', on: { click: function () { LA.S.attachments.splice(i, 1); renderChips(); updateSend(); } } })));
+      var plan = a.plan || inferPlan(a.name, a.kind === 'image');
+      var chipChildren = [lead, el('span', { text: a.name + (a.uploading ? ' …' : '') })];
+      if (plan && plan.label) {
+        chipChildren.push(el('span', {
+          class: 'attach-plan' + (plan.supported === false ? ' unsupported' : ''),
+          text: plan.label,
+          title: plan.note || plan.label
+        }));
+      }
+      if (a.kind === 'image' && a.rawFile) {
+        var tier = RES_TIERS.filter(function (t) { return t.key === (a.resKey || 'auto'); })[0] || RES_TIERS[0];
+        chipChildren.push(el('button', {
+          class: 'attach-res', type: 'button', text: tier.label, title: '点击切换图片分辨率 (' + tier.edge + 'px)',
+          on: { click: function () {
+            var curIdx = RES_TIERS.findIndex(function (t) { return t.key === (a.resKey || 'auto'); });
+            var nxt = RES_TIERS[(curIdx + 1) % RES_TIERS.length];
+            a.resKey = nxt.key;
+            downscale(a.rawFile, nxt.edge).then(function (u) {
+              if (u) { a.dataUrl = u; renderChips(); }
+            });
+          } }
+        }));
+      }
+      chipChildren.push(el('button', { class: 'x', html: icon('x', 12), title: '移除', on: { click: function () { LA.S.attachments.splice(i, 1); renderChips(); updateSend(); } } }));
+      chipsBox.appendChild(el('span', { class: 'attach-chip' }, chipChildren));
     });
   }
 
   function readAsDataURL(f) { return new Promise(function (res, rej) { var r = new FileReader(); r.onload = function () { res(r.result); }; r.onerror = rej; r.readAsDataURL(f); }); }
-  function downscale(file) {
+  function downscale(file, maxEdge) {
+    var cap = maxEdge || MAX_IMG;
     return readAsDataURL(file).then(function (url) {
       return new Promise(function (resolve) {
         var img = new Image();
         img.onload = function () {
-          var w = img.naturalWidth, h = img.naturalHeight, s = Math.min(1, MAX_IMG / Math.max(w, h));
-          if (s >= 1 && file.size < 1.5e6 && /^image\/(png|jpeg|webp)$/.test(file.type)) return resolve(url);
+          var w = img.naturalWidth, h = img.naturalHeight, s = Math.min(1, cap / Math.max(w, h));
           var c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
           var g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
           resolve(c.toDataURL('image/jpeg', 0.85));
@@ -148,20 +203,25 @@
       if (/^image\/(png|jpe?g|webp|gif|bmp)$/i.test(f.type)) {
         if (!LA.engine().vision) { LA.toast('当前模型不支持图片输入；图片会以文件形式放入工作区 uploads/', null, 3500); return uploadFile(f); }
         if (LA.S.attachments.filter(function (a) { return a.kind === 'image'; }).length >= MAX_IMAGES) { LA.toast('最多添加 ' + MAX_IMAGES + ' 张图片'); return; }
-        downscale(f).then(function (u) {
+        downscale(f, MAX_IMG).then(function (u) {
           if (!u) return LA.toast('无法读取图片: ' + f.name, 'err');
-          LA.S.attachments.push({ kind: 'image', name: f.name || '粘贴的图片', dataUrl: u }); renderChips(); updateSend();
+          LA.S.attachments.push({ kind: 'image', name: f.name || '粘贴的图片', dataUrl: u, rawFile: f, resKey: 'auto', plan: inferPlan(f.name, true) });
+          renderChips(); updateSend();
         });
       } else uploadFile(f);
     });
   }
   function uploadFile(f) {
-    var a = { kind: 'file', name: f.name, uploading: true }; LA.S.attachments.push(a); renderChips(); updateSend();
+    var a = { kind: 'file', name: f.name, uploading: true, plan: inferPlan(f.name, false) }; LA.S.attachments.push(a); renderChips(); updateSend();
     LA.ensureSession().then(function (s) {
       var fd = new FormData(); fd.append('file', f, f.name);
       return LA.api('POST', '/api/sessions/' + s.id + '/upload', fd);
-    }).then(function (r) { a.uploading = false; a.path = r.path; a.name = LA.baseName(r.path); renderChips(); updateSend(); })
-      .catch(function (e) { var i = LA.S.attachments.indexOf(a); if (i >= 0) LA.S.attachments.splice(i, 1); renderChips(); updateSend(); LA.fail(e); });
+    }).then(function (r) {
+      a.uploading = false; a.path = r.path; a.name = LA.baseName(r.path);
+      if (r.plan) a.plan = r.plan;
+      if (r.warnings && r.warnings.length) a.warnings = r.warnings;
+      renderChips(); updateSend();
+    }).catch(function (e) { var i = LA.S.attachments.indexOf(a); if (i >= 0) LA.S.attachments.splice(i, 1); renderChips(); updateSend(); LA.fail(e); });
   }
 
   /* ------------------------------------------------------------ / 命令 & @ 文件弹层 */
@@ -180,7 +240,8 @@
     { name: 'model', desc: '查看当前运行的模型参数' },
     { name: 'cost', desc: '查看会话 Token 消耗统计' },
     { name: 'permissions', desc: '查看细粒度权限规则' },
-    { name: 'hooks', desc: '查看已配置的生命周期钩子' }
+    { name: 'hooks', desc: '查看已配置的生命周期钩子' },
+    { name: 'mission', desc: '管理超长期自主任务 (/mission start|status|pause|resume|stop|budget|log|edit)' }
   ];
 
   var slashCache = { ts: 0, ws: '', items: null };
@@ -409,6 +470,47 @@
     queueBox = el('div', { class: 'queue-box', id: 'queueBox', hidden: true });
     composerEl.insertBefore(queueBox, chipsBox);
     LA.$('#btnAttach').innerHTML = icon('clip', 19);
+    var btnRec = LA.$('#btnRecord');
+    function syncCapsUi() {
+      var caps = getCaps();
+      var attachBtn = LA.$('#btnAttach');
+      if (attachBtn) {
+        attachBtn.title = '添加文件/媒体（视觉:' + ((LA.engine().vision || caps.vision) ? '就绪' : '无') + ' | OCR:' + (caps.ocr || 'none') + ' | 音频:' + (caps.audio ? '就绪' : '无') + '）';
+      }
+      if (btnRec) {
+        var canRec = !!(caps.recorder_enabled && caps.audio && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+        btnRec.hidden = !canRec;
+        btnRec.className = 'icon-btn rec' + (recState.recorder ? ' recording' : '');
+        btnRec.innerHTML = icon(recState.recorder ? 'stop' : 'activity', 17);
+        btnRec.title = recState.recorder ? '停止录音并附加' : '录制音频并转写';
+      }
+      if (LA.S.attachments.length) renderChips();
+    }
+    if (btnRec) {
+      btnRec.addEventListener('click', function () {
+        if (recState.recorder) {
+          recState.recorder.stop();
+          return;
+        }
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+          recState.stream = stream;
+          recState.chunks = [];
+          var mr = new MediaRecorder(stream);
+          recState.recorder = mr;
+          mr.ondataavailable = function (e) { if (e.data && e.data.size) recState.chunks.push(e.data); };
+          mr.onstop = function () {
+            var blob = new Blob(recState.chunks, { type: mr.mimeType || 'audio/webm' });
+            if (recState.stream) recState.stream.getTracks().forEach(function (t) { t.stop(); });
+            recState.recorder = null; recState.stream = null; recState.chunks = [];
+            syncCapsUi();
+            var f = new File([blob], 'recording_' + Date.now() + '.webm', { type: blob.type });
+            addFiles([f]);
+          };
+          mr.start();
+          syncCapsUi();
+        }).catch(function (e) { LA.toast('麦克风不可用: ' + e.message, 'err'); });
+      });
+    }
 
     input.addEventListener('input', function () { autosize(); updateSend(); updatePop(); });
     input.addEventListener('click', updatePop);
@@ -457,10 +559,10 @@
       LA.menu(thinkPill, THINK, function (v) { LA.cfgSet('generation.thinking', v, { immediate: true }); }, LA.cfg('generation.thinking', 'auto'));
     });
 
-    ['state', 'config', 'runstate', 'taint', 'sessionmeta', 'session'].forEach(function (n) { LA.bus.on(n, function () { updatePills(); updateSend(); }); });
+    ['state', 'config', 'runstate', 'taint', 'sessionmeta', 'session'].forEach(function (n) { LA.bus.on(n, function () { updatePills(); updateSend(); syncCapsUi(); }); });
     LA.bus.on('fschanged', function () { fileTreeCache.ts = 0; });
     LA.bus.on('workspace', function () { fileTreeCache = { ts: 0, ws: '', entries: [] }; slashCache = { ts: 0, ws: '', items: null }; });
     LA.bus.on('session', function (v) { fileTreeCache.ts = 0; slashCache.ts = 0; queued = []; renderQueue(); if (v) fetchSlashCommands(); });
-    updatePills(); updateSend(); autosize();
+    updatePills(); updateSend(); syncCapsUi(); autosize();
   };
 })();
