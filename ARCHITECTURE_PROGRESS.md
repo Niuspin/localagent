@@ -73,3 +73,8 @@
 - 完成 `ArtifactStore`（`data/artifacts/<sid>/` + SQLite WAL 索引、防路径穿越、配额淘汰与会话清理）及 `/api/artifacts` 只读安全下载接口（`lagent/artifacts.py`、`lagent/server.py`、`docs/API.md`）。
 - 补齐 `swarm` / `mission` / `media` / `research` / `skills` / `ui` 扩展配置校验与 `worker_api_key` 密钥隔离（`lagent/config.py`、`lagent/paths.py`），并建立 `THIRD_PARTY_LICENSES.md` 与 `tests/fixtures/` + `tests/test_m0_infra.py`。
 - 全量验证：`python -m pytest tests -q -p no:cacheprovider` -> `405 passed, 3 skipped`；前端 JS 语法检查通过。
+
+### `[2026-11-16 16:34 +08:00]` M1 Swarm 核心 & M6 UI 设计系统 v2（已完成核心交付与自动化验收）
+- **M1（Swarm）**：新增 `lagent/swarm/`（`TaskGraph` DAG 调度/环检测/级联阻塞、`SwarmScheduler` 四级队列+防饥饿老化、`RoleSpec` 单调权限、`BudgetLedger`、`Mailbox` JSONL 邮箱、`FileLeaseManager`、`MergeQueue` 串行三方行级合并+冲突卡、`SwarmStore` 崩溃恢复），并打通 `engine.slots="auto"` 规划、外部 Worker 端点路由、Swarm 工具集与 `/api/swarms*` HTTP/SSE 接口。
+- **M6（UI v2）**：模块化重构 `web/css/*`（消灭全量 `transition: all`），落地 `light/dark/paper/midnight/hc/colorblind` 6 套 WCAG AA 主题、本地 SVG 精灵图 `web/icons/sprite.svg`、可拖拽/键盘分栏、专注模式、View Transitions、`motion/density/code_ligatures/accent` 设置与 Swarm DAG 检查器面板。
+- 全量验证：`python -m pytest tests -q -p no:cacheprovider` -> `413 passed, 3 skipped`；`python tests/ui_contrast.py` 与 `node --check web/js/**/*.js` 全部通过。

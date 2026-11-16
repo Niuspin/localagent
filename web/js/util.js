@@ -62,12 +62,39 @@
     sparkles: 'M12 3l1.8 4.6L18 9.5l-4.1 3.4 1.3 5.3-4.2-2.7-4.2 2.7 1.3-5.3L4 9.5l4.2-1.9z',
     info: 'M12 8v4M12 16h.01M22 12a10 10 0 11-20 0 10 10 0 0120 0z',
     chart: 'M18 20V10M12 20V4M6 20v-6',
-    cmd: 'M18 3a3 3 0 00-3 3v12a3 3 0 003 3 3 3 0 003-3 3 3 0 00-3-3H6a3 3 0 00-3 3 3 3 0 003 3 3 3 0 003-3V6a3 3 0 00-3-3 3 3 0 00-3 3 3 3 0 003 3h12a3 3 0 003-3 3 3 0 00-3-3z'
+    cmd: 'M18 3a3 3 0 00-3 3v12a3 3 0 003 3 3 3 0 003-3 3 3 0 00-3-3H6a3 3 0 00-3 3 3 3 0 003 3 3 3 0 003-3V6a3 3 0 00-3-3 3 3 0 00-3 3 3 3 0 003 3h12a3 3 0 003-3 3 3 0 00-3-3z',
+    moon: 'M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z',
+    pause: 'M7 5h3v14H7zM14 5h3v14h-3z',
+    focus: 'M4 9V5h4M16 5h4v4M4 15v4h4M16 19h4v-4M9 9h6v6H9z',
+    columns: 'M4 5h16v14H4zM9 5v14M15 5v14',
+    gitBranch: 'M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9',
+    layers: 'M12 3l9 4.5-9 4.5-9-4.5zM3 12l9 4.5 9-4.5M3 16.5L12 21l9-4.5',
+    activity: 'M3 12h4l3-7 4 14 3-7h4'
   };
 
   LA.icon = function (name, size) {
     var s = size ? ' style="width:' + size + 'px;height:' + size + 'px"' : '';
+    if (document.getElementById('la-ic-' + name)) {
+      return '<svg class="ic" viewBox="0 0 24 24"' + s + ' aria-hidden="true"><use href="#la-ic-' + name + '"/></svg>';
+    }
     return '<svg class="ic" viewBox="0 0 24 24"' + s + ' aria-hidden="true"><path d="' + (P[name] || P.file || '') + '"/></svg>';
+  };
+  LA.loadIcons = function () {
+    if (document.getElementById('la-sprite-root') || !window.fetch) return;
+    fetch('/icons/sprite.svg').then(function (r) { return r.ok ? r.text() : ''; }).then(function (svgTxt) {
+      if (!svgTxt || svgTxt.indexOf('<svg') < 0 || document.getElementById('la-sprite-root')) return;
+      var wrap = document.createElement('div');
+      wrap.id = 'la-sprite-root';
+      wrap.hidden = true;
+      wrap.innerHTML = svgTxt;
+      document.body.appendChild(wrap);
+    }).catch(function () {});
+  };
+  LA.t = function (key, fallback) {
+    var loc = 'zh-CN';
+    try { loc = localStorage.getItem('la.locale') || 'zh-CN'; } catch (e) {}
+    var dict = (LA.I18N && (LA.I18N[loc] || LA.I18N['zh-CN'])) || {};
+    return dict[key] != null ? dict[key] : (fallback != null ? fallback : key);
   };
   LA.iconEl = function (name, size) { var s = document.createElement('span'); s.style.display = 'inline-flex'; s.innerHTML = LA.icon(name, size); return s; };
   LA.SPARK = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 5l2.4 8.6L27 16l-8.6 2.4L16 27l-2.4-8.6L5 16l8.6-2.4z"/></svg>';

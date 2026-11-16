@@ -1,0 +1,131 @@
+/* LocalAgent Design System v2 — Base Typography, CJK Rules, Accessibility & Motion Controls */
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: var(--fs)/var(--lh-body) var(--sans);
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  line-break: strict;
+  word-break: normal;
+  text-autospace: normal;
+  text-spacing-trim: space-all;
+  overflow: hidden;
+  transition: background-color var(--dur-3) var(--ease-standard), color var(--dur-3) var(--ease-standard);
+}
+
+button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; padding: 0; user-select: none; }
+button:disabled { cursor: not-allowed; opacity: .5; }
+input, textarea, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+::selection { background: var(--accent-soft-h); }
+[hidden] { display: none !important; }
+
+/* Tabular Numerals for Telemetry & Counters */
+.dur-pill, .u-pill, .ctx-text, .tree-row .sz, .jr-item .tm, .pv-nums, .sw-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Code Ligature Preference */
+code, pre, kbd {
+  font-variant-ligatures: none;
+}
+:root[data-ligatures="1"] code,
+:root[data-ligatures="1"] pre {
+  font-variant-ligatures: contextual common-ligatures;
+}
+
+/* Vector Icons (16 / 20 / 24 friendly stroke scaling) */
+svg.ic {
+  width: 1.15em;
+  height: 1.15em;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+  vertical-align: -0.2em;
+}
+
+/* Thin Sleek Scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-pill);
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* Motion Keyframes (compositor-friendly transform & opacity only) */
+@keyframes pulse { 50% { opacity: .38; } }
+@keyframes blink { 50% { opacity: 0; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes scalePop {
+  from { transform: translateY(8px) scale(.985); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+@keyframes cardReveal {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes shimmerSlide {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes nodePulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-soft-h); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+
+/* View Transitions Progressive Enhancement */
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: var(--dur-2);
+    animation-timing-function: var(--ease-standard);
+  }
+}
+
+/* Motion Preference Enforcement */
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  scroll-behavior: auto !important;
+}
+:root[data-motion="reduced"] .quick-card:hover,
+:root[data-motion="reduced"] .btn.primary:hover,
+:root[data-motion="reduced"] .to-bottom:hover {
+  transform: none !important;
+}
+:root[data-motion="reduced"] .modal {
+  animation: fadeIn var(--dur-1) ease-out !important;
+}
+
+:root[data-motion="off"] *,
+:root[data-motion="off"] *::before,
+:root[data-motion="off"] *::after {
+  animation-duration: .001s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001s !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) *,
+  :root:not([data-motion="full"]) *::before,
+  :root:not([data-motion="full"]) *::after {
+    animation-duration: .001s !important;
+    transition-duration: .001s !important;
+  }
+}

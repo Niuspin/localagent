@@ -1,0 +1,56 @@
+/* High-Contrast Accessible Theme + forced-colors support */
+:root[data-theme="hc"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --bg-side: #0A0A0A;
+  --bg-elev: #121212;
+  --bg-soft: #1C1C1C;
+  --bg-user: #1A1A1A;
+  --bg-code: #050505;
+  --bg-translucent: rgba(0, 0, 0, 0.96);
+  --bg-side-translucent: rgba(10, 10, 10, 0.98);
+
+  --text: #FFFFFF;
+  --muted: #E0E0E0;
+  --faint: #C2C2C2;
+  --border: rgba(255, 255, 255, 0.42);
+  --border-strong: rgba(255, 255, 255, 0.75);
+
+  --accent: #FFD447;
+  --accent-h: #FFE27A;
+  --accent-soft: rgba(255, 212, 71, 0.22);
+  --accent-soft-h: rgba(255, 212, 71, 0.34);
+  --accent-fg: #000000;
+
+  --ok: #6BFF9E;
+  --ok-soft: rgba(107, 255, 158, 0.22);
+  --warn: #FFD447;
+  --warn-soft: rgba(255, 212, 71, 0.22);
+  --danger: #FF7A7A;
+  --danger-soft: rgba(255, 122, 122, 0.22);
+  --info: #70D6FF;
+  --info-soft: rgba(112, 214, 255, 0.22);
+
+  --diff-add: rgba(107, 255, 158, 0.28);
+  --diff-del: rgba(255, 122, 122, 0.28);
+
+  --shadow-sm: none;
+  --shadow: 0 0 0 1px var(--border);
+  --shadow-lg: 0 0 0 2px var(--border-strong);
+
+  --syn-kw: #FFD447;
+  --syn-str: #6BFF9E;
+  --syn-num: #DFB5FF;
+  --syn-com: #C2C2C2;
+  --syn-fn: #70D6FF;
+}
+
+@media (forced-colors: active) {
+  .btn, .card, .tool, .modal, .drawer, .composer, .chip {
+    border: 1px solid CanvasText !important;
+  }
+  .btn.primary, .send {
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
+}

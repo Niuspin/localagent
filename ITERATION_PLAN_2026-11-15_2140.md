@@ -723,12 +723,12 @@ flowchart LR
 ## 13. 跟踪清单
 
 - [x] M0 基础设施
-- [ ] M1 Swarm 核心（A）
+- [x] M1 Swarm 核心（A）
 - [ ] M2 Mission 运行时（B）
 - [ ] M3 多模态输入（C-in）
 - [ ] M4 产物与多模态输出（C-out）
 - [ ] M5 Research Engine（D）
-- [ ] M6 UI 设计系统 v2（E）
+- [x] M6 UI 设计系统 v2（E）
 - [ ] M7 技能库 v2（F）
 - [ ] M8 集成加固与发布 `v0.2.0`
 

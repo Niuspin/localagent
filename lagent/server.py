@@ -42,8 +42,12 @@ from .outputs import OutputStore
 from .permissions import PermissionManager
 from .sessions import SessionStore
 from .skills import Skills
+from .swarm import SwarmManager, SwarmStore
 from .tools import search as search_mod
 from .tools.files import SKIP_DIRS, rewind_to_turn
+
+mimetypes.add_type("font/woff2", ".woff2")
+mimetypes.add_type("image/svg+xml", ".svg")
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; "
        "font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -85,9 +89,11 @@ class State:
         self._loop: asyncio.AbstractEventLoop | None = None
         self.mcp = McpManager(data, self.audit, on_change=lambda _n, v: self.broadcast("mcp", {"server": v}))
         self.hub = hub_mod.DownloadManager(root / "models", on_event=self.broadcast_threadsafe)
+        self.swarms = SwarmManager(cfg=self.cfg, store=SwarmStore(data / "swarms"), journal=self.journal, audit=self.audit, notify=self.broadcast)
         self.agent = Agent(cfg=self.cfg, engine=self.engine, store=self.store, journal=self.journal, audit=self.audit, memory=self.memory,
                            skills=self.skills, protected=protected, hidden=hidden, notify=self.broadcast, mcp=self.mcp,
-                           outputs=self.outputs, artifacts=self.artifacts)
+                           outputs=self.outputs, artifacts=self.artifacts, swarms=self.swarms)
+        self.swarms.default_runner = self.agent.run_swarm_node
         self.root = root
         self.autostart = False
         self.exit_cb: Any = None        # 由启动器设置：请求整个应用退出（测试/纯服务模式下为 None）
@@ -236,6 +242,7 @@ def make_app(st: State) -> Starlette:
             if "workspace" in d:
                 raise ValueError("工作区请通过 PUT /api/workspace 设置")
             out = st.cfg.patch(d)
+            st.swarms.sync_scheduler_from_cfg()
             st.audit.append(event="config", keys=sorted(d.keys()))
             st.broadcast("config", {"config": out})
             return J({"config": out})
@@ -269,9 +276,9 @@ def make_app(st: State) -> Starlette:
         await asyncio.sleep(0.05)
         return J(st.engine.state())
 
-    @route("/api/engine/plan", ["POST"])
+    @route("/api/engine/plan", ["GET", "POST"])
     async def e_plan(req: Request) -> Response:
-        d = await jbody(req)
+        d = dict(req.query_params) if req.method == "GET" else await jbody(req)
         await asyncio.to_thread(st.engine.probe)
         plan = await asyncio.to_thread(st.engine.plan, d.get("model"), d.get("mmproj"), d.get("ctx"))
         cmd = ""
@@ -731,6 +738,131 @@ def make_app(st: State) -> Starlette:
             },
         )
 
+    # ------------------------------------------------------------ Swarm 多代理集群
+    @route("/api/swarms", ["GET", "POST"])
+    async def swarms_root(req: Request) -> Response:
+        if req.method == "POST":
+            d = await jbody(req)
+            sid = str(d.get("session_id") or "")
+            sess = st.store.get(sid) if sid else None
+            ws = str(d.get("workspace") or (sess.workspace if sess else st.cfg.get("workspace", default="")) or "")
+            if ws:
+                ws = str(sec.validate_workspace(ws))
+            nodes = d.get("nodes")
+            if not isinstance(nodes, list) or not nodes:
+                raise ValueError("nodes 必须是非空节点列表")
+            parent_mode = st.agent._session_mode(sess) if sess else str(st.cfg.get("agent", "permission_mode", default="ask"))
+            sw = st.swarms.create_swarm(
+                session_id=sid or "global",
+                goal=str(d.get("goal") or "Swarm 并行任务"),
+                nodes=nodes,
+                workspace=ws,
+                parent_mode=parent_mode,
+                explicit_auto_worker=bool(d.get("explicit_auto_worker", False)),
+                budget=dict(d.get("budget") or {}) or None,
+                mission_id=d.get("mission_id"),
+            )
+            if sess:
+                sess.swarm_id = sw.id
+                st.store.save(sess)
+            return J(st.swarms.snapshot(sw.id))
+        sid = req.query_params.get("session_id") or None
+        return J({"swarms": st.swarms.list_swarms(session_id=sid)})
+
+    @route("/api/swarms/{swid}", ["GET"])
+    async def swarm_one(req: Request) -> Response:
+        swid = req.path_params["swid"]
+        snap = st.swarms.snapshot(swid)
+        if not snap:
+            return bad("swarm 不存在", 404)
+        sw = st.swarms.swarms.get(swid)
+        if sw:
+            snap["mailbox"] = sw.mailbox.all(100)
+        return J(snap)
+
+    @route("/api/swarms/{swid}/events", ["GET"])
+    async def swarm_events(req: Request) -> Response:
+        swid = req.path_params["swid"]
+        snap = st.swarms.snapshot(swid)
+        if not snap:
+            return bad("swarm 不存在", 404)
+        after = int(req.headers.get("last-event-id") or req.query_params.get("after") or 0)
+        sw = st.swarms.swarms.get(swid)
+        q: asyncio.Queue | None = asyncio.Queue(maxsize=200) if (sw and not sw.done_evt.is_set()) else None
+        if sw and q is not None:
+            sw.live_subs.add(q)
+
+        async def gen():
+            last_seq = after
+            try:
+                for ev in st.swarms.store.read_events(swid, after_seq=after):
+                    last_seq = max(last_seq, int(ev.get("seq", 0)))
+                    yield f"id: {ev.get('seq', 0)}\nevent: {ev.get('event', 'swarm')}\ndata: {json.dumps(ev.get('data') or {}, ensure_ascii=False)}\n\n"
+                if q is None:
+                    return
+                while True:
+                    try:
+                        seq, kind, payload = await asyncio.wait_for(q.get(), 15)
+                        if seq <= last_seq:
+                            continue
+                        last_seq = seq
+                        yield f"id: {seq}\nevent: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        if kind == "swarm_done" or (sw and sw.done_evt.is_set() and q.empty()):
+                            return
+                    except asyncio.TimeoutError:
+                        if sw and sw.done_evt.is_set():
+                            return
+                        yield ": ping\n\n"
+            finally:
+                if sw and q is not None:
+                    sw.live_subs.discard(q)
+
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @route("/api/swarms/{swid}/cancel", ["POST"])
+    async def swarm_cancel(req: Request) -> Response:
+        return J({"ok": await st.swarms.cancel(req.path_params["swid"])})
+
+    @route("/api/swarms/{swid}/pause", ["POST"])
+    async def swarm_pause(req: Request) -> Response:
+        return J({"ok": st.swarms.pause(req.path_params["swid"])})
+
+    @route("/api/swarms/{swid}/resume", ["POST"])
+    async def swarm_resume(req: Request) -> Response:
+        sw = st.swarms.resume(req.path_params["swid"])
+        return J({"ok": sw is not None})
+
+    @route("/api/swarms/{swid}/agents/{aid}/message", ["POST"])
+    async def swarm_agent_message(req: Request) -> Response:
+        d = await jbody(req)
+        text = str(d.get("text") or "").strip()
+        if not text:
+            raise ValueError("消息正文不能为空")
+        msg = st.swarms.send_message(
+            req.path_params["swid"],
+            req.path_params["aid"],
+            text,
+            from_agent=str(d.get("from") or "user"),
+            kind=str(d.get("kind") or "handoff"),
+        )
+        return J({"ok": True, "message": msg})
+
+    @route("/api/swarms/{swid}/agents/{aid}/cancel", ["POST"])
+    async def swarm_agent_cancel(req: Request) -> Response:
+        affected = await st.swarms.cancel_agent(req.path_params["swid"], req.path_params["aid"])
+        return J({"ok": bool(affected), "cancelled": affected})
+
+    @route("/api/swarms/{swid}/conflicts/{cid}/resolve", ["POST"])
+    async def swarm_conflict_resolve(req: Request) -> Response:
+        d = await jbody(req)
+        decision = str(d.get("decision") or "dismissed")
+        sw = st.swarms.swarms.get(req.path_params["swid"])
+        card = sw.merges.resolve_conflict(req.path_params["cid"], decision) if sw else None
+        if not card:
+            return bad("冲突记录不存在", 404)
+        st.swarms._persist(sw)
+        return J({"ok": True, "conflict": card.to_dict()})
+
     @route("/api/journal", ["GET"])
     async def journal(req: Request) -> Response:
         sid = req.query_params.get("session_id") or ""
@@ -1027,12 +1159,14 @@ def make_app(st: State) -> Starlette:
         st._loop = asyncio.get_running_loop()
         await asyncio.to_thread(st.engine.probe)
         await asyncio.to_thread(st.journal.purge, int(st.cfg.get("security", "trash_retention_days", default=14)))
+        await asyncio.to_thread(st.swarms.gc_worktrees, float(st.cfg.get("swarm", "worktree_gc_hours", default=24)))
         if st.autostart:
             asyncio.create_task(_safe(st.engine.start()))
         st.mcp.start_reaper()
         try:
             yield
         finally:
+            await st.swarms.stop_all()
             st.hub.cancel_all()
             await st.mcp.stop_all()
             await st.engine.stop()

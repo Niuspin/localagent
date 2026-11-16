@@ -1,0 +1,46 @@
+/* Paper Theme (Crisp Editorial Light — WCAG AA/AAA Friendly) */
+:root[data-theme="paper"] {
+  color-scheme: light;
+  --bg: #FFFFFF;
+  --bg-side: #F6F6F4;
+  --bg-elev: #FFFFFF;
+  --bg-soft: #EFEFED;
+  --bg-user: #F3F4F6;
+  --bg-code: #F6F7F9;
+  --bg-translucent: rgba(255, 255, 255, 0.92);
+  --bg-side-translucent: rgba(246, 246, 244, 0.95);
+
+  --text: #111315;
+  --muted: #4D535C;
+  --faint: #636A75;
+  --border: rgba(17, 19, 21, 0.11);
+  --border-strong: rgba(17, 19, 21, 0.22);
+
+  --accent: #1D4ED8;
+  --accent-h: #1E40AF;
+  --accent-soft: rgba(29, 78, 216, 0.10);
+  --accent-soft-h: rgba(29, 78, 216, 0.16);
+  --accent-fg: #FFFFFF;
+
+  --ok: #166534;
+  --ok-soft: rgba(22, 101, 52, 0.11);
+  --warn: #92400E;
+  --warn-soft: rgba(146, 64, 14, 0.11);
+  --danger: #B91C1C;
+  --danger-soft: rgba(185, 28, 28, 0.11);
+  --info: #1E40AF;
+  --info-soft: rgba(30, 64, 175, 0.11);
+
+  --diff-add: rgba(22, 101, 52, 0.14);
+  --diff-del: rgba(185, 28, 28, 0.14);
+
+  --shadow-sm: 0 1px 2px rgba(17, 19, 21, 0.05);
+  --shadow: 0 3px 10px -2px rgba(17, 19, 21, 0.07), 0 1px 3px rgba(17, 19, 21, 0.04);
+  --shadow-lg: 0 14px 36px -4px rgba(17, 19, 21, 0.14), 0 4px 12px rgba(17, 19, 21, 0.06);
+
+  --syn-kw: #1D4ED8;
+  --syn-str: #166534;
+  --syn-num: #6D28D9;
+  --syn-com: #5E6570;
+  --syn-fn: #0F5257;
+}

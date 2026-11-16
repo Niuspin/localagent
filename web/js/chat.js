@@ -420,6 +420,7 @@
 
   function mkText(b) {
     var d = el('div', { class: 'md' });
+    if (b.live) d.setAttribute('aria-live', 'polite');
     var stableWrap = null, tailEl = null, blockNodes = [], lastTail = '', lastRendered = null, linkifiedFinal = false;
     var v = { el: d, type: 'text', b: b };
     v.update = function () {
@@ -727,10 +728,23 @@
           view.el.insertBefore(apQueueBar, view.usageEl);
         }
         LA.clear(apQueueBar);
-        apQueueBar.appendChild(el('span', { text: '审批队列：当前有 ' + pending.length + ' 个操作等待确认' }));
-        apQueueBar.appendChild(el('button', { class: 'btn sm primary', type: 'button', text: '跳至下一项', on: { click: function () {
+        var agentsMap = {};
+        pending.forEach(function (v) { agentsMap[(v.b.approval && v.b.approval.agent_id) || v.b.agent_id || 'main'] = true; });
+        var agentCount = Object.keys(agentsMap).length;
+        apQueueBar.appendChild(el('span', { text: '审批队列：来自 ' + agentCount + ' 个代理的 ' + pending.length + ' 项等待确认' }));
+        var lowPend = pending.filter(function (v) { return v.b.approval && v.b.approval.risk === 'low'; });
+        var btns = el('span', { style: { display: 'inline-flex', gap: '6px' } });
+        if (lowPend.length >= 2) {
+          btns.appendChild(el('button', { class: 'btn sm', type: 'button', text: '批量允许低风险 (' + lowPend.length + ')', on: { click: function () {
+            lowPend.forEach(function (v) {
+              LA.post('/api/approvals/' + v.b.approval.approval_id, { decision: 'allow' }).catch(LA.fail);
+            });
+          } } }));
+        }
+        btns.appendChild(el('button', { class: 'btn sm primary', type: 'button', text: '跳至下一项', on: { click: function () {
           pending[0].el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } } }));
+        apQueueBar.appendChild(btns);
       } else if (apQueueBar) {
         apQueueBar.remove();
         apQueueBar = null;

@@ -209,24 +209,22 @@ async def delegate_preview(ctx: ToolCtx, a: dict) -> dict | None:
 
 
 if "delegate_task" not in toolset.EXT_GROUPS.get("extras", ()):
-    toolset.EXT_GROUPS["extras"] = (*toolset.EXT_GROUPS["extras"], "delegate_task", "spawn_agent")
+    toolset.EXT_GROUPS["extras"] = (*toolset.EXT_GROUPS["extras"], "delegate_task")
     toolset._OF["delegate_task"] = "extras"
-    toolset._OF["spawn_agent"] = "extras"
 
-for name in ("delegate_task", "spawn_agent"):
-    register(Tool(
-        name,
-        "派生独立子代理（Subagent）执行调研（explore/plan/verify）或在隔离 Git Worktree 中并行改动代码（worker）。完成后返回摘要或补丁。",
-        obj({
-            "prompt": P("string", "子任务的具体指令或调研问题"),
-            "mode": P("string", "运行模式：explore（只读调研，默认）、plan（方案规划）、verify（检查验证）、worker（Git Worktree 隔离编码并生成补丁）",
-                      enum=["explore", "plan", "verify", "worker"]),
-            "max_steps": P("integer", "子代理最大执行步数（1-16，默认 8）"),
-            "apply": P("boolean", "worker 模式下完成后是否将干净改动写回主工作区（默认 true）"),
-        }, ["prompt"]),
-        delegate_task,
-        "read",
-        group="extras",
-        title=lambda a: f"子代理({a.get('mode') or 'explore'}): {a.get('prompt', '')[:40]}",
-        preview=delegate_preview,
-    ))
+register(Tool(
+    "delegate_task",
+    "同步派生独立子代理（Subagent）执行调研（explore/plan/verify）或在隔离 Git Worktree 中改动代码（worker），完成后返回摘要或补丁。",
+    obj({
+        "prompt": P("string", "子任务的具体指令或调研问题"),
+        "mode": P("string", "运行模式：explore（只读调研，默认）、plan（方案规划）、verify（检查验证）、worker（Git Worktree 隔离编码并生成补丁）",
+                  enum=["explore", "plan", "verify", "worker"]),
+        "max_steps": P("integer", "子代理最大执行步数（1-16，默认 8）"),
+        "apply": P("boolean", "worker 模式下完成后是否将干净改动写回主工作区（默认 true）"),
+    }, ["prompt"]),
+    delegate_task,
+    "read",
+    group="extras",
+    title=lambda a: f"子代理({a.get('mode') or 'explore'}): {a.get('prompt', '')[:40]}",
+    preview=delegate_preview,
+))

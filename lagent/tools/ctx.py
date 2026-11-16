@@ -24,6 +24,8 @@ class SessionState:
     seen: dict = field(default_factory=dict)            # 相对路径 → 内容 sha256：本会话读过/写过的文本文件（先读再改）
     shell_cwd: str = ""                                 # 会话级终端当前相对工作目录
     shell_env: dict = field(default_factory=dict)       # 会话级安全终端环境变量覆盖
+    swarm_id: str | None = None                         # 当前会话关联的活跃 Swarm ID
+    agent_id: str = "main"                              # 当前执行主体 ID
 
 
 @dataclass
@@ -38,6 +40,7 @@ class ToolCtx:
     skills: Any = None
     outputs: Any = None      # OutputStore：大输出落盘（见 outputs.py）
     artifacts: Any = None    # ArtifactStore：会话多媒体/结构化产物仓储（见 artifacts.py）
+    swarms: Any = None       # SwarmManager：多代理 DAG 集群管理器（见 swarm/）
     emit: Callable[[str, dict], None] | None = None
     ask: Callable[[str, list[str]], Awaitable[str]] | None = None
     cancel: asyncio.Event | None = None

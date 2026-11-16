@@ -423,8 +423,26 @@ class Engine:
                    + f" · 档位:{prof.label}"
                    + f" → ctx {ctx_eff}" + (f"(可增至 {cap})" if cap > ctx_eff else "") + f" · KV≈{kv_need:.1f} GB({kvt_eff})"
                    + (f" · GPU≈{gpu_w + fixed:.1f}/{budget:.1f} GB" if has_gpu else " · 纯 CPU") + f" · CPU 权重≈{cpu_w:.1f} GB")
+
+        min_slot_ctx = 8192 if prof.tier != "large" else 16384
+        max_by_ctx = max(1, ctx_eff // min_slot_ctx)
+        free_room = (budget - gpu_w - compute - mm_gpu) if has_gpu else (h["ram_free_gb"] - cpu_w - 2.0)
+        per_slot_kv = max(0.05, kv_need)
+        max_by_mem = max(1, int(max(0.0, free_room) // per_slot_kv) + 1) if free_room > 0 else 1
+        rec_slots = max(1, min(4, max_by_ctx, max_by_mem))
+        raw_slots = e.get("slots", 1)
+        if raw_slots == "auto":
+            eff_slots = rec_slots
+            slots_reason = f"slots=auto：ctx {ctx_eff}/槽最小 {min_slot_ctx} 得 {max_by_ctx}，余量内存支持 {max_by_mem}，自动选用 {eff_slots} 槽"
+        else:
+            eff_slots = max(1, min(8, int(raw_slots or 1)))
+            slots_reason = f"固定 {eff_slots} 槽（硬件/上下文建议 {rec_slots} 槽）"
+            if ctx_eff // eff_slots < min_slot_ctx:
+                notes.append(f"当前每槽上下文 {ctx_eff // eff_slots} 低于 {prof.label} 建议最小值 {min_slot_ctx}，可适当调低 slots 或开启自动上下文。")
+
         return {"summary": summary, "model": info["file"], "mmproj": mm_path.relative_to(self.models_dir).as_posix() if mm_path and self.models_dir in mm_path.parents else (mm_path.name if mm_path else None),
                 "mmproj_path": str(mm_path) if mm_path else None, "ctx": ctx_eff, "ctx_cap": cap, "ctx_train": train,
+                "slots": eff_slots, "recommended_slots": rec_slots, "slots_reason": slots_reason,
                 "ngl": ngl, "n_cpu_moe": n_cpu_moe, "moe": info["moe"], "kv_type": kvt_eff, "flash_attn": fa_eff, "threads": threads,
                 "kv_mb": int(kv_need * 1024), "gpu_gb": round(gpu_w + fixed, 2), "cpu_gb": round(cpu_w, 2), "budget_gb": round(budget, 2),
                 "mmproj_offload": bool(mm_gpu) if mm_path else False, "notes": notes, "model_path": info["path"], "n_exp_layers": len(exp_layers),
@@ -441,7 +459,8 @@ class Engine:
     def build_args(self, plan: dict) -> list[str]:
         assert self.binary
         e = self.cfg.get("engine")
-        slots = max(1, min(8, int(e.get("slots", 1) or 1)))
+        raw_slots = e.get("slots", 1)
+        slots = int(plan.get("slots") or plan.get("recommended_slots") or 1) if raw_slots == "auto" else max(1, min(8, int(raw_slots or 1)))
         self._slot_sched = _SlotScheduler(slots)
         a = [str(self.binary), "-m", plan["model_path"], "--host", "127.0.0.1", "--port", str(self.port), "--api-key", self.api_key,
              "-c", str(plan["ctx"]), "-np", str(slots)]

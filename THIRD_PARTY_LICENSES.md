@@ -56,14 +56,15 @@ LocalAgent adheres to a strict local-first, offline-bundle policy: all runtime a
 
 ---
 
-## 4. Planned Bundled Offline Web Assets (Scheduled for M2 / M6)
+## 4. Bundled & Reserved Offline Web Assets (M2 / M6)
 
-No external CDN requests are permitted by LocalAgent CSP (`default-src 'none'; font-src 'self'; script-src 'self'`). The following assets are reserved for local bundling in `web/` under M2/M6:
+No external CDN requests are permitted by LocalAgent CSP (`default-src 'none'; font-src 'self'; script-src 'self'`). Current status under `web/`:
 
-| Asset | Target Location | License | Status |
+| Asset | Location | License | Status |
 |---|---|---|---|
-| **Inter Variable** (Latin + Cyrillic + Greek subset) | `web/fonts/inter-var.woff2` | SIL Open Font License 1.1 (OFL-1.1) | Reserved (M2) |
-| **JetBrains Mono** (Regular/Medium/SemiBold) | `web/fonts/jetbrains-mono.woff2` | SIL Open Font License 1.1 (OFL-1.1) | Reserved (M2) |
-| **Lucide Icons** (SVG sprite / local subset) | `web/icons/lucide-sprite.svg` | ISC License | Reserved (M2) |
+| **SVG Icon Sprite** (`la-ic-*`, bespoke 24×24 strokes) | `web/icons/sprite.svg` | Same as LocalAgent repository | Bundled (M6) |
+| **System CJK + Mono Typography Stack** | `web/css/tokens.css`, `web/fonts/README.md` | OS-provided system fonts | Active (M6, zero extra bundle weight) |
+| **Inter Variable** (optional offline drop-in subset) | `web/fonts/Inter-Variable.woff2` | SIL Open Font License 1.1 (OFL-1.1) | Optional slot (M6 drop-in documented in `web/fonts/README.md`) |
+| **JetBrains Mono** (optional offline drop-in subset) | `web/fonts/JetBrainsMono.woff2` | SIL Open Font License 1.1 (OFL-1.1) | Optional slot (M6 drop-in documented in `web/fonts/README.md`) |
 
 *(Whenever any new font, icon set, WASM runtime, or third-party JS library is added in M1–M8, its exact version, source URL, copyright notice, and full license text or SPDX identifier must be recorded in this file before merge.)*

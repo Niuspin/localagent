@@ -220,6 +220,7 @@ def _tensor_split(path: str, v: Any) -> str:
 
 SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "engine.ctx": _auto_int(2048, 4_194_304),
+    "engine.slots": _auto_int(1, 8),
     "engine.gpu_layers": _auto_int(0, 999, ("all",)),
     "engine.n_cpu_moe": _auto_int(0, 999),
     "engine.moe_cache_mib": _auto_int(0, 65536),
@@ -247,7 +248,7 @@ SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "swarm.merge_strategy": _enum("queue", "manual"),
     "swarm.role_limits": _role_limits,
     "mission.unattended_default": _enum("attended", "unattended"),
-    "ui.theme": _enum("auto", "light", "dark"),
+    "ui.theme": _enum("auto", "light", "dark", "paper", "midnight", "hc", "colorblind"),
     "ui.motion": _enum("auto", "full", "reduced", "off"),
     "ui.density": _enum("comfortable", "compact"),
 }

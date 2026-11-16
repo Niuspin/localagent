@@ -102,6 +102,15 @@
 - `GET /api/artifacts/{aid}/meta`: 返回单个产物元数据与安全下载链接 `download_url`。
 - `GET /api/artifacts/{aid}`: 安全下载原始产物文件（强制附带 `Content-Disposition: attachment` 与 `X-Content-Type-Options: nosniff`）。
 
+### `GET|POST /api/engine/plan` 与 Swarm 集群 API（`/api/swarms*`）
+- `GET|POST /api/engine/plan`: 返回引擎启动规划（含 `slots`、`recommended_slots`、`slots_reason`）与命令行预览。
+- `GET /api/swarms?session_id=...` / `POST /api/swarms`: 列出或创建并启动多代理 DAG 任务（请求体 `{"goal": str, "nodes": list, "session_id"?: str, "budget"?: dict}`）。
+- `GET /api/swarms/{id}`: 返回 Swarm 快照（`graph`、`budget`、`merges`、`conflicts`、`mailbox`）。
+- `GET /api/swarms/{id}/events`: Swarm 专属 SSE 事件流（支持 `Last-Event-ID` 断点续传与实时增量推送；事件类型包含 `swarm_started`、`agent_spawned`、`agent_step`、`agent_done`、`agent_blocked`、`agent_message`、`merge_started`、`merge_conflict`、`budget_warn`、`swarm_done`）。
+- `POST /api/swarms/{id}/cancel` / `pause` / `resume`: 取消、暂停或恢复 Swarm（支持服务重启后基于 `data/swarms/<id>/state.json` 续跑）。
+- `POST /api/swarms/{id}/agents/{aid}/message` / `cancel`: 向单个子代理发送邮箱消息或级联取消该节点及下游依赖。
+- `POST /api/swarms/{id}/conflicts/{cid}/resolve`: 处理 `MergeQueue` 冲突卡（`{"decision": "resolved_ours" | "resolved_theirs" | "dismissed"}`）。
+
 ---
 
 ## MCP 生态、Model Hub、记忆、技能与系统控制

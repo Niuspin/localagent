@@ -266,7 +266,10 @@
     adv.appendChild(F('图片最大 token', num('engine.image_max_tokens', { min: 64, step: 64 }), '越大看得越清楚，也越占上下文。'));
     adv.appendChild(F('前缀缓存内存 (MB)', num('engine.cache_ram_mb', { min: 0, step: 256 })));
     adv.appendChild(F('显存预留 (MB)', num('engine.vram_reserve_mb', { min: 0, step: 128 })));
-    adv.appendChild(F('并发推理槽位 (-np)', num('engine.slots', { min: 1, max: 8 }), '并行请求槽位数，默认 1 专注单任务最大上下文；多任务可调为 2~4。'));
+    adv.appendChild(F('并发推理槽位 (-np)', autoNum('engine.slots', 'auto（1~8）'), '并行请求槽位数（填数字 1~8 或留空使用 auto 按上下文与显存自适应）。'));
+    adv.appendChild(F('Swarm 集群启用', sw('swarm.enabled', '允许编排多代理 DAG 并发执行')));
+    adv.appendChild(F('Swarm 最大代理数', autoNum('swarm.max_agents', 'auto（≤slots）'), '填 1~8 或留空使用 auto。'));
+    adv.appendChild(F('Swarm 补丁合并策略', sel('swarm.merge_strategy', [['queue', '串行 MergeQueue（自动三方合并）'], ['manual', '仅保留 Worktree 手动审核']])));
     adv.appendChild(F('推理思考格式', sel('engine.reasoning_format', [['auto', '自动'], ['deepseek', 'deepseek'], ['none', 'none（不拆分标签）']]), '控制 llama-server 的 --reasoning-format 参数。'));
     adv.appendChild(F('多卡权重拆分 (--tensor-split)', txt('engine.tensor_split', { ph: 'auto 或 24,16' }), '多 GPU 环境下按显存比例权重拆分，例如 24,16。'));
     adv.appendChild(F('多卡拆分模式 (--split-mode)', sel('engine.split_mode', [['auto', '自动'], ['layer', '按层 (layer)'], ['row', '按张量行 (row)'], ['none', '单卡 (none)']]) ));
@@ -528,14 +531,68 @@
   function tabMcp() { LA.mcpTab(pane, { F: F, btn: btn, sec: sec, banner: banner }); }
 
   function tabUi() {
-    pane.appendChild(sec('外观'));
-    pane.appendChild(F('主题', sel('ui.theme', [['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']])));
-    var fs = el('input', { type: 'range', min: 13, max: 19, step: 1, value: LA.cfg('ui.font_size', 15) });
+    pane.appendChild(sec(LA.t('ui.appearance', '外观与排版')));
+    pane.appendChild(F(LA.t('ui.theme', '主题'), sel('ui.theme', [
+      ['auto', '跟随系统'],
+      ['light', '浅色 (Warm Alabaster)'],
+      ['dark', '深色 (Obsidian)'],
+      ['paper', '纸质阅读 (Paper)'],
+      ['midnight', '午夜深蓝 (Midnight)'],
+      ['hc', '高对比度 (HC)'],
+      ['colorblind', '色盲友好 (Okabe-Ito)']
+    ])));
+    var fs = el('input', { type: 'range', min: 12, max: 22, step: 1, value: LA.cfg('ui.font_size', 15) });
     var fv = el('span', { text: fs.value + 'px' });
     fs.addEventListener('input', function () { fv.textContent = fs.value + 'px'; LA.cfgSet('ui.font_size', parseInt(fs.value, 10)); });
     pane.appendChild(F('字号', [fs, fv]));
+    pane.appendChild(F(LA.t('ui.density', '界面密度'), sel('ui.density', [['comfortable', '舒适 (默认)'], ['compact', '紧凑']]) ));
+    pane.appendChild(F(LA.t('ui.motion', '动效强度'), sel('ui.motion', [['auto', '跟随系统'], ['full', '完整动效'], ['reduced', '仅淡入（无位移）'], ['off', '关闭动画']]) ));
+    pane.appendChild(F(LA.t('ui.ligatures', '代码连字'), sw('ui.code_ligatures', '启用等宽代码块连字 (JetBrains Mono / Cascadia Code)')));
+
+    // Accent swatches
+    var curAcc = '';
+    try { curAcc = localStorage.getItem('la.accent') || ''; } catch (e) {}
+    var swatches = [['', '默认'], ['#AC4E2F', '赤陶'], ['#1D4ED8', '钴蓝'], ['#1F6E40', '松绿'], ['#6B28C8', '深紫'], ['#005A9C', '海洋']];
+    var swWrap = el('div', { class: 'swatch-row' });
+    swatches.forEach(function (swItem) {
+      var b = el('button', {
+        type: 'button',
+        class: 'swatch-btn' + (curAcc === swItem[0] ? ' on' : ''),
+        title: swItem[1],
+        'aria-label': swItem[1],
+        style: { background: swItem[0] || 'var(--accent)' },
+        on: { click: function () {
+          try { if (swItem[0]) localStorage.setItem('la.accent', swItem[0]); else localStorage.removeItem('la.accent'); } catch (e) {}
+          LA.bus.emit('config', LA.S.config || {});
+          show('ui');
+        } }
+      });
+      swWrap.appendChild(b);
+    });
+    pane.appendChild(F(LA.t('ui.accent', '强调色预设'), swWrap, '经 WCAG AA 对比度校准的强调色预设。'));
+
+    // Reading column width & locale
+    var colSel = el('select', { class: 'inp' });
+    [['auto', '自适应 (780~880px)'], ['720px', '窄栏 (720px)'], ['820px', '标准 (820px)'], ['940px', '宽栏 (940px)']].forEach(function (o) {
+      colSel.appendChild(el('option', { value: o[0], text: o[1] }));
+    });
+    try { colSel.value = localStorage.getItem('la.colWidth') || 'auto'; } catch (e) {}
+    colSel.addEventListener('change', function () {
+      try { localStorage.setItem('la.colWidth', colSel.value); } catch (e) {}
+      LA.bus.emit('config', LA.S.config || {});
+    });
+    pane.appendChild(F(LA.t('ui.colwidth', '正文阅读宽度'), colSel));
+
+    var locSel = el('select', { class: 'inp' }, el('option', { value: 'zh-CN', text: '简体中文' }), el('option', { value: 'en', text: 'English' }));
+    try { locSel.value = localStorage.getItem('la.locale') || 'zh-CN'; } catch (e) {}
+    locSel.addEventListener('change', function () {
+      try { localStorage.setItem('la.locale', locSel.value); } catch (e) {}
+      LA.toast('语言偏好已更新（新打开面板立即生效）', 'ok');
+    });
+    pane.appendChild(F(LA.t('ui.locale', '界面语言'), locSel));
+
     pane.appendChild(sec('快捷键'));
-    var keys = [['Enter', '发送'], ['Shift + Enter', '换行'], ['/', '命令或技能'], ['@', '引用工作区文件'], ['Ctrl/⌘ + Shift + O', '新对话'], ['Ctrl/⌘ + B', '收起/展开侧栏'], ['Esc', '关闭弹窗 / 拒绝当前审批']];
+    var keys = [['Enter', '发送'], ['Shift + Enter', '换行'], ['/', '命令或技能'], ['@', '引用工作区文件'], ['Ctrl/⌘ + K', '全局命令面板'], ['Ctrl/⌘ + Shift + F', '切换专注模式'], ['Ctrl/⌘ + Shift + O', '新对话'], ['Ctrl/⌘ + B', '收起/展开侧栏'], ['Esc', '关闭弹窗 / 拒绝当前审批']];
     keys.forEach(function (k) { pane.appendChild(F(k[0], el('span', { text: k[1], style: { color: 'var(--muted)' } }))); });
     pane.appendChild(sec('关于'));
     pane.appendChild(el('div', { class: 'toolbar' }, btn('退出应用', function () {

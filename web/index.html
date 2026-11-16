@@ -5,12 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>LocalAgent</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23C96442'/%3E%3Cpath d='M16 6l2.2 7.8L26 16l-7.8 2.2L16 26l-2.2-7.8L6 16l7.8-2.2z' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23AC4E2F'/%3E%3Cpath d='M16 6l2.2 7.8L26 16l-7.8 2.2L16 26l-2.2-7.8L6 16l7.8-2.2z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/tokens.css">
+<link rel="stylesheet" href="/css/themes/light.css">
+<link rel="stylesheet" href="/css/themes/dark.css">
+<link rel="stylesheet" href="/css/themes/paper.css">
+<link rel="stylesheet" href="/css/themes/midnight.css">
+<link rel="stylesheet" href="/css/themes/hc.css">
+<link rel="stylesheet" href="/css/themes/colorblind.css">
+<link rel="stylesheet" href="/css/base.css">
+<link rel="stylesheet" href="/css/layout.css">
+<link rel="stylesheet" href="/css/components/controls.css">
+<link rel="stylesheet" href="/css/components/chat.css">
+<link rel="stylesheet" href="/css/components/drawer.css">
 </head>
 <body>
 <div id="app" class="app">
-  <aside id="sidebar" class="sidebar">
+  <aside id="sidebar" class="sidebar" aria-label="会话侧栏">
     <div class="sb-head">
       <div class="brand"><span class="brand-glyph" id="brandGlyph"></span><span class="brand-name">LocalAgent</span></div>
       <button class="icon-btn" id="btnCollapse" title="收起侧栏 (Ctrl+B)"></button>
@@ -30,6 +41,7 @@
       <button class="foot-btn" id="btnSettings"><span class="fi"></span><span>设置</span></button>
     </div>
   </aside>
+  <div id="sideSplitter" class="splitter" role="separator" aria-orientation="vertical" tabindex="0" aria-label="调整侧栏宽度"></div>
   <div id="scrim" class="scrim"></div>
 
   <main class="main">
@@ -47,6 +59,7 @@
           <button class="mini-btn" id="btnCompact" title="把较早的对话压缩成摘要">压缩</button>
         </div>
         <button class="chip engine" id="chipEngine" title="模型与引擎"><span class="dot" id="engDot"></span><span id="engText">未加载</span></button>
+        <button class="icon-btn" id="btnFocus" title="专注模式 (Ctrl+Shift+F)" aria-label="专注模式"></button>
         <button class="icon-btn" id="btnDrawer" title="工作区面板"></button>
       </div>
     </header>
@@ -79,13 +92,16 @@
           </div>
         </div>
       </section>
+      <div id="drawerSplitter" class="splitter" role="separator" aria-orientation="vertical" tabindex="0" aria-label="调整工作区面板宽度" hidden></div>
       <aside class="drawer" id="drawer" hidden></aside>
     </div>
   </main>
 </div>
 <div id="modalRoot"></div>
-<div id="toastRoot" class="toasts"></div>
+<div id="toastRoot" class="toasts" aria-live="polite"></div>
 <div id="dropMask" class="drop-mask" hidden>松开以添加文件</div>
+<script src="/js/i18n/zh-CN.js"></script>
+<script src="/js/i18n/en.js"></script>
 <script src="/js/util.js"></script>
 <script src="/js/md.js"></script>
 <script src="/js/api.js"></script>
@@ -94,6 +110,7 @@
 <script src="/js/sidebar.js"></script>
 <script src="/js/settings.js"></script>
 <script src="/js/mcp.js"></script>
+<script src="/js/swarm.js"></script>
 <script src="/js/panels.js"></script>
 <script src="/js/main.js"></script>
 </body>

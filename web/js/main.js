@@ -4,11 +4,91 @@
   var LA = window.LA, icon = LA.icon;
   var appEl;
 
-  /* ------------------------------------------------------------ 外观 */
+  /* ------------------------------------------------------------ 外观与布局持久化 */
+  var THEMES = ['auto', 'light', 'dark', 'paper', 'midnight', 'hc', 'colorblind'];
+  var MOTIONS = ['auto', 'full', 'reduced', 'off'];
+
+  LA.viewTransition = function (fn) {
+    var m = document.documentElement.dataset.motion || 'auto';
+    var sysReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (document.startViewTransition && m !== 'off' && m !== 'reduced' && !(m === 'auto' && sysReduced)) {
+      try { return document.startViewTransition(fn); } catch (e) {}
+    }
+    fn();
+  };
+
   function applyUi() {
-    var theme = LA.cfg('ui.theme', 'auto'), fs = +LA.cfg('ui.font_size', 15) || 15;
-    document.documentElement.dataset.theme = ['auto', 'light', 'dark'].indexOf(theme) >= 0 ? theme : 'auto';
-    document.documentElement.style.setProperty('--fs', Math.max(12, Math.min(20, fs)) + 'px');
+    var root = document.documentElement;
+    var theme = LA.cfg('ui.theme', 'auto');
+    var targetTheme = THEMES.indexOf(theme) >= 0 ? theme : 'auto';
+    var fs = +LA.cfg('ui.font_size', 15) || 15;
+    var motion = LA.cfg('ui.motion', 'auto');
+    var density = LA.cfg('ui.density', 'comfortable');
+    var lig = !!LA.cfg('ui.code_ligatures', false);
+
+    var apply = function () {
+      root.dataset.theme = targetTheme;
+      root.dataset.motion = MOTIONS.indexOf(motion) >= 0 ? motion : 'auto';
+      root.dataset.density = density === 'compact' ? 'compact' : 'comfortable';
+      root.dataset.ligatures = lig ? '1' : '0';
+      root.style.setProperty('--fs', Math.max(12, Math.min(22, fs)) + 'px');
+      try {
+        var acc = localStorage.getItem('la.accent');
+        if (acc) root.style.setProperty('--accent', acc);
+        else root.style.removeProperty('--accent');
+
+        var cw = localStorage.getItem('la.colWidth') || 'auto';
+        root.dataset.colWidth = cw;
+        if (cw && cw !== 'auto') root.style.setProperty('--col-w', cw);
+        else root.style.removeProperty('--col-w');
+
+        var sw = parseInt(localStorage.getItem('la.sideW') || '', 10);
+        if (sw >= 220 && sw <= 360) root.style.setProperty('--side-w', sw + 'px');
+        var dw = parseInt(localStorage.getItem('la.drawerW') || '', 10);
+        if (dw >= 280 && dw <= 520) root.style.setProperty('--drawer-w', dw + 'px');
+      } catch (e) {}
+    };
+
+    if (root.dataset.theme && root.dataset.theme !== targetTheme) LA.viewTransition(apply);
+    else apply();
+  }
+
+  function wireSplitter(elId, varName, storeKey, minW, maxW, invert) {
+    var sp = LA.$(elId); if (!sp) return;
+    function setW(px) {
+      var w = Math.max(minW, Math.min(maxW, Math.round(px)));
+      document.documentElement.style.setProperty(varName, w + 'px');
+      try { localStorage.setItem(storeKey, String(w)); } catch (e) {}
+    }
+    sp.addEventListener('mousedown', function (e) {
+      e.preventDefault();
+      var startX = e.clientX;
+      var curW = parseInt(getComputedStyle(document.documentElement).getPropertyValue(varName), 10) || minW;
+      sp.classList.add('dragging');
+      function onMove(ev) { setW(curW + (invert ? (startX - ev.clientX) : (ev.clientX - startX))); }
+      function onUp() {
+        sp.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+    sp.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      var curW = parseInt(getComputedStyle(document.documentElement).getPropertyValue(varName), 10) || minW;
+      var delta = e.key === 'ArrowRight' ? 12 : -12;
+      setW(curW + (invert ? -delta : delta));
+    });
+  }
+
+  function toggleFocus(force) {
+    if (!appEl) return;
+    var on = force != null ? !!force : !appEl.classList.contains('focus-mode');
+    appEl.classList.toggle('focus-mode', on);
+    var bf = LA.$('#btnFocus'); if (bf) bf.classList.toggle('on', on);
+    try { localStorage.setItem('la.focus', on ? '1' : '0'); } catch (e) {}
   }
 
   /* ------------------------------------------------------------ 顶栏 */
@@ -61,7 +141,15 @@
         return LA.get('/api/sessions/' + cur.id).then(function (v) { if (LA.S.cur && LA.S.cur.id === cur.id) { LA.S.cur.context = v.context; updateTop(); } });
       }).catch(LA.fail).then(function () { b.textContent = '压缩'; updateTop(); });
     });
-    LA.$('#btnDrawer').title = '工作区面板（文件 / 变更 / 任务）';
+    LA.$('#btnDrawer').title = LA.t('top.drawer', '工作区面板（文件 / 变更 / 任务 / 集群）');
+    var bf = LA.$('#btnFocus');
+    if (bf) {
+      bf.innerHTML = icon('focus', 17);
+      bf.title = LA.t('top.focus', '专注模式 (Ctrl+Shift+F)');
+      bf.addEventListener('click', function () { toggleFocus(); });
+    }
+    wireSplitter('#sideSplitter', '--side-w', 'la.sideW', 220, 360, false);
+    wireSplitter('#drawerSplitter', '--drawer-w', 'la.drawerW', 280, 520, true);
   }
   function toggleSide() {
     appEl.classList.toggle('collapsed');
@@ -113,6 +201,8 @@
       var items = [
         { kind: 'act', tag: '操作', title: '新建对话', sub: 'Ctrl+Shift+O', run: function () { LA.newSession(); } },
         { kind: 'act', tag: '面板', title: '打开文件抽屉', sub: '查看工作区文件', run: function () { LA.panels.toggleDrawer(true); } },
+        { kind: 'act', tag: '集群', title: '打开 Swarm 集群面板', sub: '查看多代理 DAG 与合并队列', run: function () { if (LA.panels.openSwarm) LA.panels.openSwarm(); } },
+        { kind: 'act', tag: '视图', title: '切换专注模式', sub: 'Ctrl+Shift+F 隐藏侧栏与检查器', run: function () { toggleFocus(); } },
         { kind: 'act', tag: 'Git', title: '查看 Git 变更与撤销日志', sub: '切换至变更抽屉', run: function () { LA.panels.openChanges(); } },
         { kind: 'act', tag: '设置', title: '打开设置', sub: '模型、引擎、生成与安全配置', run: function () { LA.openSettings(); } },
         { kind: 'act', tag: '记忆', title: '打开长期记忆库', sub: '检索与管理记忆条目', run: function () { LA.panels.openMemory(); } },
@@ -194,6 +284,7 @@
       var mod = e.ctrlKey || e.metaKey;
       if (mod && !e.shiftKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); if (!LA.hasModal()) openPalette(); }
       else if (mod && e.shiftKey && (e.key === 'O' || e.key === 'o')) { e.preventDefault(); LA.newSession(); }
+      else if (mod && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); toggleFocus(); }
       else if (mod && !e.shiftKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); toggleSide(); }
       else if (e.key === 'Escape' && !e.defaultPrevented) { if (LA.closeTopModal()) e.preventDefault(); else appEl.classList.remove('menu-open'); }
     });
@@ -209,7 +300,9 @@
   /* ------------------------------------------------------------ 启动 */
   function boot() {
     appEl = document.getElementById('app');
+    if (LA.loadIcons) LA.loadIcons();
     try { if (localStorage.getItem('la.collapsed') === '1') appEl.classList.add('collapsed'); } catch (e) {}
+    try { if (localStorage.getItem('la.focus') === '1') toggleFocus(true); } catch (e) {}
     LA.chat.init(); LA.composer.init(); LA.sidebar.init(); LA.panels.initDrawer(); wireTop(); wireKeys();
     ['state', 'session', 'sessionmeta', 'context', 'runstate', 'workspace'].forEach(function (n) { LA.bus.on(n, updateTop); });
     LA.bus.on('state', watchEngine);

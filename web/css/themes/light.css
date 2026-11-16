@@ -1,0 +1,48 @@
+/* Light Theme (Warm Alabaster — Default) */
+:root,
+:root[data-theme="light"],
+:root[data-theme="auto"] {
+  color-scheme: light;
+  --bg: #FAF9F5;
+  --bg-side: #F4F2EC;
+  --bg-elev: #FFFFFF;
+  --bg-soft: #EDE8DF;
+  --bg-user: #F2EFE8;
+  --bg-code: #F4F0E6;
+  --bg-translucent: rgba(250, 249, 245, 0.90);
+  --bg-side-translucent: rgba(244, 242, 236, 0.94);
+
+  --text: #1C1917;
+  --muted: #5C5750;
+  --faint: #6D675F;
+  --border: rgba(28, 25, 23, 0.10);
+  --border-strong: rgba(28, 25, 23, 0.20);
+
+  --accent: #AC4E2F;
+  --accent-h: #974226;
+  --accent-soft: rgba(172, 78, 47, 0.10);
+  --accent-soft-h: rgba(172, 78, 47, 0.17);
+  --accent-fg: #FFFFFF;
+
+  --ok: #1F6E40;
+  --ok-soft: rgba(31, 110, 64, 0.12);
+  --warn: #9A4406;
+  --warn-soft: rgba(154, 68, 6, 0.12);
+  --danger: #B92626;
+  --danger-soft: rgba(185, 38, 38, 0.11);
+  --info: #1E5E9E;
+  --info-soft: rgba(30, 94, 158, 0.12);
+
+  --diff-add: rgba(31, 110, 64, 0.14);
+  --diff-del: rgba(185, 38, 38, 0.13);
+
+  --shadow-sm: 0 1px 2px rgba(28, 25, 23, 0.05);
+  --shadow: 0 2px 8px -2px rgba(28, 25, 23, 0.07), 0 1px 3px -1px rgba(28, 25, 23, 0.04);
+  --shadow-lg: 0 14px 38px -4px rgba(28, 25, 23, 0.14), 0 4px 12px -2px rgba(28, 25, 23, 0.06);
+
+  --syn-kw: #A33E1B;
+  --syn-str: #1F6E40;
+  --syn-num: #6B28C8;
+  --syn-com: #6B655D;
+  --syn-fn: #175C94;
+}

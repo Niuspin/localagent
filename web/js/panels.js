@@ -72,17 +72,29 @@
     previewing = null;
     P.toggleDrawer(true);
   };
+  P.openSwarm = function () {
+    dtab = 'swarm';
+    previewing = null;
+    P.toggleDrawer(true);
+  };
   P.toggleDrawer = function (force) {
     LA.S.drawerOpen = force != null ? force : !LA.S.drawerOpen;
-    drawer.hidden = !LA.S.drawerOpen; LA.$('#btnDrawer').classList.toggle('on', LA.S.drawerOpen);
+    drawer.hidden = !LA.S.drawerOpen;
+    var dsp = LA.$('#drawerSplitter'); if (dsp) dsp.hidden = !LA.S.drawerOpen;
+    LA.$('#btnDrawer').classList.toggle('on', LA.S.drawerOpen);
     try { localStorage.setItem('la.drawer', LA.S.drawerOpen ? '1' : '0'); } catch (e) {}
     if (LA.S.drawerOpen) renderDrawer();
+    else if (LA.swarmPanel && LA.swarmPanel.close) LA.swarmPanel.close();
   };
   function renderDrawer() {
+    if (LA.swarmPanel && LA.swarmPanel.close && dtab !== 'swarm') LA.swarmPanel.close();
     LA.clear(drawer);
     var tabs = el('div', { class: 'dr-tabs' });
-    [['files', '文件'], ['changes', '变更'], ['tasks', '任务']].forEach(function (t) {
-      tabs.appendChild(el('button', { class: 'dr-tab' + (dtab === t[0] ? ' on' : ''), type: 'button', text: t[1], on: { click: function () { dtab = t[0]; previewing = null; renderDrawer(); } } }));
+    [['files', LA.t('drawer.tab.files', '文件')], ['changes', LA.t('drawer.tab.changes', '变更')], ['tasks', LA.t('drawer.tab.tasks', '任务')], ['swarm', LA.t('drawer.tab.swarm', '集群')]].forEach(function (t) {
+      tabs.appendChild(el('button', { class: 'dr-tab' + (dtab === t[0] ? ' on' : ''), type: 'button', text: t[1], on: { click: function () {
+        var go = function () { dtab = t[0]; previewing = null; renderDrawer(); };
+        if (LA.viewTransition) LA.viewTransition(go); else go();
+      } } }));
     });
     tabs.appendChild(el('span', { style: { flex: 1 } }));
     tabs.appendChild(iconBtn('refresh', '刷新', function () { renderDrawer(); }));
@@ -90,7 +102,9 @@
     drawBody = el('div', { class: 'dr-body' });
     drawer.append(tabs, drawBody);
     if (dtab === 'files') (previewing ? drawPreview(previewing) : drawFiles());
-    else if (dtab === 'changes') drawChanges(); else drawTasks();
+    else if (dtab === 'changes') drawChanges();
+    else if (dtab === 'swarm' && LA.swarmPanel) LA.swarmPanel.render(drawBody);
+    else drawTasks();
   }
 
   function drawFiles() {

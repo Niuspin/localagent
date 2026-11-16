@@ -44,6 +44,16 @@ class ModelRouter:
             ep = ep + ("/embeddings" if ep.endswith("/v1") else "/v1/embeddings")
         return ep, model or "text-embedding-3-small", key
 
+    def _worker_target(self) -> tuple[str, str, str]:
+        ep = str(self.cfg.get("swarm", "worker_endpoint", default="") or "").strip().rstrip("/")
+        model = str(self.cfg.get("swarm", "worker_model", default="") or "").strip()
+        key = self.cfg.secret("swarm_worker_api_key") or "" if hasattr(self.cfg, "secret") else ""
+        if not ep:
+            return "", model, key
+        if not ep.endswith("/chat/completions"):
+            ep = ep + ("/chat/completions" if ep.endswith("/v1") else "/v1/chat/completions")
+        return ep, model or "local-worker", key
+
     @staticmethod
     def _to_anthropic_payload(model: str, messages: list[dict], temperature: float, max_tokens: int) -> dict:
         sys_parts: list[str] = []
@@ -120,6 +130,39 @@ class ModelRouter:
                             return txt
                 except Exception as e:  # noqa: BLE001
                     logger.warning("外部压缩模型端点调用失败，已回退本地引擎: %s", e)
+
+        if role in ("researcher", "summarizer", "reader", "worker", "coder", "reviewer", "verifier"):
+            w_url, w_model, w_key = self._worker_target()
+            if w_url:
+                try:
+                    hdrs = {"Content-Type": "application/json", "Accept": "application/json"}
+                    if w_key:
+                        hdrs["Authorization"] = f"Bearer {w_key}"
+                    w_payload: dict[str, Any] = {
+                        "model": w_model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": False,
+                    }
+                    if response_format:
+                        w_payload["response_format"] = response_format
+                    resp = await net.fetch(
+                        w_url,
+                        method="POST",
+                        headers=hdrs,
+                        data=json.dumps(w_payload, ensure_ascii=False).encode("utf-8"),
+                        timeout=min(float(timeout), 120.0),
+                        max_bytes=2_000_000,
+                        allow_private=True,
+                    )
+                    if resp.status == 200:
+                        data = json.loads(resp.body.decode("utf-8", "replace"))
+                        txt = ((data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "").strip()
+                        if txt:
+                            return txt
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("外部 Swarm Worker 端点调用失败，已回退本地引擎: %s", e)
 
         body: dict[str, Any] = {
             "model": "local",

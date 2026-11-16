@@ -1,0 +1,47 @@
+/* Colorblind-Safe Theme (Okabe-Ito High-Contrast Feedback Hues) */
+:root[data-theme="colorblind"] {
+  color-scheme: light;
+  --bg: #FAFAFA;
+  --bg-side: #F2F3F5;
+  --bg-elev: #FFFFFF;
+  --bg-soft: #E9ECEF;
+  --bg-user: #EEF2F6;
+  --bg-code: #F4F5F7;
+  --bg-translucent: rgba(250, 250, 250, 0.92);
+  --bg-side-translucent: rgba(242, 243, 245, 0.95);
+
+  --text: #111418;
+  --muted: #495057;
+  --faint: #5E666E;
+  --border: rgba(17, 20, 24, 0.12);
+  --border-strong: rgba(17, 20, 24, 0.24);
+
+  /* Distinct blue-orange-magenta palette safe for deuteranopia/protanopia/tritanopia */
+  --accent: #005A9C;
+  --accent-h: #00467A;
+  --accent-soft: rgba(0, 90, 156, 0.11);
+  --accent-soft-h: rgba(0, 90, 156, 0.18);
+  --accent-fg: #FFFFFF;
+
+  --ok: #006B68;
+  --ok-soft: rgba(0, 107, 104, 0.12);
+  --warn: #A85500;
+  --warn-soft: rgba(168, 85, 0, 0.12);
+  --danger: #A61C5E;
+  --danger-soft: rgba(166, 28, 94, 0.12);
+  --info: #005A9C;
+  --info-soft: rgba(0, 90, 156, 0.12);
+
+  --diff-add: rgba(0, 107, 104, 0.15);
+  --diff-del: rgba(166, 28, 94, 0.15);
+
+  --shadow-sm: 0 1px 2px rgba(17, 20, 24, 0.05);
+  --shadow: 0 2px 8px -2px rgba(17, 20, 24, 0.08);
+  --shadow-lg: 0 14px 36px -4px rgba(17, 20, 24, 0.15);
+
+  --syn-kw: #A61C5E;
+  --syn-str: #006B68;
+  --syn-num: #6B28C8;
+  --syn-com: #5E666E;
+  --syn-fn: #005A9C;
+}

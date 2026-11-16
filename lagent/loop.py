@@ -36,7 +36,7 @@ from .journal import Journal
 from .permissions import PermissionManager
 from .router import ModelRouter
 from .sessions import Session, SessionStore
-from .tools import agentic, files, jobs, office, search, web  # noqa: F401  (导入即注册)
+from .tools import agentic, files, jobs, office, search, swarm_tools, web  # noqa: F401  (导入即注册)
 from .tools.base import TOOLS, Tool, ToolResult, clip, coerce_args, repair_json
 from .tools.ctx import SessionState, ToolCtx
 from .tools.files import rewind_to_turn
@@ -186,11 +186,12 @@ def make_title(text: str, files_: list[str]) -> str:
 class Agent:
     def __init__(self, *, cfg: Config, engine: Engine, store: SessionStore, journal: Journal, audit: sec.AuditLog,
                  memory: Any, skills: Any, protected: list[Path], hidden: list[Path], notify: Any = None, mcp: Any = None,
-                 outputs: Any = None, artifacts: Any = None):
+                 outputs: Any = None, artifacts: Any = None, swarms: Any = None):
         self.cfg, self.engine, self.store, self.journal, self.audit = cfg, engine, store, journal, audit
         self.memory, self.skills, self.mcp = memory, skills, mcp
         self.outputs = outputs                                # OutputStore | None：大输出落盘（见 outputs.py）
         self.artifacts = artifacts                            # ArtifactStore | None：多媒体与结构化产物仓储（见 artifacts.py）
+        self.swarms = swarms                                  # SwarmManager | None：多代理 DAG 集群管理器（见 swarm/）
         self.protected, self.hidden = protected, hidden
         self.runs: dict[str, Run] = {}
         self.allow_keys: dict[str, set[str]] = {}
@@ -348,7 +349,9 @@ class Agent:
         st = SessionState(sess.id, sess.tainted, sess.nonce, sess.todos, set(sess.user_domains),
                           self.allow_keys.setdefault(sess.id, set()),
                           shell_cwd=getattr(sess, "shell_cwd", ""),
-                          shell_env=dict(getattr(sess, "shell_env", {}) or {}))
+                          shell_env=dict(getattr(sess, "shell_env", {}) or {}),
+                          swarm_id=getattr(sess, "swarm_id", None),
+                          agent_id=getattr(sess, "agent_id", "main") or "main")
         st.turn_id = run.id
         st.depth = 0
         for u in _URL_RE.findall(text):
@@ -447,6 +450,7 @@ class Agent:
                 self._schedule_distill(sess, text, ui_ast)
             sess.tainted, sess.todos, sess.user_domains = st.tainted, st.todos, sorted(st.user_domains)[:200]
             sess.tool_groups = sorted(st.tool_groups)
+            sess.swarm_id = getattr(st, "swarm_id", None) or sess.swarm_id
             sess.shell_cwd = getattr(st, "shell_cwd", "")
             sess.shell_env = dict(getattr(st, "shell_env", {}) or {})
             ui_ast["status"] = "cancelled" if status == "cancelled" else ("error" if status == "error" else "done")
@@ -520,7 +524,8 @@ class Agent:
             except asyncio.TimeoutError:
                 return "（用户未回答）"
         ctx = ToolCtx(cfg=self.cfg, guard=guard, journal=self.journal, session=st, audit=self.audit, vision=self.engine.vision,
-                       memory=self.memory, skills=self.skills, outputs=self.outputs, artifacts=self.artifacts, emit=run.emit, ask=ask, cancel=run.cancel_evt,
+                       memory=self.memory, skills=self.skills, outputs=self.outputs, artifacts=self.artifacts, swarms=self.swarms,
+                       emit=run.emit, ask=ask, cancel=run.cancel_evt,
                        sandbox_kind=sec.sandbox_info()["kind"])
         ctx.agent = self
         ctx.run = run
@@ -1449,6 +1454,85 @@ class Agent:
         finally:
             if wt_dir is not None and ws:
                 self._git_cmd(Path(ws), "worktree", "remove", "--force", str(wt_dir))
+
+    async def run_swarm_node(self, node: Any, ctx_info: dict[str, Any]) -> dict[str, Any]:
+        """SwarmManager 默认节点执行器：隔离上下文与角色权限并运行单节点任务循环。"""
+        role_spec = ctx_info["role"]
+        sw = ctx_info["swarm"]
+        eff_ws = str(ctx_info.get("workspace") or "")
+        sub_sid = uuid.uuid4().hex[:12]
+        sub_sess = Session(sub_sid, workspace=eff_ws)
+        sub_sess.title = f"Swarm:{role_spec.name} {node.goal[:24]}"
+        sub_sess.agent_id = node.id
+        sub_sess.swarm_id = sw.id
+        sub_sess.mission_id = sw.mission_id
+
+        parent_sess = self.store.get(sw.session_id) if getattr(self, "store", None) else None
+        sub_st = SessionState(
+            sub_sid,
+            tainted=bool(parent_sess.tainted) if parent_sess else False,
+            nonce=parent_sess.nonce if parent_sess else uuid.uuid4().hex[:8],
+            todos=[],
+            user_domains=set(parent_sess.user_domains) if parent_sess else set(),
+            allow_keys=set(),
+            swarm_id=sw.id,
+            agent_id=node.id,
+        )
+        sub_st.depth = node.depth
+        sub_st.sub_mode = ctx_info.get("permission_mode", "plan")
+        sub_st.turn_id = node.id
+        sub_st.tool_groups = set(role_spec.tool_groups)
+
+        sub_run = Run(
+            sub_sid,
+            agent_id=node.id,
+            parent_id=node.parent or "main",
+            swarm_id=sw.id,
+            mission_id=sw.mission_id,
+        )
+        sub_ctx = self._make_ctx(sub_run, sub_sess, sub_st, eff_ws)
+        sub_ctx.agent = self
+        sub_ctx.depth = node.depth
+        sub_ctx.turn_id = node.id
+        emit_step = ctx_info.get("emit_step")
+        if callable(emit_step):
+            orig_emit = sub_run.emit
+
+            def _fwd(ev: str, d: dict) -> None:
+                orig_emit(ev, d)
+                if ev in ("tool_start", "tool_result"):
+                    emit_step({"phase": ev, "name": d.get("name", ""), "status": d.get("status", "running")})
+
+            sub_run.emit = _fwd  # type: ignore[method-assign]
+
+        mailbox_notes = ctx_info["mailbox"].read(node.id, unread_only=True, mark_read=True)
+        mail_blob = "\n".join(f"[{m.from_agent}→{node.id} ({m.kind})]: {m.body}" for m in mailbox_notes)
+        prompt = f"【Swarm 节点 · 角色={role_spec.label} ({role_spec.name})】\n目标: {node.goal}\n\n{role_spec.system_hint}"
+        if mail_blob:
+            prompt += f"\n\n[收到协作邮箱消息]\n{mail_blob}"
+
+        await self._append_user(sub_run, sub_sess, sub_ctx, prompt, [], [], [])
+        sub_ui: dict[str, Any] = {"id": uuid.uuid4().hex[:8], "role": "assistant", "ts": time.time(), "status": "running", "error": None, "blocks": []}
+        max_steps = max(1, min(int((node.budget or {}).get("steps") or role_spec.default_steps), 60))
+        try:
+            await self._loop(sub_run, sub_sess, sub_st, sub_ctx, sub_ui, max_steps_override=max_steps)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "failed", "error": str(e), "result": "", "steps": sub_run.stats.steps, "tainted": sub_st.tainted}
+
+        texts = [b["text"] for b in sub_ui.get("blocks", []) if b.get("type") == "text" and b.get("text")]
+        summary = "\n\n".join(texts).strip()
+        if not summary:
+            t_blocks = [b.get("content", "") for b in sub_ui.get("blocks", []) if b.get("type") == "tool" and b.get("content")]
+            summary = "\n".join(t_blocks)[-2000:] or "节点执行完成（无文本摘要）。"
+        return {
+            "status": "done",
+            "result": summary,
+            "steps": sub_run.stats.steps,
+            "tokens": int((sub_sess.usage or {}).get("used", 0) or 0),
+            "tool_calls": sum(1 for b in sub_ui.get("blocks", []) if b.get("type") == "tool"),
+            "tainted": bool(sub_st.tainted),
+            "artifacts": [],
+        }
 
     # ------------------------------------------------------------ 回退/重新生成
     def truncate(self, sess: Session, from_index: int) -> None:

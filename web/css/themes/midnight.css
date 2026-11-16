@@ -1,0 +1,46 @@
+/* Midnight Theme (Deep Slate-Indigo Night Workstation) */
+:root[data-theme="midnight"] {
+  color-scheme: dark;
+  --bg: #0D1117;
+  --bg-side: #11161F;
+  --bg-elev: #161D28;
+  --bg-soft: #1E2736;
+  --bg-user: #1C2534;
+  --bg-code: #0A0E14;
+  --bg-translucent: rgba(13, 17, 23, 0.92);
+  --bg-side-translucent: rgba(17, 22, 31, 0.94);
+
+  --text: #E6EDF3;
+  --muted: #9BA8BA;
+  --faint: #7E8C9F;
+  --border: rgba(230, 237, 243, 0.11);
+  --border-strong: rgba(230, 237, 243, 0.22);
+
+  --accent: #66A8FF;
+  --accent-h: #85BCFF;
+  --accent-soft: rgba(102, 168, 255, 0.16);
+  --accent-soft-h: rgba(102, 168, 255, 0.25);
+  --accent-fg: #0D1117;
+
+  --ok: #56D364;
+  --ok-soft: rgba(86, 211, 100, 0.16);
+  --warn: #E8B94B;
+  --warn-soft: rgba(232, 185, 75, 0.16);
+  --danger: #FF8279;
+  --danger-soft: rgba(255, 130, 121, 0.16);
+  --info: #79C0FF;
+  --info-soft: rgba(121, 192, 255, 0.16);
+
+  --diff-add: rgba(86, 211, 100, 0.20);
+  --diff-del: rgba(255, 130, 121, 0.20);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.50);
+  --shadow: 0 2px 12px -2px rgba(0, 0, 0, 0.62);
+  --shadow-lg: 0 14px 40px -4px rgba(0, 0, 0, 0.78);
+
+  --syn-kw: #FF7B72;
+  --syn-str: #A5D6FF;
+  --syn-num: #D2A8FF;
+  --syn-com: #8B949E;
+  --syn-fn: #79C0FF;
+}

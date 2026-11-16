@@ -18,6 +18,7 @@ EXT_GROUPS: dict[str, tuple[str, ...]] = {
     "extras": ("read_skill_file", "create_skill", "memory_forget", "repo_map", "code_diagnostics"),
     "jobs": ("job_output", "job_stop"),
     "outputs": ("read_tool_output",),     # 无关键词触发：输出被截断/精简、出现句柄时由循环自动加载
+    "swarm": ("spawn_agent", "swarm_plan", "await_agents", "agent_status", "cancel_agent", "send_message"),
 }
 
 GROUP_DESC: dict[str, str] = {
@@ -26,6 +27,7 @@ GROUP_DESC: dict[str, str] = {
     "fileops": "删除、移动、复制文件，新建目录",
     "extras": "读取技能附带文件、创建技能、删除记忆、代码结构骨架（repo_map）与语法诊断（code_diagnostics）",
     "jobs": "查看/终止后台命令（run_command background=true 启动）",
+    "swarm": "编排并发 Swarm DAG 子代理集群（非阻塞派生、等待汇合、邮箱通信与取消）",
 }
 
 _OF: dict[str, str] = {t: g for g, ts in EXT_GROUPS.items() for t in ts}
@@ -73,6 +75,7 @@ _TRIGGERS: dict[str, re.Pattern[str]] = {
         r"|\b(?:delete|remove|rename|move|copy|mkdir|tidy|organi[sz]e|clean ?up)\b", re.I),
     "extras": re.compile(r"技能|\bskills?\b|忘[记掉]|\bforget\b", re.I),
     "jobs": re.compile(r"后台|开发服务器|\bdev server\b|\bnpm run dev\b|\bwatch(?:ing)? mode\b|持续运行|长时间运行|\bin the background\b", re.I),
+    "swarm": re.compile(r"\bswarm\b|集群|并发代理|并行开发|多个\s*worker|\bdag\b|协作拆分", re.I),
 }
 
 
