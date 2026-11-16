@@ -14,6 +14,7 @@ import re
 
 EXT_GROUPS: dict[str, tuple[str, ...]] = {
     "office": ("write_document", "write_spreadsheet", "write_presentation", "edit_office"),
+    "artifacts": ("make_chart", "bundle_artifacts"),
     "fileops": ("delete_path", "move_path", "copy_path", "make_dir"),
     "extras": ("read_skill_file", "create_skill", "memory_forget", "repo_map", "code_diagnostics"),
     "jobs": ("job_output", "job_stop"),
@@ -24,6 +25,7 @@ EXT_GROUPS: dict[str, tuple[str, ...]] = {
 GROUP_DESC: dict[str, str] = {
     "outputs": "取回被截断/精简的工具输出（按句柄分段读取或按关键词查找）",
     "office": "创建/修改 Word、Excel、PowerPoint、PDF 文档",
+    "artifacts": "生成 SVG 数据图表（柱/折/饼/散点/热力图）与产物打包归档（zip + MANIFEST.json）",
     "fileops": "删除、移动、复制文件，新建目录",
     "extras": "读取技能附带文件、创建技能、删除记忆、代码结构骨架（repo_map）与语法诊断（code_diagnostics）",
     "jobs": "查看/终止后台命令（run_command background=true 启动）",
@@ -70,6 +72,9 @@ _TRIGGERS: dict[str, re.Pattern[str]] = {
     "office": re.compile(
         r"\.(?:docx?|xlsx?|xlsm|pptx?|pdf)\b|\b(?:word|excel|powerpoint|pdf|pptx?|xlsx?|docx?)\b"
         r"|文档|表格|幻灯|演示文稿|报告|简历|合同|电子表格|工作簿", re.I),
+    "artifacts": re.compile(
+        r"图表|柱状图|折线图|饼图|散点图|热力图|可视化|产物|打包"
+        r"|\b(?:chart|plot|bar ?chart|line ?chart|pie ?chart|scatter|heatmap|svg|bundle|artifact)\b", re.I),
     "fileops": re.compile(
         r"删除|删掉|移动|移到|复制|拷贝|重命名|改名|整理|归档|清理|新建(?:文件夹|目录)|创建(?:文件夹|目录)"
         r"|\b(?:delete|remove|rename|move|copy|mkdir|tidy|organi[sz]e|clean ?up)\b", re.I),
@@ -94,7 +99,7 @@ def detect(text: str, files: list[str] | None = None, skills: list[str] | None =
     blob = (text or "") + "\n" + "\n".join(files or [])
     out = {g for g, rx in _TRIGGERS.items() if rx.search(blob)}
     if skills:                       # 技能的做法通常要读写办公文件、整理文件
-        out |= {"office", "fileops"}
+        out |= {"office", "fileops", "artifacts"}
     for g in _DYN:                   # 用户提到了某个 MCP 服务器的名字（整词匹配，≥3 个字符）
         name = g.split(":", 1)[1]
         if len(name) >= 3 and re.search(r"(?<![A-Za-z0-9_-])" + re.escape(name) + r"(?![A-Za-z0-9_-])", blob, re.I):
@@ -114,8 +119,8 @@ def normalize(groups: object) -> set[str]:
 
 def hint() -> str:
     """写进系统提示的一句话（内容固定，不破坏前缀缓存）。"""
-    base = ("- 工具列表只含常用工具。需要办公文档（Word/Excel/PPT/PDF）、删除/移动/复制文件、技能与记忆管理、"
-            "后台任务管理时，先调用 load_tools（groups: office / fileops / extras / jobs）再继续。")
+    base = ("- 工具列表只含常用工具。需要办公文档（Word/Excel/PPT/PDF）、图表生成与产物打包、删除/移动/复制文件、技能与记忆管理、"
+            "后台任务管理时，先调用 load_tools（groups: office / artifacts / fileops / extras / jobs）再继续。")
     if _DYN:
         base += "\n- 已接入的外部工具（MCP）：" + "；".join(f"{g}（{_DYN_DESC.get(g, '')}）" for g in _DYN) + "。需要时同样用 load_tools 加载。"
     return base

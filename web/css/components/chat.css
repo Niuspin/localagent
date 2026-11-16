@@ -474,3 +474,13 @@ details.think[open] .tbody { animation: cardReveal var(--dur-2) var(--ease-decel
 
 .sse-retry { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid var(--danger); background: var(--danger-soft); font-size: 13px; }
 .drop-mask { position: fixed; inset: 0; z-index: var(--z-mask); background: rgba(20, 20, 19, 0.45); backdrop-filter: blur(4px); color: #fff; display: grid; place-items: center; font-size: 1.4em; font-family: var(--serif); border: 3px dashed var(--accent); }
+
+/* ---------- Inline Artifact Card (M4) ---------- */
+.art-card { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-top: 1px solid var(--border); background: var(--bg-soft); }
+.art-card-ic { color: var(--accent); display: flex; align-items: center; flex: none; }
+.art-card-main { flex: 1; min-width: 0; }
+.art-card-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.art-kind-badge { font-size: .72em; font-weight: 600; padding: 1px 7px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--accent); flex: none; }
+.art-card-title { font-size: .88em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art-card-sub { font-size: .76em; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
+.art-card-acts { display: flex; gap: 6px; flex: none; }

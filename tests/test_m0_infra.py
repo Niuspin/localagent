@@ -57,18 +57,23 @@ async def _call_asgi(app, method: str, path: str, *, query: str = "", port: int 
     }
     sent: list[dict] = []
     more = True
+    done = asyncio.Event()
 
     async def receive():
         nonlocal more
         if more:
             more = False
             return {"type": "http.request", "body": body, "more_body": False}
+        await done.wait()
         return {"type": "http.disconnect"}
 
     async def send(msg: dict):
         sent.append(msg)
 
-    await app(scope, receive, send)
+    try:
+        await app(scope, receive, send)
+    finally:
+        done.set()
     start = next(m for m in sent if m["type"] == "http.response.start")
     headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in start.get("headers", [])}
     payload = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")

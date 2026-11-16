@@ -9,22 +9,43 @@ from urllib.parse import urlparse
 
 from .. import security as sec
 from ..permissions import match_command, match_glob
+from ..tools.base import TOOLS
 
 READONLY_TOOLS = {
     "read_file",
+    "ingest_media",
     "list_dir",
     "find_files",
     "grep",
     "glob",
     "repo_map",
+    "code_diagnostics",
+    "read_tool_output",
     "memory_search",
     "memory_get",
     "todo_write",
     "verify",
     "web_search",
+    "agent_status",
+    "await_agents",
 }
 
-WRITE_TOOLS = {"write_file", "edit_file", "patch_file", "delete_file", "mkdir", "move_file"}
+WRITE_TOOLS = {
+    "write_file",
+    "edit_file",
+    "patch_file",
+    "delete_file",
+    "delete_path",
+    "mkdir",
+    "make_dir",
+    "move_file",
+    "move_path",
+    "copy_path",
+    "write_document",
+    "write_spreadsheet",
+    "write_presentation",
+    "edit_office",
+}
 NET_TOOLS = {"web_fetch", "fetch_url", "http_request"}
 
 
@@ -66,10 +87,36 @@ class MissionPolicy:
     ) -> PolicyVerdict:
         args = dict(args or {})
         tname = str(tool or "")
-        sig = f"{tname}:{args.get('command') or args.get('path') or args.get('url') or ''}"
+        tool_obj = TOOLS.get(tname)
+        raw_kind = tool_obj.kind if tool_obj is not None else ""
+        if tname in ("delegate_task", "spawn_agent") and args.get("mode") == "worker":
+            eff_kind = "write"
+        elif tname in ("shell", "run_command", "bash") or raw_kind == "exec":
+            eff_kind = "exec"
+        elif tname in WRITE_TOOLS or raw_kind in ("write", "delete"):
+            eff_kind = "write"
+        elif tname in NET_TOOLS or raw_kind == "net_fetch":
+            eff_kind = "net_fetch"
+        elif tname in READONLY_TOOLS or raw_kind in ("read", "meta", "memory_read", "net_search"):
+            eff_kind = "read"
+        else:
+            eff_kind = "other"
+
+        primary_target = args.get("command") or args.get("cmd") or args.get("dst") or args.get("path") or args.get("file_path") or args.get("src") or args.get("url") or ""
+        sig = f"{tname}:{primary_target}"
 
         # 1. 硬拒绝与路径越界永远优先（不可覆盖）
-        if tname in ("shell", "run_command", "bash"):
+        if eff_kind == "exec":
+            cwd_raw = str(args.get("cwd") or "").strip()
+            if cwd_raw:
+                try:
+                    cwd_resolved = self.guard.resolve(cwd_raw, write=False)
+                except sec.SecurityError as e:
+                    return PolicyVerdict(False, "deny", f"path_guard: {e}", target=cwd_raw, hard=True)
+                cwd_rel = self._rel_posix(cwd_resolved)
+                cwd_sens = sec.sensitive_reason(cwd_rel)
+                if cwd_sens:
+                    return PolicyVerdict(False, "block", f"sensitive_path:{cwd_sens}", target=cwd_rel)
             cmd = str(args.get("command") or args.get("cmd") or "").strip()
             hd = sec.hard_deny_reason(cmd)
             if hd:
@@ -87,34 +134,63 @@ class MissionPolicy:
                 return PolicyVerdict(True, "allow", "allowlisted_command", target=cmd)
             return PolicyVerdict(False, "block", "command_outside_allowlist", target=cmd)
 
-        if tname in WRITE_TOOLS or "path" in args or "file_path" in args:
-            raw_p = str(args.get("path") or args.get("file_path") or "").strip()
-            if raw_p:
+        path_keys: list[str] = list(tool_obj.path_args) if (tool_obj and tool_obj.path_args) else []
+        for fallback_k in ("path", "file_path", "src", "dst"):
+            if fallback_k not in path_keys:
+                path_keys.append(fallback_k)
+        path_pairs: list[tuple[str, str]] = []
+        for k in path_keys:
+            v = args.get(k)
+            if isinstance(v, str) and v.strip():
+                path_pairs.append((k, v.strip()))
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, str) and item.strip():
+                        path_pairs.append((k, item.strip()))
+
+        if eff_kind == "write" or path_pairs:
+            rels: list[str] = []
+            write_rels: list[str] = []
+            for k, raw_p in path_pairs:
+                # copy_path 的 src 与 bundle_artifacts 的 files 仅读，其余写工具路径（含 move_path 源/目标）按写边界校验
+                need_write = eff_kind == "write" and not ((tname == "copy_path" and k == "src") or (tname == "bundle_artifacts" and k == "files"))
                 try:
-                    resolved = self.guard.resolve(raw_p, write=(tname in WRITE_TOOLS))
+                    resolved = self.guard.resolve(raw_p, write=need_write)
                 except sec.SecurityError as e:
                     return PolicyVerdict(False, "deny", f"path_guard: {e}", target=raw_p, hard=True)
-                rel = self._rel_posix(resolved)
-                norm_sig = f"{tname}:{rel}"
-                if tname in WRITE_TOOLS:
-                    sens = sec.sensitive_reason(rel)
-                    if sens:
-                        return PolicyVerdict(False, "block", f"sensitive_path:{sens}", target=rel)
-                    if tainted:
-                        return PolicyVerdict(False, "block", "tainted_write_requires_approval", target=rel)
-                    if approved_actions and (sig in approved_actions or norm_sig in approved_actions):
-                        return PolicyVerdict(True, "allow", "explicitly_approved", target=rel)
-                    # Mission 自身状态目录允许在内部更新，或匹配 allow_paths
-                    if rel.startswith(".localagent/missions/"):
-                        return PolicyVerdict(True, "allow", "mission_metadata", target=rel)
-                    if self.mode != "unattended":
-                        return PolicyVerdict(False, "block", "attended_write_requires_approval", target=rel)
-                    if self.allow_paths and any(match_glob(rel, pat) for pat in self.allow_paths):
-                        return PolicyVerdict(True, "allow", "allowlisted_path", target=rel)
-                    return PolicyVerdict(False, "block", "path_outside_allowlist", target=rel)
-                return PolicyVerdict(True, "allow", "safe_read", target=rel)
+                rel_p = self._rel_posix(resolved)
+                rels.append(rel_p)
+                if need_write:
+                    write_rels.append(rel_p)
 
-        if tname in NET_TOOLS or "url" in args:
+            target_rel = (write_rels[-1] if write_rels else rels[-1]) if rels else tname
+            target_sigs = {sig, f"{tname}:{target_rel}"}
+            for rel in rels:
+                sens = sec.sensitive_reason(rel)
+                if sens:
+                    rel_sig = f"{tname}:{rel}"
+                    if not tainted and approved_actions and (rel_sig in approved_actions or (len(rels) == 1 and sig in approved_actions)):
+                        continue
+                    return PolicyVerdict(False, "block", f"sensitive_path:{sens}", target=rel)
+
+            if eff_kind == "write":
+                if tainted:
+                    return PolicyVerdict(False, "block", "tainted_write_requires_approval", target=target_rel)
+                if approved_actions and (target_sigs & approved_actions):
+                    return PolicyVerdict(True, "allow", "explicitly_approved", target=target_rel)
+                if not write_rels:
+                    return PolicyVerdict(False, "block", "path_outside_allowlist", target=target_rel)
+                # Mission 自身状态目录允许在内部更新，或全部写路径匹配 allow_paths
+                if all(r.startswith(".localagent/missions/") for r in write_rels):
+                    return PolicyVerdict(True, "allow", "mission_metadata", target=target_rel)
+                if self.mode != "unattended":
+                    return PolicyVerdict(False, "block", "attended_write_requires_approval", target=target_rel)
+                if self.allow_paths and all(any(match_glob(r, pat) for pat in self.allow_paths) for r in write_rels):
+                    return PolicyVerdict(True, "allow", "allowlisted_path", target=target_rel)
+                return PolicyVerdict(False, "block", "path_outside_allowlist", target=target_rel)
+            return PolicyVerdict(True, "allow", "safe_read", target=rels[-1] if rels else "")
+
+        if eff_kind == "net_fetch" or "url" in args:
             url = str(args.get("url") or "").strip()
             host = (urlparse(url).hostname or "").lower()
             if tainted:
@@ -126,7 +202,7 @@ class MissionPolicy:
                     return PolicyVerdict(True, "allow", "allowlisted_domain", target=url)
             return PolicyVerdict(False, "block", "domain_outside_allowlist", target=url)
 
-        if tname in READONLY_TOOLS:
+        if eff_kind == "read":
             return PolicyVerdict(True, "allow", "readonly_tool")
 
         # 未知/高风险工具默认拦截

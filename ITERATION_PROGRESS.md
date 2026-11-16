@@ -3,7 +3,7 @@
 > 对齐基线：[ITERATION_PLAN_2026-11-15_2140.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/ITERATION_PLAN_2026-11-15_2140.md)（v0.2.0 **"Swarm & Mission"**）  
 > 上一阶段基线报告：[ARCHITECTURE_PROGRESS.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/ARCHITECTURE_PROGRESS.md)（v0.1.x Phase 1–3）  
 > 基线提交：`e503db1`（M0 / M1 / M6 已提交并同步至 `origin/main`）  
-> 最近更新：`2026-11-16 19:26 +08:00`
+> 最近更新：`2026-11-16 21:38 +08:00`
 
 ---
 
@@ -15,7 +15,7 @@
 | **M1 Swarm 核心（A）** | 1.5 周 | `lagent/swarm/` 全部模块；`spawn_agent`/`swarm_plan`/`await_agents` 等工具；SSE+API；Swarm 面板 v1 | §2.8 测试全绿；`parallel_refactor` 评测达标 | **已完成** | `2026-11-16 16:34 +08:00` |
 | **M2 Mission 运行时（B）** | 1.5 周 | `lagent/mission/`；`/mission` 命令与 API；`MISSION.md`；Watchdog/Gates/Policy；Mission 详情页 | §3.8 测试全绿；崩溃续跑 100% | **已完成** | `2026-11-16 19:00 +08:00` |
 | **M3 多模态输入（C-in）** | 1 周 | `media/ingest`、能力协商、受限子进程、前端附件条 | 黄金样本通过；炸弹样本被拒 | **已完成** | `2026-11-16 19:26 +08:00` |
-| **M4 产物与多模态输出（C-out）** | 1 周 | Artifact 面板、`make_chart`、HTML 沙箱预览、会话导出、bundle | §4.4 测试全绿 | 待开始 | — |
+| **M4 产物与多模态输出（C-out）** | 1 周 | Artifact 面板、`make_chart`、HTML 沙箱预览、会话导出、bundle | §4.4 测试全绿 | **已完成** | `2026-11-16 21:38 +08:00` |
 | **M5 Research Engine（D）** | 2 周 | `lagent/research/` 全部模块；策略闸门接入全部联网路径；网络账本 UI；`cite_check` | §5.6 断言全绿；`--offline` 零出站 | 待开始 | — |
 | **M6 UI 设计系统 v2（E）**（与 M1–M5 并行） | 2 周 | tokens/字体/图标/主题/动效/布局重构；对比度校验与无障碍强化 | §6.8 指标达标 | **已完成（无头 Playwright 截图留待装 Chromium 环境补跑）** | `2026-11-16 16:34 +08:00` |
 | **M7 技能库 v2（F）** | 1 周 | Spec v2、路由、lint、`skills.lock`、30 个技能 + 评测 | §7.4 达标 | 待开始 | — |
@@ -29,7 +29,7 @@
 |---|---|---|---|---|
 | **A. Agent 集群并发处理（Swarm）** | §2 | M1 | **M1 核心已完成** | `lagent/swarm/`（DAG 环检测与级联、四级优先调度器、7 角色单调权限、分层预算账本、类型化 JSONL 邮箱、文件租约锁、串行行级三方 `MergeQueue` + 冲突卡、崩溃恢复）、`slots="auto"` 规划、`worker_endpoint` 路由、Swarm 工具与 `/api/swarms*` HTTP/SSE、`parallel_refactor` 评测及 6 组专项测试全绿 |
 | **B. 超长期编程智能体（Mission）** | §3 | M2 | **M2 核心已完成** | `lagent/mission/`（模型与 `MISSION.md` 双向解析、原子 `state.json`/`events.jsonl`、分段 Episode 引擎、Git 分支与里程碑回滚、`StallWatchdog` 四级升级、`MissionPolicy` 无人值守与安全单调边界、四维预算与 80%/100% 控管、跨平台防休眠与安静时间窗）、`--resume-missions`、`/mission` 命令、`/api/missions*` HTTP/SSE、前端 Missions 侧栏与详情监控面板 |
-| **C. 多模态多格式 I/O 与 Artifact** | §4 | M3 / M4 | **M3 输入已完成，待 M4 输出** | 已落地 M3 `lagent/media/`（魔数嗅探、能力协商 `capabilities.py`、受限子进程 `sandbox.py`/`_worker.py`、EXIF/GPS 剥离与长图切块、PDF 文本+扫描页 `pypdfium2` 渲染/JS 探测、Office 表格/批注/备注/内嵌图+宏与外链剥离、CSV/Parquet 抽样、ipynb/EPUB/MHTML/HTML 清洗、压缩包仅列目录与 Zip Bomb/Slip 拦截、音视频优雅降级、工具 `ingest_media` 与 `OutputStore` 落盘、`/api/capabilities` 与 `/api/media/ingest`、前端附件条标签与分辨率切换）；待完成 M4 `make_chart` 与 Artifact 面板 |
+| **C. 多模态多格式 I/O 与 Artifact** | §4 | M3 / M4 | **M3 输入 + M4 输出已完成** | 已落地 M3 `lagent/media/ingest/` 与 M4 `lagent/media/artifacts/`（零依赖 SVG `make_chart` 5 类图表与暗色主题 CSS 变量、HTML `<iframe sandbox>` 默认禁脚本与逐产物禁网授权、PDF 分页/表格分页/PPTX/Markdown/Archive 安全预览、`bundle_artifacts` + `MANIFEST.json` 打包、会话多格式导出 `md/html/pdf` 含思考/工具开关、`write_document`/`write_spreadsheet`/`write_presentation`/`edit_office`/`write_file` 自动 Artifact 登记与事件推送、`table` 句柄预算降级、可选 `piper` TTS 降级、对话内联产物卡片与右侧检查器「产物」面板） |
 | **D. 安全合法自动联网调研** | §5 | M5 | 已完成 M0 配置/目录预留 | 已完成 `research` 默认安全配置（`mode="off"`、`respect_robots=True`、`pii_redact=True`、`reader_isolation=True`）、`search.html_scrapers_ack`、`data/webcache/` |
 | **E. UI 界面深度美化** | §6 | M6 | **M6 设计系统 v2 已完成** | `web/css/` 模块化分层重构（零 `transition: all`）、6 套 WCAG AA 主题（含 Paper / Midnight / HC / Colorblind）+ `tests/ui_contrast.py` 自动化校验、SVG 图标精灵、CJK 排版与等宽连字控制、可拖拽/键盘分栏、专注模式、View Transitions 与 `reduced/off` 动效控制、i18n 双语字典、Swarm 检查器面板（`web/` 总计 ~321.8 KB） |
 | **F. 系统默认技能库（Skills v2）** | §7 | M7 | 已完成 M0 预算配置 | 已完成 `skills.default_enabled_limit=14`（1..50）与 `skills.auto_route=True` 配置模型与旧配置自动补全 |
@@ -51,6 +51,20 @@
 ---
 
 ## 四、变更与验证日志
+
+### `2026-11-16 21:38 +08:00` — M4 产物与多模态输出（方向 C-out）交付与全量验证
+- **M4 代码交付**：
+  - 新增 `lagent/media/artifacts/` 全包（[__init__.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/media/artifacts/__init__.py), [chart.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/media/artifacts/chart.py), [preview.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/media/artifacts/preview.py), [bundle.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/media/artifacts/bundle.py), [export.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/media/artifacts/export.py), [tts.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/media/artifacts/tts.py)）。
+  - 工具与后端集成：新增 [media_out.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/tools/media_out.py)（`make_chart`、`bundle_artifacts`、`record_artifact`），接入 [toolset.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/toolset.py) `artifacts` 扩展组与关键词路由，将 [office.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/tools/office.py)、[files.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/tools/files.py) 产出自动登记到 [artifacts.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/artifacts.py)（含 `update_meta` 与配额淘汰）并推送 `artifact_created`；更新 [config.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/config.py)（`media.artifact_max_mb`、`media.tts_enabled`）、[capabilities.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/media/capabilities.py)、[parts.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/parts.py)（`table` `handle_id` 紧凑降级）、[roles.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/swarm/roles.py)、[policy.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/mission/policy.py)、[loop.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/loop.py)（支持列表路径参数 `files` 校验）；在 [appwindow.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/appwindow.py) 新增受限非可执行文件打开通道，并在 [server.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/lagent/server.py) 与 [API.md](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/docs/API.md) 新增 `/api/artifacts/{aid}/preview`、`/authorize-scripts`、`/open`、`DELETE /api/artifacts/{aid}`、`POST /api/artifacts/bundle` 及 `GET|POST /api/sessions/{sid}/export?format=md|html|pdf`。
+  - 前端 UI：新增 [artifacts.js](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/js/artifacts.js)，更新 [index.html](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/index.html)、[panels.js](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/js/panels.js)、[chat.js](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/js/chat.js)、[main.js](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/js/main.js)、[zh-CN.js](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/js/i18n/zh-CN.js)、[en.js](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/js/i18n/en.js)、[chat.css](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/css/components/chat.css)、[drawer.css](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/web/css/components/drawer.css)，实现对话内联产物卡片、右侧「产物」检查器标签、PDF/表格分页/PPTX/SVG/Markdown/沙箱 HTML 预览、Zip 打包及 MD/HTML/PDF 会话导出。
+  - 测试：新建 [test_m4_artifacts.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/tests/test_m4_artifacts.py)（4 组核心单测/安全/E2E 用例），扩展 [ui_smoke.py](file:///C:/Users/nzp18/.gemini/antigravity/scratch/localagent/tests/ui_smoke.py) 覆盖产物面板，并同步 §13 清单。
+- **实测验证结果**：
+  - `python -m pytest tests\test_m4_artifacts.py -v -p no:cacheprovider`：**`4 passed`（2.51s）**。
+  - `python -m pytest tests -q -p no:cacheprovider`：**`434 passed, 3 skipped`（108.50s）**。
+  - `python tests\ui_smoke.py`：真 Chromium 无头测试 **[1]–[12] 全部通过**（含「产物面板与会话导出按钮」，零控制台错误、零外部请求）。
+  - `python tests\ui_contrast.py`：6 套主题 WCAG 2.2 AA 对比度全通过，零 `transition: all`。
+  - `node --check web/js/**/*.js` 全部通过；`web/` 总大小 **`387,625 bytes`**（< `1.5 MB`）。
+- **下一步计划**：进入 **M5（Research Engine D）**。
 
 ### `2026-11-16 19:26 +08:00` — M3 多模态输入摄取（方向 C-in）交付与全量验证
 - **M3 代码交付**：

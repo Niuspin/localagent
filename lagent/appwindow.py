@@ -165,3 +165,24 @@ def pick_folder(initial_dir: str = "") -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return None
+
+
+_UNSAFE_OPEN_EXTS = frozenset({
+    ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".mjs", ".cjs",
+    ".msi", ".scr", ".com", ".hta", ".jar", ".lnk", ".pif", ".sh", ".py", ".rb",
+})
+
+
+def open_local_file(path: Path) -> bool:
+    """在系统默认查看器中安全打开非可执行产物文件；若扩展名为脚本/可执行程序则拒绝。"""
+    p = Path(path).resolve()
+    if not p.is_file():
+        raise FileNotFoundError("文件不存在")
+    if p.suffix.lower() in _UNSAFE_OPEN_EXTS:
+        raise ValueError(f"出于安全限制，禁止在系统中直接打开可执行或脚本文件 ({p.suffix})")
+    if os.name == "nt":
+        os.startfile(str(p))  # type: ignore[attr-defined]
+        return True
+    cmd = ["open", str(p)] if sys.platform == "darwin" else ["xdg-open", str(p)]
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True

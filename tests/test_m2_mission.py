@@ -650,3 +650,165 @@ def test_agent_run_mission_episode_and_cli_resume_flag(tmp_path):
     finally:
         st.artifacts.close()
         st.memory.db.close()
+
+
+# ==================================================================== 9. Gates / Policy / Swarm / Memory / PermManager 回归
+def test_mission_gates_and_policy_real_tools(tmp_path):
+    from lagent.mission.gates import run_acceptance_checks
+
+    ws = _init_git_repo(tmp_path / "gates_repo")
+    (ws / "src").mkdir()
+    (ws / "docs").mkdir()
+    (ws / "docs" / "note.txt").write_text("hello", encoding="utf-8")
+
+    guard = sec.PathGuard(ws)
+
+    # gates.py: command / test / hard_deny 不再触发 AttributeError
+    cmd_ok = AcceptanceCheck(kind="command", target=f'"{sys.executable}" -c "print(\'gate_ok\')"')
+    cmd_fail = AcceptanceCheck(kind="test", target=f'"{sys.executable}" -c "import sys; sys.exit(2)"')
+    cmd_deny = AcceptanceCheck(kind="command", target="rm -rf /")
+    all_ok, results, needs_manual = asyncio.run(run_acceptance_checks([cmd_ok, cmd_fail, cmd_deny], ws, guard))
+    assert all_ok is False and needs_manual is False
+    assert len(results) == 3
+    assert results[0].ok is True and "gate_ok" in results[0].evidence.get("stdout_tail", "")
+    assert results[1].ok is False and results[1].summary == "exit_2"
+    assert results[2].ok is False and results[2].summary.startswith("hard_deny:")
+
+    pol = MissionPolicy({"mode": "unattended", "allow_paths": ["src/**"], "allow_commands": ["pytest*"]}, guard, workspace=ws)
+
+    # 新增/改名工具名真实覆盖（write/delete/move/copy/office/read/cwd）
+    for tool_name, path_val in (
+        ("delete_path", "deploy/x.txt"),
+        ("make_dir", "deploy/newdir"),
+        ("write_document", "deploy/out.docx"),
+        ("edit_office", "deploy/sheet.xlsx"),
+    ):
+        assert pol.evaluate(tool_name, {"path": path_val}).action == "block"
+        assert pol.evaluate(tool_name, {"path": path_val.replace("deploy/", "src/")}).allowed is True
+
+    assert pol.evaluate("move_path", {"src": "src/a.txt", "dst": "deploy/b.txt"}).action == "block"
+    assert pol.evaluate("move_path", {"src": "docs/note.txt", "dst": "src/note.txt"}).action == "block"
+    assert pol.evaluate("move_path", {"src": "src/a.txt", "dst": "src/b.txt"}).allowed is True
+
+    assert pol.evaluate("copy_path", {"src": "docs/note.txt", "dst": "src/note.txt"}).allowed is True
+    assert pol.evaluate("copy_path", {"src": ".env", "dst": "src/leak.txt"}).action == "block"
+
+    assert pol.evaluate("read_file", {"path": ".env"}).action == "block"
+    assert pol.evaluate("read_file", {"path": "../secret.txt"}).action == "deny"
+    assert pol.evaluate("run_command", {"command": "pytest", "cwd": "../outside"}).action == "deny"
+
+
+def test_mission_swarm_reviewer_memory_and_permission_guard(tmp_path):
+    from lagent.memory import Memory
+    from lagent.swarm import SwarmManager, SwarmStore
+
+    ws = _init_git_repo(tmp_path / "msw_repo")
+    (ws / "src").mkdir()
+    (ws / "src" / "notes.md").write_text("top notes\n", encoding="utf-8")
+    (ws / ".localagent").mkdir()
+    (ws / ".localagent" / "settings.json").write_text(
+        json.dumps({"permissions": {"ask": ["Read(src/notes.md)"]}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    cfg = Config(tmp_path / "c.json", tmp_path / "s.json")
+    mem = Memory(tmp_path / "mem.db")
+    sw_mgr = SwarmManager(cfg=cfg, store=SwarmStore(tmp_path / "swarms"))
+
+    async def fake_swarm_node(node, ctx_info):
+        return {
+            "status": "done",
+            "result": f"node {node.id} ({node.role}) ok",
+            "steps": 2,
+            "tokens": 42,
+            "tool_calls": 1,
+            "tainted": False,
+        }
+
+    sw_mgr.default_runner = fake_swarm_node
+    try:
+        mem.add("Use pytest with -q on src modules", scope="workspace", workspace=str(ws))
+        m_mgr = MissionManager(cfg=cfg, store=MissionStore(tmp_path / "missions"), swarms=sw_mgr, memory=mem)
+
+        # 1. _recall_memory 正确调用 k/workspace 并读取 "text"
+        recalled = m_mgr._recall_memory("pytest src", workspace=str(ws))
+        assert "pytest" in recalled
+
+        # 2. swarm_spec 真实通过 SwarmManager.create_swarm / done_evt / swarm_totals 完成节点与 reviewer
+        ms_sw = Milestone(id="ms1", title="Swarm Review", swarm_spec={"roles": ["reviewer"]})
+        m = m_mgr.create_mission(
+            title="Swarm Mission",
+            goal="通过真实 SwarmManager 完成里程碑",
+            workspace=str(ws),
+            mode="unattended",
+            milestones=[ms_sw],
+        )
+
+        async def run_sw_flow():
+            done_m = await m_mgr.run_to_completion(m.id)
+            rev = await m_mgr._run_reviewer(done_m, ms_sw, {"detail": "stalled"}, ws=ws)
+            return done_m, rev
+
+        done_m, rev_out = asyncio.run(run_sw_flow())
+        assert done_m.status == "completed"
+        assert done_m.budget.get("used_tokens", 0) >= 42
+        assert "reviewer" in rev_out
+        assert "AttributeError" not in rev_out
+    finally:
+        asyncio.run(sw_mgr.stop_all())
+        mem.db.close()
+
+    # 3. Mission safe_read 不得覆盖 PermissionManager 的 ask/deny 规则
+    st = State(token="tok-perm", port=8767, root=tmp_path / "perm_srv")
+    try:
+        ask_calls: list[str] = []
+
+        async def fake_ensure_ready():
+            st.engine.status = "ready"
+
+        async def fake_ask(run, ctx, blk, tool, args, dec, tainted):
+            ask_calls.append(f"{tool.name}:{args.get('path')}:{dec.reason}")
+            return "deny"
+
+        async def fake_chat_stream(body):
+            msgs = body.get("messages") or []
+            tmsgs = [str(m.get("content") or "") for m in msgs if m.get("role") == "tool"]
+            if not tmsgs:
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "tc_read_ask",
+                                "function": {"name": "read_file", "arguments": json.dumps({"path": "src/notes.md"})},
+                            }]
+                        },
+                        "finish_reason": None,
+                    }]
+                }
+                yield {"choices": [{"delta": {}, "finish_reason": "tool_calls"}], "usage": {"total_tokens": 20}}
+            else:
+                yield {"choices": [{"delta": {"content": "stopped safely"}, "finish_reason": "stop"}], "usage": {"total_tokens": 10}}
+
+        st.engine.status = "ready"
+        st.engine.ctx = 4096
+        st.engine.vision = False
+        st.engine.ensure_ready = fake_ensure_ready  # type: ignore[method-assign]
+        st.engine.chat_stream = fake_chat_stream  # type: ignore[method-assign]
+        st.agent._ask = fake_ask  # type: ignore[method-assign]
+
+        async def run_perm_ep():
+            m2 = st.missions.create_mission(
+                title="Perm Read Guard",
+                goal="safe_read 不得覆盖 PermissionManager",
+                workspace=str(ws),
+                mode="unattended",
+                milestones=[Milestone(id="p1", title="Read Check", max_attempts=1)],
+            )
+            return await st.missions.run_to_completion(m2.id)
+
+        asyncio.run(run_perm_ep())
+        assert len(ask_calls) == 1 and ask_calls[0].startswith("read_file:src/notes.md:")
+    finally:
+        st.artifacts.close()
+        st.memory.db.close()

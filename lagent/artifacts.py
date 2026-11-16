@@ -349,6 +349,24 @@ class ArtifactStore:
             self.db.commit()
             return cur.rowcount > 0
 
+    def update_meta(self, artifact_id: str, patch: dict[str, Any]) -> Artifact | None:
+        """原子局部更新指定产物的 meta 字段并持久化到 SQLite。"""
+        if not artifact_id or not AID_OK.match(artifact_id) or not isinstance(patch, dict):
+            return None
+        with self._lock:
+            art = self.get(artifact_id)
+            if not art:
+                return None
+            merged = dict(art.meta or {})
+            merged.update(patch)
+            self.db.execute(
+                "UPDATE artifacts SET meta_json=? WHERE id=?",
+                (json.dumps(merged, ensure_ascii=False), artifact_id),
+            )
+            self.db.commit()
+            art.meta = merged
+            return art
+
     def prune_max_bytes(self, max_bytes: int, *, session_id: str | None = None) -> int:
         """按最旧优先淘汰超额产物，返回被删除的产物数量。"""
         if max_bytes <= 0:

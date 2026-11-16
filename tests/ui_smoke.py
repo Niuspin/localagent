@@ -133,6 +133,9 @@ try:
         page.click("#drawer .dr-tab:has-text('变更')")
         page.wait_for_selector("#drawer .jr-item")
         check(page.locator("#drawer .jr-item").count() >= 1, "变更记录")
+        page.click("#drawer .dr-tab:has-text('产物')")
+        page.wait_for_selector("#drawer .art-export-box")
+        check(page.locator("#drawer .art-exp-btns button").count() == 3, "产物面板与会话导出按钮")
         page.screenshot(path=str(shots / "04-drawer.png"))
 
         print("[7] 设置各页")

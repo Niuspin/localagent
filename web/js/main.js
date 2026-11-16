@@ -201,7 +201,8 @@
       mission_paused: function () { debRefreshMissions(); },
       mission_resumed: function () { debRefreshMissions(); },
       mission_done: function (d) { debRefreshMissions(); LA.toast('Mission 已结束 (' + ((d && d.status) || '') + ')', d && d.status === 'completed' ? 'ok' : 'err', 5000); },
-      mission_rollback: function () { debRefreshMissions(); }
+      mission_rollback: function () { debRefreshMissions(); },
+      artifact_created: function (d) { LA.bus.emit('artifact', d); }
     }, { onerror: function (final) { if (final) setTimeout(connectEvents, 5000); } });
   }
 
@@ -216,6 +217,7 @@
       var items = [
         { kind: 'act', tag: '操作', title: '新建对话', sub: 'Ctrl+Shift+O', run: function () { LA.newSession(); } },
         { kind: 'act', tag: '面板', title: '打开文件抽屉', sub: '查看工作区文件', run: function () { LA.panels.toggleDrawer(true); } },
+        { kind: 'act', tag: '产物', title: '打开产物面板与导出', sub: '图表/表格/HTML 沙箱预览、打包与导出', run: function () { if (LA.panels.openArtifact) LA.panels.openArtifact(); } },
         { kind: 'act', tag: '集群', title: '打开 Swarm 集群面板', sub: '查看多代理 DAG 与合并队列', run: function () { if (LA.panels.openSwarm) LA.panels.openSwarm(); } },
         { kind: 'act', tag: '任务', title: '新建或查看长期 Mission', sub: '超长期断点续跑 / MISSION.md / 回滚', run: function () { if (LA.panels.openMission) LA.panels.openMission(); } },
         { kind: 'act', tag: '视图', title: '切换专注模式', sub: 'Ctrl+Shift+F 隐藏侧栏与检查器', run: function () { toggleFocus(); } },

@@ -11,6 +11,7 @@
   var TOOL_ICON = {
     read_file: 'fileText', write_file: 'edit', edit_file: 'edit', edit_office: 'edit',
     write_document: 'fileText', write_spreadsheet: 'table', write_presentation: 'fileText',
+    make_chart: 'chart', bundle_artifacts: 'layers', ingest_media: 'image',
     list_dir: 'folder', glob: 'search', grep: 'search', run_command: 'terminal',
     delete_path: 'trash', move_path: 'folder', copy_path: 'copy', make_dir: 'folder',
     web_search: 'globe', web_fetch: 'globe',
@@ -478,8 +479,9 @@
     var ti = el('span', { class: 'ti' }), tt = el('span', { class: 'tt' }), ts = el('span', { class: 'ts' }), ch = el('span', { class: 'chev', html: icon('chev', 14) });
     head.append(ti, tt, ts, ch);
     var body = el('div', { class: 't-body' });
+    var artSlot = el('div');
     var apBox = el('div');
-    var root = el('div', { class: 'tool' }, head, body, apBox);
+    var root = el('div', { class: 'tool' }, head, body, artSlot, apBox);
     var v = { el: root, type: 'tool', b: b };
     var apId = null;
 
@@ -559,6 +561,11 @@
       if (meta.sandbox) chips.appendChild(el('span', { class: 'meta-chip sandbox', text: '沙箱: ' + meta.sandbox }));
       if (meta.undo_id) chips.appendChild(el('button', { class: 'btn sm', html: icon('undo', 13) + ' 撤销操作', on: { click: function (e) { e.stopPropagation(); undo(meta.undo_id, chips); } } }));
       if (chips.childNodes.length) body.appendChild(chips);
+      LA.clear(artSlot);
+      if (meta.artifact && LA.artifacts && LA.artifacts.card) {
+        var ac = LA.artifacts.card(meta.artifact);
+        if (ac) artSlot.appendChild(ac);
+      }
 
       // 审批卡片与拒绝后引导
       if (b.approval) {
@@ -805,6 +812,7 @@
       tool_result: function (d) {
         var v = findTool(d.id); if (!v) return;
         v.b.status = d.status; v.b.content = d.content; v.b.live_output = ''; v.b.meta = d.meta || {}; v.b.duration_ms = d.duration_ms; v.b.approval = null; v.update(); syncApQueue();
+        if (d.meta && d.meta.artifact) LA.bus.emit('artifact', d.meta.artifact);
         if ((d.meta && (d.meta.path || d.meta.undo_id)) || d.name === 'run_command') LA.bus.emit('fschanged');
       },
       question: function (d) { endBlocks(); view.toolsWrap = null; view.lastType = 'note'; view.body.appendChild(questionCard(d, view)); LA.chat.scrollToBottom(true); },

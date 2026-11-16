@@ -736,7 +736,7 @@ class MissionManager:
 
                 diff_summary, pre_diff_hash = await asyncio.to_thread(_workspace_diff_fingerprint, ws)
                 watchdog_hint = self._watchdog_hint_for(m)
-                mem_snip = self._recall_memory(f"{m.goal}\n{ms.title}")
+                mem_snip = self._recall_memory(f"{m.goal}\n{ms.title}", workspace=str(ws))
                 prompt = build_episode_prompt(
                     m,
                     ms,
@@ -972,6 +972,72 @@ class MissionManager:
                 pass
             self._inhibitor.release()
 
+    @staticmethod
+    def _build_swarm_nodes(spec: dict[str, Any], default_goal: str, *, default_role: str) -> list[dict[str, Any]]:
+        raw_nodes = spec.get("nodes")
+        if isinstance(raw_nodes, list) and raw_nodes:
+            nodes: list[dict[str, Any]] = []
+            for idx, item in enumerate(raw_nodes):
+                if not isinstance(item, dict):
+                    continue
+                nd = dict(item)
+                nd.setdefault("role", default_role)
+                if not str(nd.get("goal") or nd.get("prompt") or "").strip():
+                    nd["goal"] = default_goal
+                nd.setdefault("id", f"m_{idx + 1}_{nd['role']}")
+                nodes.append(nd)
+            if nodes:
+                return nodes
+        roles = [str(r).strip() for r in (spec.get("roles") or ()) if str(r).strip()]
+        if not roles:
+            roles = [default_role]
+        return [{"id": f"m_{idx + 1}_{role}", "role": role, "goal": default_goal} for idx, role in enumerate(roles)]
+
+    async def _run_mission_swarm(
+        self,
+        mission: Mission,
+        *,
+        goal: str,
+        ws: Path,
+        spec: dict[str, Any],
+        default_role: str,
+        cancel_event: asyncio.Event | None = None,
+        timeout_s: float = 600.0,
+    ) -> Any:
+        nodes = self._build_swarm_nodes(spec, goal, default_role=default_role)
+        parent_mode = "auto" if mission.mode == "unattended" else "ask"
+        sw = self.swarms.create_swarm(
+            session_id=mission.session_id or f"mission_{mission.id}",
+            goal=goal,
+            nodes=nodes,
+            workspace=str(ws),
+            parent_mode=parent_mode,
+            explicit_auto_worker=(mission.mode == "unattended"),
+            budget=spec.get("budget") if isinstance(spec.get("budget"), dict) else None,
+            mission_id=mission.id,
+            start=True,
+        )
+        wait_done = asyncio.create_task(sw.done_evt.wait())
+        waiters: set[asyncio.Task[Any]] = {wait_done}
+        if cancel_event is not None:
+            waiters.add(asyncio.create_task(cancel_event.wait()))
+        try:
+            done_tasks, pending = await asyncio.wait(waiters, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if not sw.done_evt.is_set() and (not done_tasks or (cancel_event is not None and cancel_event.is_set())):
+                await self.swarms.cancel(sw.id)
+        except asyncio.CancelledError:
+            for t in waiters:
+                t.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+            await self.swarms.cancel(sw.id)
+            raise
+        await self.swarms.await_agents(sw.id, timeout_s=0.5)
+        return self.swarms.swarms.get(sw.id) or sw
+
     async def _execute_episode(
         self,
         mission: Mission,
@@ -987,28 +1053,44 @@ class MissionManager:
         cancel_event: asyncio.Event,
     ) -> EpisodeOutcome:
         if (mission.use_swarm or milestone.swarm_spec) and self.swarms is not None:
-            spec = milestone.swarm_spec or {"goal": f"{milestone.title}\n{milestone.description}".strip()}
-            try:
-                sw = self.swarms.create_swarm(
-                    goal=str(spec.get("goal") or milestone.title),
-                    workspace=str(ws),
-                    mission_id=mission.id,
-                    roles=spec.get("roles"),
-                )
-                await self.swarms.run_swarm(sw.id)
-                finished = self.swarms.store.get(sw.id) or sw
-                done_cnt = sum(1 for n in finished.nodes if n.status == "done")
-                ok = finished.status == "completed" and done_cnt == len(finished.nodes)
-                return EpisodeOutcome(
-                    steps=max(1, len(finished.nodes)),
-                    tokens=int(finished.budget.get("used_tokens") or 0),
-                    tool_calls=int(finished.budget.get("used_tool_calls") or 0),
-                    summary=f"Swarm {finished.id}: {finished.status} ({done_cnt}/{len(finished.nodes)})",
-                    milestone_ready=ok,
-                    error=None if ok else f"swarm_{finished.status}",
-                )
-            except Exception as e:
-                return EpisodeOutcome(steps=1, summary=f"Swarm error: {e}", milestone_ready=False, error=str(e))
+            if not milestone.swarm_spec and not _is_git_repo(ws) and self.default_episode_runner is not None:
+                pass
+            else:
+                spec = milestone.swarm_spec or {}
+                default_role = "coder" if _is_git_repo(ws) else "researcher"
+                goal = str(spec.get("goal") or f"{milestone.title}\n{milestone.description}".strip() or prompt)
+                try:
+                    sw = await self._run_mission_swarm(
+                        mission,
+                        goal=goal,
+                        ws=ws,
+                        spec=spec,
+                        default_role=default_role,
+                        cancel_event=cancel_event,
+                    )
+                    nodes = list(sw.graph.nodes.values())
+                    done_cnt = sum(1 for n in nodes if n.status == "done")
+                    totals = sw.budget.swarm_totals() if hasattr(sw.budget, "swarm_totals") else {}
+                    tokens = int(totals.get("tokens") or 0)
+                    tool_calls = int(totals.get("tool_calls") or 0)
+                    steps = max(1, int(totals.get("steps") or 0), len(nodes))
+                    ok = sw.status == "done" and bool(nodes) and done_cnt == len(nodes)
+                    node_notes = [f"[{n.role}:{n.status}] {(n.result or n.error or '')[:200]}" for n in nodes[:6]]
+                    summary = f"Swarm {sw.id}: {sw.status} ({done_cnt}/{len(nodes)})"
+                    if node_notes:
+                        summary += "\n" + "\n".join(node_notes)
+                    return EpisodeOutcome(
+                        steps=steps,
+                        tokens=tokens,
+                        tool_calls=tool_calls,
+                        summary=summary,
+                        milestone_ready=ok,
+                        error=None if ok else f"swarm_{sw.status}",
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    return EpisodeOutcome(steps=1, summary=f"Swarm error: {e}", milestone_ready=False, error=str(e))
 
         if self.default_episode_runner is None:
             return EpisodeOutcome(
@@ -1070,16 +1152,17 @@ class MissionManager:
                 return f"reviewer_failed: {e}"
         if self.swarms is not None and getattr(self.swarms, "default_runner", None) is not None:
             try:
-                sw = self.swarms.create_swarm(
+                sw = await self._run_mission_swarm(
+                    m,
                     goal=f"Review stall on milestone {ms.id} ({ms.title}): {sig.get('detail')}",
-                    workspace=str(ws),
-                    mission_id=m.id,
-                    roles=["reviewer"],
+                    ws=ws,
+                    spec={"roles": ["reviewer"]},
+                    default_role="reviewer",
+                    timeout_s=120.0,
                 )
-                await self.swarms.run_swarm(sw.id)
-                finished = self.swarms.store.get(sw.id)
-                if finished and finished.nodes:
-                    return str(finished.nodes[0].result or "reviewer finished")
+                if sw.graph.nodes:
+                    first = next(iter(sw.graph.nodes.values()))
+                    return str(first.result or first.error or "reviewer finished")
             except Exception as e:
                 return f"swarm_review_failed: {e}"
         return "独立检查建议：请先运行最小复现用例确认根因后再编辑代码。"
@@ -1133,12 +1216,19 @@ class MissionManager:
         last = hist[-1]
         return f"action={last.get('action')} reason={last.get('reason')} detail={last.get('detail')}"
 
-    def _recall_memory(self, query: str) -> str:
+    def _recall_memory(self, query: str, workspace: str = "") -> str:
         if self.memory is None or not hasattr(self.memory, "search"):
             return ""
         try:
-            hits = self.memory.search(query, limit=3) or []
-            return "\n".join(f"- {h.get('content', '')[:160]}" for h in hits if isinstance(h, dict))
+            hits = self.memory.search(query, k=3, workspace=workspace) or []
+            lines: list[str] = []
+            for h in hits:
+                if not isinstance(h, dict):
+                    continue
+                txt = str(h.get("text") or h.get("content") or "").strip()
+                if txt:
+                    lines.append(f"- {txt[:160]}")
+            return "\n".join(lines)
         except Exception:
             return ""
 

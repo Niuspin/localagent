@@ -355,6 +355,24 @@ async def write_file(ctx: ToolCtx, a: dict) -> ToolResult:
     data = encode_text(content, enc, nl)
     meta = commit_bytes(ctx, p, data, "write", f"{'覆盖' if old is not None else '创建'} {ctx.guard.rel(p)}")
     mark_seen(ctx, p, data)
+    _art_map = {
+        ".html": ("html", "text/html"),
+        ".htm": ("html", "text/html"),
+        ".svg": ("chart", "image/svg+xml"),
+        ".csv": ("table", "text/csv"),
+        ".tsv": ("table", "text/tab-separated-values"),
+        ".md": ("markdown", "text/markdown"),
+        ".markdown": ("markdown", "text/markdown"),
+    }
+    ext_l = p.suffix.lower()
+    rel_l = meta["path"].replace("\\", "/")
+    if ext_l in _art_map and not rel_l.startswith((".localagent/", ".claude/", "uploads/")):
+        from .media_out import record_artifact
+
+        akind, amime = _art_map[ext_l]
+        art = record_artifact(ctx, kind=akind, title=p.name, filename=p.name, data=data, mime=amime, meta={"workspace_path": rel_l})
+        if art:
+            meta["artifact"] = art
     n = content.count("\n") + (0 if content.endswith("\n") or not content else 1)
     diag = _post_edit_check(p, data)
     return ToolResult(f"已{'覆盖' if old is not None else '创建'} {meta['path']}（{n} 行，{len(content)} 字符）{diag}", meta=meta)

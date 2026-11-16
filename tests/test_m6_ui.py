@@ -35,14 +35,19 @@ async def _get(app, path: str, *, port: int = 8765, token: str = "tok-m6") -> tu
         "server": ("127.0.0.1", port),
     }
     sent: list[dict] = []
+    done = asyncio.Event()
 
     async def receive():
+        await done.wait()
         return {"type": "http.disconnect"}
 
     async def send(msg: dict):
         sent.append(msg)
 
-    await app(scope, receive, send)
+    try:
+        await app(scope, receive, send)
+    finally:
+        done.set()
     start = next(m for m in sent if m["type"] == "http.response.start")
     headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in start.get("headers", [])}
     payload = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")

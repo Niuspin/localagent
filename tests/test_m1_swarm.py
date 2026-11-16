@@ -423,3 +423,84 @@ def test_swarm_parallel_speedup_slots_tools_and_api(tmp_path):
             st.memory.db.close()
 
     asyncio.run(check_api())
+
+
+# ==================================================================== 4. Role allowed_tools enforcement
+def test_swarm_role_allowed_tools_enforced_and_registry_valid(tmp_path: Path):
+    from lagent.swarm.roles import ROLE_SPECS
+
+    for rname, spec in ROLE_SPECS.items():
+        for tname in spec.allowed_tools:
+            assert tname in TOOLS, f"角色 {rname} 包含未注册工具: {tname}"
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    st = State(token="tok-role", port=8766, root=tmp_path / "srv")
+    try:
+        # 1. Agent.tools_for 白名单过滤
+        verifier_spec = ROLE_SPECS["verifier"]
+        v_tools = {t.name for t in st.agent.tools_for("verify", True, set(verifier_spec.tool_groups), set(verifier_spec.allowed_tools))}
+        assert {"read_file", "run_command", "ingest_media"}.issubset(v_tools)
+        assert "write_file" not in v_tools and "memory_search" not in v_tools
+
+        # 2. run_swarm_node 中 reviewer 即使模型幻觉强行调用 write_file 也会被 _exec_tool 拒绝
+        seen_schemas: list[list[str]] = []
+        seen_tool_msgs: list[str] = []
+
+        async def fake_ensure_ready():
+            st.engine.status = "ready"
+
+        async def fake_chat_stream(body):
+            seen_schemas.append([t["function"]["name"] for t in (body.get("tools") or [])])
+            msgs = body.get("messages") or []
+            tmsgs = [str(m.get("content") or "") for m in msgs if m.get("role") == "tool"]
+            seen_tool_msgs.extend(tmsgs)
+            if not tmsgs:
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "tc_bad_write",
+                                "function": {"name": "write_file", "arguments": json.dumps({"path": "hacked.txt", "content": "pwn"})},
+                            }]
+                        },
+                        "finish_reason": None,
+                    }]
+                }
+                yield {"choices": [{"delta": {}, "finish_reason": "tool_calls"}], "usage": {"total_tokens": 20}}
+            else:
+                yield {"choices": [{"delta": {"content": "review finished safely"}, "finish_reason": "stop"}], "usage": {"total_tokens": 15}}
+
+        st.engine.status = "ready"
+        st.engine.ctx = 4096
+        st.engine.vision = False
+        st.engine.ensure_ready = fake_ensure_ready  # type: ignore[method-assign]
+        st.engine.chat_stream = fake_chat_stream  # type: ignore[method-assign]
+
+        async def run_rev():
+            sess = st.store.create(str(ws))
+            sw = st.swarms.create_swarm(
+                session_id=sess.id,
+                goal="review only",
+                nodes=[{"id": "rev1", "role": "reviewer", "goal": "check app.py"}],
+                workspace=str(ws),
+                parent_mode="auto",
+                runner=st.agent.run_swarm_node,
+                start=True,
+            )
+            await asyncio.wait_for(sw.done_evt.wait(), timeout=15)
+            return sw
+
+        sw = asyncio.run(run_rev())
+        assert sw.status == "done"
+        assert "review finished safely" in sw.graph.nodes["rev1"].result
+        assert not (ws / "hacked.txt").exists()
+        assert seen_schemas and "write_file" not in seen_schemas[0]
+        assert any("不允许" in m for m in seen_tool_msgs)
+    finally:
+        asyncio.run(st.swarms.stop_all())
+        st.artifacts.close()
+        st.memory.db.close()

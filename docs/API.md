@@ -45,7 +45,7 @@
 
 ### `GET /api/commands` / `GET /api/permissions` / `GET /api/hooks`
 均支持 `?workspace=...&session_id=...` 解析目标工作区：
-- `GET /api/commands`: 返回内置 15 条 Slash 命令 + `.localagent/commands/*.md` / `.claude/commands/*.md` 自定义命令列表。
+- `GET /api/commands`: 返回内置 16 条 Slash 命令 + `.localagent/commands/*.md` / `.claude/commands/*.md` 自定义命令列表。
 - `GET /api/permissions`: 返回细粒度权限规则 `{"rules": {"deny": [...], "ask": [...], "allow": [...]}}`。
 - `GET /api/hooks`: 返回已加载生命周期钩子 `{"hooks": {...}}`（含 `read_only` 标识）。
 
@@ -85,7 +85,7 @@
 - `POST /api/sessions/{sid}/compact`: 手动触发上下文摘要压缩（优先通过 `ModelRouter` 调用配置的压缩端点）。
 - `POST /api/sessions/{sid}/truncate`: 请求体 `{"from_index": int}`，按 UI 消息索引回退历史对话并联动回滚多轮文件快照。
 - `POST /api/sessions/{sid}/untaint`: 手动解除当前会话的 `tainted` 污染标记。
-- `GET /api/sessions/{sid}/export`: 导出 Markdown 格式对话记录。
+- `GET|POST /api/sessions/{sid}/export?format=md|html|pdf&thinking=1&tools=1`: 导出 Markdown、自包含 HTML（含可折叠思考块/工具轨迹）或 CJK PDF；POST 支持请求体 `{"format"?, "include_thinking"?, "include_tools"?, "save_artifact"?}`。
 
 ### `GET /api/runs/{rid}/events`（单次运行 SSE）与 `POST /api/runs/{rid}/cancel`
 推送实时运行事件（M0 起所有事件负载统一注入元数据 `{ts, kind, run_id, agent_id, swarm_id, mission_id}`）：
@@ -100,10 +100,14 @@
 ### `GET /api/events`（全局 SSE）
 实时推送跨页面状态事件：`engine`、`config`、`mcp`、`hub`、`state`、`notice`（统一注入 `{ts, kind, run_id, agent_id, swarm_id, mission_id}`）。
 
-### `GET /api/artifacts` / `GET /api/artifacts/{aid}/meta` / `GET /api/artifacts/{aid}`
+### `GET /api/artifacts` / `POST /api/artifacts/bundle` / `/api/artifacts/{aid}/*`
 - `GET /api/artifacts?session_id=...&kind=...&limit=200`: 列出 SQLite 索引的会话产物摘要（返回 `{"artifacts": [...]}`，不包含宿主绝对路径）。
+- `POST /api/artifacts/bundle`: 将当前会话的指定或全部产物连同 `MANIFEST.json` 打包为 Zip 产物并推送 `artifact_created`。
 - `GET /api/artifacts/{aid}/meta`: 返回单个产物元数据与安全下载链接 `download_url`。
-- `GET /api/artifacts/{aid}`: 安全下载原始产物文件（强制附带 `Content-Disposition: attachment` 与 `X-Content-Type-Options: nosniff`）。
+- `GET /api/artifacts/{aid}/preview`: 返回安全多格式预览结构（图片 / SVG 剥离脚本 / PDF 分页渲染与文本 / 表格分页 / PPTX 幻灯片 / Zip 成员清单 / 沙箱 HTML 描述）；`?raw=1` 用于 `<iframe sandbox>` 受限预览（默认禁用脚本，且始终禁网）。
+- `POST /api/artifacts/{aid}/authorize-scripts`: 逐产物开关 HTML 沙箱脚本授权（`{"enabled": bool}`，写审计日志，CSP 仍保持 `connect-src 'none'` 零联网）。
+- `POST /api/artifacts/{aid}/open`: 经受限宿主通道在系统默认应用打开非可执行产物文件（拒绝 `.exe`/`.bat`/`.ps1`/脚本扩展名）。
+- `GET|DELETE /api/artifacts/{aid}`: 安全下载原始产物文件（强制附带 `Content-Disposition: attachment` 与 `X-Content-Type-Options: nosniff`）或删除产物。
 
 ### `GET|POST /api/engine/plan` 与 Swarm 集群 API（`/api/swarms*`）
 - `GET|POST /api/engine/plan`: 返回引擎启动规划（含 `slots`、`recommended_slots`、`slots_reason`）与命令行预览。

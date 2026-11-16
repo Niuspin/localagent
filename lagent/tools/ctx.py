@@ -26,6 +26,7 @@ class SessionState:
     shell_env: dict = field(default_factory=dict)       # 会话级安全终端环境变量覆盖
     swarm_id: str | None = None                         # 当前会话关联的活跃 Swarm ID
     agent_id: str = "main"                              # 当前执行主体 ID
+    allowed_tools: set[str] | None = None               # Swarm 角色白名单（None 表示不限制）
 
 
 @dataclass

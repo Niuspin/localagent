@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from .. import security as sec
-from ..projectdoc import verify_command as check_project_verify
 from .model import AcceptanceCheck, GateResult
 
 
@@ -109,7 +108,7 @@ def run_single_check(
                 summary=f"hard_deny: {hd}",
                 evidence={"hard_deny": hd, "duration_ms": int((time.monotonic() - t0) * 1000)},
             )
-        if not check_project_verify(target):
+        if "\x00" in target or len(target) > 2000:
             return GateResult(
                 chk.id,
                 kind,

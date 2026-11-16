@@ -207,7 +207,8 @@ class HookManager:
     def _select_hooks(self, event: str, ctx: Any, *, warn: bool = False) -> tuple[list[HookDef], bool]:
         """选择要执行的钩子：污染上下文仅放行声明为 read_only 且经只读白名单校验的钩子。"""
         defs = self.hooks[event]
-        tainted = getattr(ctx.session, "tainted", False) if hasattr(ctx, "session") else False
+        sess_obj = getattr(ctx, "session", None) or ctx
+        tainted = bool(getattr(sess_obj, "tainted", False))
         if not tainted:
             return list(defs), False
         safe = [h for h in defs if h.read_only and sec.is_readonly_command(h.command)]
@@ -277,7 +278,11 @@ class HookManager:
     async def run_prompt_submit(self, text: str, ctx: Any) -> HookResult:
         if not self.workspace or not self.hooks["UserPromptSubmit"]:
             return HookResult(action="allow")
-        for h in self.hooks["UserPromptSubmit"]:
+        hooks, all_skipped = self._select_hooks("UserPromptSubmit", ctx, warn=True)
+        if all_skipped:
+            return HookResult(action="allow", skipped=True)
+
+        for h in hooks:
             env = {
                 "HOOK_EVENT": "UserPromptSubmit",
                 "USER_PROMPT": text[:4000],

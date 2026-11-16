@@ -370,7 +370,21 @@ async def write_document(ctx: ToolCtx, a: dict) -> ToolResult:
     except ImportError as e:
         return _need(e.name or "", _PIP.get(e.name or "", e.name or ""))
     _ensure_parent(ctx, p)
-    meta = commit_bytes(ctx, p, data, "office", f"{'覆盖' if not meta_new(p) else '创建'} {ctx.guard.rel(p)}")
+    existed = p.exists()
+    meta = commit_bytes(ctx, p, data, "office", f"{'覆盖' if existed else '创建'} {ctx.guard.rel(p)}")
+    from .media_out import record_artifact
+
+    art = record_artifact(
+        ctx,
+        kind="pdf" if ext == ".pdf" else "document",
+        title=a.get("title") or p.name,
+        filename=p.name,
+        data=data,
+        mime="application/pdf" if ext == ".pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        meta={"workspace_path": meta["path"]},
+    )
+    if art:
+        meta["artifact"] = art
     return ToolResult(f"已生成 {meta['path']}（{len(data) // 1024 or 1} KB）", meta=meta)
 
 
@@ -454,8 +468,23 @@ async def write_spreadsheet(ctx: ToolCtx, a: dict) -> ToolResult:
     except ImportError as e:
         return _need(e.name or "", _PIP.get(e.name or "", e.name or ""))
     _ensure_parent(ctx, p)
-    meta = commit_bytes(ctx, p, data, "office", f"{'创建' if not p.exists() else '覆盖'} {ctx.guard.rel(p)}")
+    existed = p.exists()
+    meta = commit_bytes(ctx, p, data, "office", f"{'覆盖' if existed else '创建'} {ctx.guard.rel(p)}")
     nrows = sum(len(s.get("rows") or []) for s in sheets)
+    from .media_out import record_artifact
+
+    art = record_artifact(
+        ctx,
+        kind="table",
+        title=p.name,
+        filename=p.name,
+        data=data,
+        mime="text/csv" if ext == ".csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        preview={"sheets": len(sheets), "rows": nrows},
+        meta={"workspace_path": meta["path"], "sheets": len(sheets), "rows": nrows},
+    )
+    if art:
+        meta["artifact"] = art
     return ToolResult(f"已生成 {meta['path']}（{len(sheets)} 个工作表，共 {nrows} 行）。公式以 '=' 开头的字符串写入。", meta=meta)
 
 
@@ -528,6 +557,20 @@ async def write_presentation(ctx: ToolCtx, a: dict) -> ToolResult:
     _ensure_parent(ctx, p)
     existed = p.exists()
     meta = commit_bytes(ctx, p, data, "office", f"{'覆盖' if existed else '创建'} {ctx.guard.rel(p)}")
+    from .media_out import record_artifact
+
+    art = record_artifact(
+        ctx,
+        kind="presentation",
+        title=a.get("title") or p.name,
+        filename=p.name,
+        data=data,
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        preview={"slides": len(a["slides"])},
+        meta={"workspace_path": meta["path"], "slides": len(a["slides"])},
+    )
+    if art:
+        meta["artifact"] = art
     return ToolResult(f"已生成 {meta['path']}（{len(a['slides'])} 页，16:9）", meta=meta)
 
 
@@ -639,6 +682,19 @@ async def edit_office(ctx: ToolCtx, a: dict) -> ToolResult:
     except Exception as e:  # noqa: BLE001
         return err(f"编辑失败: {type(e).__name__}: {e}")
     meta = commit_bytes(ctx, p, new, "office", f"编辑 {ctx.guard.rel(p)}")
+    from .media_out import record_artifact
+
+    art_kind = "table" if ext in (".xlsx", ".xlsm") else ("presentation" if ext == ".pptx" else "document")
+    art = record_artifact(
+        ctx,
+        kind=art_kind,
+        title=p.name,
+        filename=p.name,
+        data=new,
+        meta={"workspace_path": meta["path"]},
+    )
+    if art:
+        meta["artifact"] = art
     return ToolResult(f"已编辑 {meta['path']}：{log}", meta=meta)
 
 

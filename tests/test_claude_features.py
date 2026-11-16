@@ -316,6 +316,21 @@ def test_hook_tainted_context_skips_hooks(tmp_path: Path):
     assert res.skipped is True
 
 
+def test_hook_tainted_prompt_submit_skips_non_readonly_hooks(tmp_path: Path):
+    hm = HookManager(tmp_path)
+    hm.hooks["UserPromptSubmit"] = [HookDef(event="UserPromptSubmit", matcher="*", command="exit 1")]
+
+    ctx = MagicMock()
+    ctx.session.tainted = True
+    res_tainted = asyncio.run(hm.run_prompt_submit("hello", ctx))
+    assert res_tainted.action == "allow"
+    assert res_tainted.skipped is True
+
+    ctx.session.tainted = False
+    res_clean = asyncio.run(hm.run_prompt_submit("hello", ctx))
+    assert res_clean.action == "deny"
+
+
 # =====================================================================
 # 5. 子代理 (delegate_task) 测试
 # =====================================================================

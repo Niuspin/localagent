@@ -49,7 +49,8 @@ def part_summary(part: dict[str, Any], *, omitted_image_text: str = "[图片已�
         summary = _safe_str(part.get("summary"), 300)
         rows = part.get("row_count")
         aid = _safe_str(part.get("artifact_id"), 48)
-        meta = [x for x in (f"{rows} 行" if isinstance(rows, int) else "", f"artifact={aid}" if aid else "") if x]
+        hid = _safe_str(part.get("handle_id"), 48)
+        meta = [x for x in (f"{rows} 行" if isinstance(rows, int) else "", f"artifact={aid}" if aid else "", f"handle={hid}" if hid else "") if x]
         head = f"[表格: {title}" + (f" ({', '.join(meta)})" if meta else "") + "]"
         return f"{head} {summary}".strip()
     if t == "chart":

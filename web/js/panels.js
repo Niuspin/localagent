@@ -82,6 +82,12 @@
     previewing = null;
     P.toggleDrawer(true);
   };
+  P.openArtifact = function (aid) {
+    dtab = 'artifacts';
+    previewing = null;
+    if (LA.artifacts && LA.artifacts.open) LA.artifacts.open(aid || null);
+    P.toggleDrawer(true);
+  };
   P.toggleDrawer = function (force) {
     LA.S.drawerOpen = force != null ? force : !LA.S.drawerOpen;
     drawer.hidden = !LA.S.drawerOpen;
@@ -94,11 +100,16 @@
   function renderDrawer() {
     if (LA.swarmPanel && LA.swarmPanel.close && dtab !== 'swarm') LA.swarmPanel.close();
     if (LA.missionPanel && LA.missionPanel.close && dtab !== 'mission') LA.missionPanel.close();
+    if (LA.artifacts && LA.artifacts.close && dtab !== 'artifacts') LA.artifacts.close();
     LA.clear(drawer);
     var tabs = el('div', { class: 'dr-tabs' });
-    [['files', LA.t('drawer.tab.files', '文件')], ['changes', LA.t('drawer.tab.changes', '变更')], ['tasks', LA.t('drawer.tab.tasks', '任务')], ['swarm', LA.t('drawer.tab.swarm', '集群')], ['mission', LA.t('drawer.tab.mission', '任务线')]].forEach(function (t) {
+    [['files', LA.t('drawer.tab.files', '文件')], ['changes', LA.t('drawer.tab.changes', '变更')], ['artifacts', LA.t('drawer.tab.artifacts', '产物')], ['tasks', LA.t('drawer.tab.tasks', '任务')], ['swarm', LA.t('drawer.tab.swarm', '集群')], ['mission', LA.t('drawer.tab.mission', '任务线')]].forEach(function (t) {
       tabs.appendChild(el('button', { class: 'dr-tab' + (dtab === t[0] ? ' on' : ''), type: 'button', text: t[1], on: { click: function () {
-        var go = function () { dtab = t[0]; previewing = null; renderDrawer(); };
+        var go = function () {
+          dtab = t[0]; previewing = null;
+          if (t[0] === 'artifacts' && LA.artifacts && LA.artifacts.resetPreview) LA.artifacts.resetPreview();
+          renderDrawer();
+        };
         if (LA.viewTransition) LA.viewTransition(go); else go();
       } } }));
     });
@@ -109,6 +120,7 @@
     drawer.append(tabs, drawBody);
     if (dtab === 'files') (previewing ? drawPreview(previewing) : drawFiles());
     else if (dtab === 'changes') drawChanges();
+    else if (dtab === 'artifacts' && LA.artifacts) LA.artifacts.renderPanel(drawBody);
     else if (dtab === 'swarm' && LA.swarmPanel) LA.swarmPanel.render(drawBody);
     else if (dtab === 'mission' && LA.missionPanel) LA.missionPanel.renderDrawer(drawBody);
     else drawTasks();

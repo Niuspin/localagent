@@ -36,7 +36,7 @@ from .journal import Journal
 from .permissions import PermissionManager
 from .router import ModelRouter
 from .sessions import Session, SessionStore
-from .tools import agentic, files, jobs, office, search, swarm_tools, web  # noqa: F401  (导入即注册)
+from .tools import agentic, files, jobs, media_out, office, search, swarm_tools, web  # noqa: F401  (导入即注册)
 from .tools.base import TOOLS, Tool, ToolResult, clip, coerce_args, repair_json
 from .tools.ctx import SessionState, ToolCtx
 from .tools.files import rewind_to_turn
@@ -319,9 +319,17 @@ class Agent:
             s += "\n\n## 此前对话的摘要（早期内容已被压缩）\n" + sess.summary
         return s
 
-    def tools_for(self, mode: str, has_ws: bool, groups: set[str] | frozenset[str] = frozenset()) -> list[Tool]:
+    def tools_for(
+        self,
+        mode: str,
+        has_ws: bool,
+        groups: set[str] | frozenset[str] = frozenset(),
+        allowed_tools: set[str] | frozenset[str] | None = None,
+    ) -> list[Tool]:
         out = []
         for t in TOOLS.values():
+            if allowed_tools is not None and t.name not in allowed_tools:
+                continue
             if mode == "plan" and t.kind in ("write", "delete", "exec", "skill", "mcp"):
                 continue
             if mode == "verify" and t.kind in ("write", "delete", "skill", "mcp"):
@@ -646,7 +654,7 @@ class Agent:
             ws = sess.workspace or cfg.get("workspace", default="")
             if self.outputs is not None and "outputs" not in st.tool_groups and any((m.get("_pruned") or i < getattr(sess, "kv_prune_upto", 0)) and m.get("_out") for i, m in enumerate(sess.history)):
                 self._ensure_outputs_group(sess, st)       # 历史里已有“可取回”的占位（上一轮或更早精简的）
-            tools = self.tools_for(mode, bool(ws), st.tool_groups)
+            tools = self.tools_for(mode, bool(ws), st.tool_groups, getattr(st, "allowed_tools", None))
             schemas = [t.schema() for t in tools]
             await self.engine.ensure_ready()
             ctx.vision = self.engine.vision
@@ -929,7 +937,8 @@ class Agent:
             stats.bump("unknown_tool")
             finish("error", f"未知工具 {name}")
             ws_now = sess.workspace or self.cfg.get("workspace", default="")
-            avail = [t.name for t in self.tools_for(self._session_mode(sess), bool(ws_now), st.tool_groups)]
+            mode_now = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else self._session_mode(sess)
+            avail = [t.name for t in self.tools_for(mode_now, bool(ws_now), st.tool_groups, getattr(st, "allowed_tools", None))]
             near = toolcall.suggest(name, avail)
             return (f"错误: 没有名为 {name} 的工具。" + (f"你是不是想用 {' / '.join(near)}？" if near else "")
                     + f"当前可用工具: {', '.join(avail)}（其余低频工具用 load_tools 加载）"), []
@@ -939,6 +948,14 @@ class Agent:
             msg = "参数不是合法 JSON（可能因输出被截断）。请缩小内容、分多次调用。"
             finish("error", msg)
             return "错误: " + msg, []
+        allowed_tools = getattr(st, "allowed_tools", None)
+        if allowed_tools is not None and name not in allowed_tools:
+            blk["title"] = tool.describe(args if isinstance(args, dict) else {})
+            run.emit("tool_start", {"id": tid, "name": name, "title": blk["title"], "args": args, "risk": "high"})
+            msg = f"当前代理角色不允许使用工具 {name}。"
+            finish("denied", msg)
+            self.audit.append(event="denied", session=sess.id, tool=name, reason="role_allowed_tools", **self._audit_ctx(run))
+            return f"拒绝: {msg}", []
         g = toolset.group_of(name)
         if g and g not in st.tool_groups:      # 模型直接调用了未列出的扩展工具：放行并把整组加载进后续请求
             st.tool_groups.add(g)
@@ -985,8 +1002,11 @@ class Agent:
         sensitive = None
         try:
             for pa in tool.path_args:
-                if args.get(pa):
-                    p = call_ctx.guard.resolve(args[pa], write=eff_kind in ("write", "delete"))
+                val = args.get(pa)
+                items = [x for x in val if isinstance(x, str) and x] if isinstance(val, list) else ([val] if isinstance(val, str) and val else [])
+                for item in items:
+                    need_w = eff_kind in ("write", "delete") and not (name == "copy_path" and pa == "src") and not (name == "bundle_artifacts" and pa == "files")
+                    p = call_ctx.guard.resolve(item, write=need_w)
                     sensitive = sensitive or sec.sensitive_reason(call_ctx.guard.rel(p))
         except sec.SecurityError as e:
             finish("error", f"安全限制: {e}")
@@ -1039,7 +1059,8 @@ class Agent:
                 self.audit.append(event="mission_blocked", session=sess.id, tool=name, target=verdict.target, reason=verdict.reason, **self._audit_ctx(run))
                 run.cancel_evt.set()
                 return f"操作超出无人值守授权范围（{verdict.reason}），已阻塞并加入待批清单。", []
-            dec = sec.Decision("allow", f"mission_policy:{verdict.reason}", dec.risk, dec.key)
+            if verdict.reason not in ("safe_read", "readonly_tool"):
+                dec = sec.Decision("allow", f"mission_policy:{verdict.reason}", dec.risk, dec.key)
         if dec.action == "ask":
             decision = await self._ask(run, call_ctx, blk, tool, args, dec, tainted_eff)
             if decision == "deny":
@@ -1545,6 +1566,7 @@ class Agent:
         sub_st.sub_mode = ctx_info.get("permission_mode", "plan")
         sub_st.turn_id = node.id
         sub_st.tool_groups = set(role_spec.tool_groups)
+        sub_st.allowed_tools = set(role_spec.allowed_tools) if role_spec.allowed_tools else None
 
         sub_run = Run(
             sub_sid,

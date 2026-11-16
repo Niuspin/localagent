@@ -44,7 +44,17 @@ from .sessions import SessionStore
 from .skills import Skills
 from .swarm import SwarmManager, SwarmStore
 from .mission import MissionManager, MissionStore
-from .media import detect_capabilities, explain_ingest_plan, ingest_file_async, sniff_magic
+from .media import (
+    build_artifact_preview,
+    create_artifact_bundle,
+    detect_capabilities,
+    explain_ingest_plan,
+    export_session,
+    html_preview_csp,
+    ingest_file_async,
+    sanitize_svg_for_preview,
+    sniff_magic,
+)
 from .tools import search as search_mod
 from .tools.files import SKIP_DIRS, rewind_to_turn
 
@@ -559,21 +569,47 @@ def make_app(st: State) -> Starlette:
             st.audit.append(event="undo_turn", session=s.id, turn_id=res.get("turn_id"), count=res["count"])
         return J(res)
 
-    @route("/api/sessions/{sid}/export", ["GET"])
+    @route("/api/sessions/{sid}/export", ["GET", "POST"])
     async def export(req: Request) -> Response:
         s = sess_or_404(req)
-        out = [f"# {s.title}\n"]
-        for m in s.ui:
-            if m["role"] == "user":
-                out.append(f"## 🧑 用户\n\n{m.get('text', '')}\n")
-            else:
-                for b in m.get("blocks", []):
-                    if b["type"] == "text":
-                        out.append(f"## 🤖 助手\n\n{b['text']}\n")
-                    elif b["type"] == "tool":
-                        out.append(f"> 🔧 {b.get('title')} — {b.get('status')}\n")
-        return Response("\n".join(out), media_type="text/markdown; charset=utf-8",
-                        headers={"Content-Disposition": f"attachment; filename=session-{s.id}.md"})
+        d = await jbody(req) if req.method == "POST" else {}
+        fmt = str(req.query_params.get("format") or d.get("format") or "md").strip().lower()
+        q_think = req.query_params.get("thinking")
+        q_tools = req.query_params.get("tools")
+        inc_think = (q_think not in ("0", "false", "no")) if q_think is not None else bool(d.get("include_thinking", True))
+        inc_tools = (q_tools not in ("0", "false", "no")) if q_tools is not None else bool(d.get("include_tools", True))
+        save_art = bool(d.get("save_artifact", False)) or req.query_params.get("save") in ("1", "true")
+        arts = st.artifacts.list(s.id, limit=200)
+        try:
+            payload, mime, fname = await asyncio.to_thread(
+                export_session, s, fmt, include_thinking=inc_think, include_tools=inc_tools, artifacts=arts
+            )
+        except RuntimeError as e:
+            return bad(str(e), 409)
+        if save_art:
+            art = st.artifacts.save_bytes(
+                s.id,
+                payload,
+                kind="export",
+                title=fname,
+                filename=fname,
+                mime=mime.split(";")[0].strip(),
+                created_by="user",
+                meta={"format": fmt, "include_thinking": inc_think, "include_tools": inc_tools},
+            )
+            st.broadcast("artifact_created", art.to_dict())
+            return J(art.to_dict())
+        ascii_name = re.sub(r"[^A-Za-z0-9._-]", "_", fname) or f"session-{s.id}.{fmt}"
+        disp = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(fname, safe='')}"
+        return Response(
+            payload,
+            media_type=mime,
+            headers={
+                "Content-Disposition": disp,
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+        )
 
     # ------------------------------------------------------------ 运行
     @route("/api/runs/{rid}/events", ["GET"])
@@ -779,6 +815,22 @@ def make_app(st: State) -> Starlette:
         limit = int(req.query_params.get("limit") or 200)
         return J({"artifacts": [a.to_dict() for a in st.artifacts.list(sid, kind=kind, limit=limit)]})
 
+    @route("/api/artifacts/bundle", ["POST"])
+    async def artifacts_bundle(req: Request) -> Response:
+        d = await jbody(req)
+        sid = str(d.get("session_id") or "").strip()
+        if not sid or not st.store.get(sid):
+            raise KeyError("会话不存在")
+        art_ids = [str(x).strip() for x in (d.get("artifact_ids") or []) if str(x).strip()] if d.get("artifact_ids") is not None else None
+        title = str(d.get("title") or "Artifact Bundle").strip()
+        art, _ = await asyncio.to_thread(create_artifact_bundle, st.artifacts, sid, art_ids, title=title)
+        max_mb = int(st.cfg.get("media", "artifact_max_mb", default=512) or 512)
+        st.artifacts.prune_max_bytes(max_mb * 1024 * 1024, session_id=sid)
+        st.audit.append(event="artifact_bundle", session=sid, artifact_id=art.id, count=art.meta.get("bundle_count", 0))
+        ad = art.to_dict()
+        st.broadcast("artifact_created", ad)
+        return J(ad)
+
     @route("/api/artifacts/{aid}/meta", ["GET"])
     async def artifact_meta(req: Request) -> Response:
         art = st.artifacts.get(req.path_params["aid"])
@@ -786,11 +838,82 @@ def make_app(st: State) -> Starlette:
             return bad("artifact 不存在", 404)
         return J(art.to_dict())
 
-    @route("/api/artifacts/{aid}", ["GET"])
+    @route("/api/artifacts/{aid}/preview", ["GET"])
+    async def artifact_preview(req: Request) -> Response:
+        art = st.artifacts.get(req.path_params["aid"])
+        if not art:
+            return bad("artifact 不存在", 404)
+        p = st.artifacts.resolve_path(art)
+        if not p or not p.is_file():
+            return bad("artifact 文件缺失", 404)
+        raw_mode = req.query_params.get("raw") in ("1", "true")
+        if raw_mode:
+            ext = p.suffix.lower()
+            mime = (art.mime or "").lower()
+            if mime == "text/html" or ext in (".html", ".htm") or art.kind == "html":
+                scripts_ok = bool((art.meta or {}).get("scripts_authorized", False))
+                return Response(
+                    p.read_bytes(),
+                    media_type="text/html; charset=utf-8",
+                    headers={
+                        "Content-Security-Policy": html_preview_csp(scripts_ok),
+                        "X-Frame-Options": "SAMEORIGIN",
+                        "X-Content-Type-Options": "nosniff",
+                        "Cache-Control": "no-store",
+                    },
+                )
+            if mime == "image/svg+xml" or ext == ".svg" or art.kind == "chart":
+                clean_svg = sanitize_svg_for_preview(p.read_text("utf-8", errors="replace"))
+                return Response(
+                    clean_svg.encode("utf-8"),
+                    media_type="image/svg+xml; charset=utf-8",
+                    headers={
+                        "Content-Security-Policy": html_preview_csp(False),
+                        "X-Frame-Options": "SAMEORIGIN",
+                        "X-Content-Type-Options": "nosniff",
+                        "Cache-Control": "no-store",
+                    },
+                )
+            if mime.startswith("audio/"):
+                return FileResponse(p, media_type=art.mime or "application/octet-stream",
+                                    headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
+        page = int(req.query_params.get("page") or 1)
+        sheet = int(req.query_params.get("sheet") or 0)
+        offset = int(req.query_params.get("offset") or 0)
+        limit = int(req.query_params.get("limit") or 100)
+        return J(await asyncio.to_thread(build_artifact_preview, st.artifacts, art, page=page, sheet=sheet, offset=offset, limit=limit))
+
+    @route("/api/artifacts/{aid}/authorize-scripts", ["POST"])
+    async def artifact_authorize_scripts(req: Request) -> Response:
+        art = st.artifacts.get(req.path_params["aid"])
+        if not art:
+            return bad("artifact 不存在", 404)
+        d = await jbody(req)
+        enabled = bool(d.get("enabled", False))
+        updated = st.artifacts.update_meta(art.id, {"scripts_authorized": enabled})
+        st.audit.append(event="artifact_script_auth", session=art.session_id, artifact_id=art.id, enabled=enabled)
+        return J(updated.to_dict() if updated else art.to_dict())
+
+    @route("/api/artifacts/{aid}/open", ["POST"])
+    async def artifact_open(req: Request) -> Response:
+        art = st.artifacts.get(req.path_params["aid"])
+        if not art:
+            return bad("artifact 不存在", 404)
+        p = st.artifacts.resolve_path(art)
+        if not p or not p.is_file():
+            return bad("artifact 文件缺失", 404)
+        await asyncio.to_thread(appwindow.open_local_file, p)
+        st.audit.append(event="artifact_open", session=art.session_id, artifact_id=art.id)
+        return J({"ok": True, "id": art.id})
+
+    @route("/api/artifacts/{aid}", ["GET", "DELETE"])
     async def artifact_download(req: Request) -> Response:
         art = st.artifacts.get(req.path_params["aid"])
         if not art:
             return bad("artifact 不存在", 404)
+        if req.method == "DELETE":
+            ok = st.artifacts.delete(art.id)
+            return J({"ok": ok, "id": art.id})
         p = st.artifacts.resolve_path(art)
         if not p or not p.is_file():
             return bad("artifact 文件缺失", 404)

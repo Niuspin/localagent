@@ -68,10 +68,14 @@ def detect_capabilities(engine: Any = None, cfg: Any = None, bin_dir: Path | Non
     if isinstance(cfg, dict):
         media_d = cfg.get("media") if isinstance(cfg.get("media"), dict) else cfg
         recorder_enabled = bool(media_d.get("recorder_enabled", False))
+        tts_enabled = bool(media_d.get("tts_enabled", False))
     elif cfg is not None:
         recorder_enabled = bool(cfg.get("media", "recorder_enabled", default=False))
+        tts_enabled = bool(cfg.get("media", "tts_enabled", default=False))
     else:
         recorder_enabled = False
+        tts_enabled = False
+    piper_bin = _find_exe(("piper",), bdir)
 
     return {
         "vision": vision,
@@ -88,6 +92,9 @@ def detect_capabilities(engine: Any = None, cfg: Any = None, bin_dir: Path | Non
         "parquet": _has_mod("pyarrow"),
         "lxml": _has_mod("lxml"),
         "yaml": _has_mod("yaml"),
+        "chart_svg": True,
+        "matplotlib": _has_mod("matplotlib"),
+        "tts": {"enabled": tts_enabled, "available": bool(tts_enabled and piper_bin), "binary": piper_bin},
         "office": {
             "docx": _has_mod("docx"),
             "xlsx": _has_mod("openpyxl"),
