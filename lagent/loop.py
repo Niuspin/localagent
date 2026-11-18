@@ -33,8 +33,10 @@ from .engine import Engine, EngineError
 from .events import enrich_event
 from .hooks import HookManager
 from .journal import Journal
-from .permissions import PermissionManager
+from .permissions import PermissionManager, infer_delegated_kind
 from .router import ModelRouter
+from .runtime.handoff import extract_episode_handoff as _extract_episode_handoff
+from .runtime.worktree import apply_worktree_changes, git_cmd
 from .sessions import Session, SessionStore
 from .tools import agentic, files, jobs, media_out, office, research_tools, search, swarm_tools, web  # noqa: F401  (导入即注册)
 from .tools.base import TOOLS, Tool, ToolResult, clip, coerce_args, repair_json
@@ -77,7 +79,14 @@ class Run:
         self.verify_failed = False                # 最近一次验证命令失败（且之后没再改动）
         self.nudges = 0                           # 已发出的“请验证”提醒次数
         self.handles: dict[str, str] = {}         # 工具调用 id → 输出句柄（_exec_tool 写入，_loop 在记录 tool 消息时取走）
+        self.steer_queue: list[str] = []          # 运行中插入的实时转向（Mid-Turn Steering）指令队列
         self._loop = asyncio.get_running_loop()
+
+    def steer(self, text: str) -> None:
+        t = (text or "").strip()
+        if t and not self.finished:
+            self.steer_queue.append(t)
+            self.emit("steer_queued", {"text": t[:300], "pending": len(self.steer_queue)})
 
     def audit_ctx(self) -> dict[str, Any]:
         return {
@@ -111,31 +120,61 @@ class Run:
 
 
 class ThinkSplitter:
-    """处理内联 <think>…</think>（服务端没拆 reasoning_content 时）。"""
+    """处理内联思考标签（<think>…</think> / <thought>…</thought> / <thinking>…</thinking>，服务端未拆 reasoning_content 时）。"""
+
+    _OPEN_TAGS = ("<think>", "<thought>", "<thinking>")
+    _CLOSE_FOR = {"<think>": "</think>", "<thought>": "</thought>", "<thinking>": "</thinking>"}
 
     def __init__(self) -> None:
         self.mode, self.buf = "text", ""
+        self._close_tag = "</think>"
 
     def feed(self, s: str) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         self.buf += s
         while True:
             if self.mode == "text":
-                io, ic = self.buf.find("<think>"), self.buf.find("</think>")
-                if ic >= 0 and (io < 0 or ic < io):          # 只见到收尾标签：前面全是思考
-                    if ic:
-                        out.append(("think", self.buf[:ic]))
-                    self.buf = self.buf[ic + 8:]
+                best_i, best_open = -1, ""
+                for ot in self._OPEN_TAGS:
+                    idx = self.buf.find(ot)
+                    if idx >= 0 and (best_i < 0 or idx < best_i):
+                        best_i, best_open = idx, ot
+                best_ic, best_close = -1, ""
+                for ct in self._CLOSE_FOR.values():
+                    idx = self.buf.find(ct)
+                    if idx >= 0 and (best_ic < 0 or idx < best_ic):
+                        best_ic, best_close = idx, ct
+                if best_ic >= 0 and (best_i < 0 or best_ic < best_i):
+                    if best_ic:
+                        out.append(("think", self.buf[:best_ic]))
+                    self.buf = self.buf[best_ic + len(best_close):]
                     continue
-                tag, i = "<think>", io
-            else:
-                tag = "</think>"
-                i = self.buf.find(tag)
+                if best_i >= 0:
+                    if best_i:
+                        out.append(("text", self.buf[:best_i]))
+                    self.buf = self.buf[best_i + len(best_open):]
+                    self.mode = "think"
+                    self._close_tag = self._CLOSE_FOR[best_open]
+                    continue
+                keep = 0
+                for ot in self._OPEN_TAGS:
+                    for k in range(min(len(ot) - 1, len(self.buf)), 0, -1):
+                        if ot.startswith(self.buf[-k:]):
+                            keep = max(keep, k)
+                            break
+                emit = self.buf[: len(self.buf) - keep]
+                if emit:
+                    out.append(("text", emit))
+                self.buf = self.buf[len(self.buf) - keep:]
+                return out
+
+            tag = self._close_tag
+            i = self.buf.find(tag)
             if i >= 0:
                 if i:
-                    out.append((self.mode, self.buf[:i]))
+                    out.append(("think", self.buf[:i]))
                 self.buf = self.buf[i + len(tag):]
-                self.mode = "think" if self.mode == "text" else "text"
+                self.mode = "text"
                 continue
             keep = 0
             for k in range(min(len(tag) - 1, len(self.buf)), 0, -1):
@@ -144,7 +183,7 @@ class ThinkSplitter:
                     break
             emit = self.buf[: len(self.buf) - keep]
             if emit:
-                out.append((self.mode, emit))
+                out.append(("think", emit))
             self.buf = self.buf[len(self.buf) - keep:]
             return out
 
@@ -183,6 +222,16 @@ def make_title(text: str, files_: list[str]) -> str:
 
 
 # ====================================================================== Agent
+def _extract_episode_handoff_compat(
+    summary: str,
+    loop_status: str,
+    *,
+    has_acceptance: bool,
+    tool_calls: int,
+) -> dict[str, Any]:
+    return _extract_episode_handoff(summary, loop_status, has_acceptance=has_acceptance, tool_calls=tool_calls)
+
+
 class Agent:
     def __init__(self, *, cfg: Config, engine: Engine, store: SessionStore, journal: Journal, audit: sec.AuditLog,
                  memory: Any, skills: Any, protected: list[Path], hidden: list[Path], notify: Any = None, mcp: Any = None,
@@ -282,17 +331,25 @@ class Agent:
                 return True
         return False
 
+    def steer_run(self, rid: str, text: str) -> bool:
+        """向正在执行中的 Run 注入实时转向指令（在当前步或下一 LLM 步生效）。"""
+        r = self.runs.get(rid)
+        if not r or r.finished:
+            return False
+        r.steer(text)
+        return True
+
     # ------------------------------------------------------------ 系统提示
     def system_prompt(self, sess: Session, mode: str, ws: str) -> str:
         wsline = (f"工作区: {ws}（所有文件操作限于此目录，相对路径均相对于它）" if ws else
                   "工作区: 未选择（无法读写文件或运行命令；需要时请提醒用户在界面顶部选择工作区）")
         p = [
             "你是 LocalAgent，运行在用户本机上的自主助手（由 llama.cpp 本地模型驱动）。目标是借助工具真正把事情做完，而不只是给建议。",
-            f"## 环境\n- 系统: {platform.system()} · 今天: {date.today().isoformat()}\n- {wsline}",
+            f"## 环境\n- 系统: {platform.system()}\n- {wsline}",
             "## 工作方式\n"
             "1. 先弄清再动手：不确定的内容先 read_file / list_dir / grep 查看，不要凭空猜测文件内容。\n"
             "2. 多步任务先用 todo_write 列出步骤，推进时更新状态。\n"
-            "3. 改已有文件优先 edit_file（精确替换，改前先读）；新建或整体重写用 write_file；Word/PDF/Excel/PPT 用 write_document / write_spreadsheet / write_presentation，改已有办公文件用 edit_office。\n"
+            "3. 改已有文件优先 edit_file（精确替换，改前先读；大文件或易歧义行建议 read_file(..., anchors=true) 后配合 start_line/line_hash 编辑）；新建或整体重写用 write_file；Word/PDF/Excel/PPT 用 write_document / write_spreadsheet / write_presentation，改已有办公文件用 edit_office。\n"
             "4. 删除只在用户明确要求或任务必需时进行（会进回收站，可恢复）。\n"
             "5. 工具报错时读懂错误并调整做法，不要重复完全相同的调用。\n"
             "6. 完成后用简短的话说明做了什么、文件在哪；不要把整份文件内容再贴一遍。\n"
@@ -443,7 +500,52 @@ class Agent:
                     return
                 text = cmd_res.text
 
-            # 3. @file / @dir 上下文引用安全解析
+            # 2.5 MCP Prompt 命令 (/mcp:<server>:<prompt> [args])
+            if text.startswith("/mcp:") and self.mcp is not None:
+                body_p = text[5:].strip()
+                first, _, rest = body_p.partition(" ")
+                if ":" in first:
+                    srv, pname = first.split(":", 1)
+                    try:
+                        p_args = {"input": rest} if rest else {}
+                        res_p = await self.mcp.get_prompt(srv, pname, arguments=p_args or None, workspace=ws or None)
+                        msgs_p = res_p.get("messages") or [] if isinstance(res_p, dict) else []
+                        txt_parts = []
+                        for mp in msgs_p:
+                            mc = mp.get("content")
+                            if isinstance(mc, dict) and mc.get("text"):
+                                txt_parts.append(str(mc["text"]))
+                            elif isinstance(mc, str):
+                                txt_parts.append(mc)
+                        if txt_parts:
+                            text = f"[MCP Prompt {srv}:{pname}]\n" + "\n\n".join(txt_parts) + (f"\n\n用户输入: {rest}" if rest else "")
+                    except Exception as e:  # noqa: BLE001
+                        run.emit("notice", {"level": "warn", "text": f"MCP Prompt {srv}:{pname} 获取失败: {e}"})
+
+            # 3. @file / @dir / @mcp:<server>:<uri> 上下文引用安全解析
+            if "@mcp:" in text and self.mcp is not None:
+                mcp_blocks: list[str] = []
+                for mm in re.finditer(r"(?:^|\s)@mcp:([A-Za-z0-9_.-]+):(\S+)", text):
+                    srv, uri = mm.group(1), mm.group(2).rstrip(".,;:!?，。；！？")
+                    try:
+                        rres = await self.mcp.read_resource(srv, uri, workspace=ws or None)
+                        contents = rres.get("contents") or [] if isinstance(rres, dict) else []
+                        snippets = []
+                        for c_item in contents[:6]:
+                            if isinstance(c_item, dict) and c_item.get("text"):
+                                snippets.append(str(c_item["text"])[:16000])
+                        body_r = "\n".join(snippets) or json.dumps(rres, ensure_ascii=False)[:8000]
+                        srv_cfg = self.mcp.store.get(srv)
+                        if not (srv_cfg and srv_cfg.trust_results) and not st.tainted:
+                            st.tainted = True
+                            sess.tainted = True
+                            run.emit("taint", {"tainted": True, "reason": f"通过 @mcp 引入了外部资源 {srv}:{uri}"})
+                        mcp_blocks.append(f'<mcp_resource server="{srv}" uri="{uri}">\n{body_r}\n</mcp_resource>')
+                    except Exception as e:  # noqa: BLE001
+                        mcp_blocks.append(f"<!-- @mcp:{srv}:{uri} 读取失败: {e} -->")
+                if mcp_blocks:
+                    text = text + "\n\n[用户引用的 MCP 资源]\n" + "\n\n".join(mcp_blocks)
+
             if "@" in text and ws:
                 max_mb = int(cfg.get("security", "max_file_mb", default=20))
                 text, _mentions, has_taint = resolve_context_mentions(text, ctx.guard, max_file_mb=max_mb)
@@ -649,6 +751,8 @@ class Agent:
             if block:
                 parts += f"\n\n<memory>\n{block}\n</memory>"
                 self.memory.touch(ids)
+        # 将当前日期放入本轮用户消息尾部，保持 system_prompt 跨午夜 KV 前缀稳定
+        parts = (parts + f"\n\n[环境日期: {date.today().isoformat()}]") if parts else f"[环境日期: {date.today().isoformat()}]"
         if images:
             if self.engine.vision:
                 content: Any = [{"type": "text", "text": parts}] + [{"type": "image_url", "image_url": {"url": u}} for u in images]
@@ -694,10 +798,38 @@ class Agent:
         nothink_tried = False
         force_tool_once = False       # 下一步用 tool_choice=required（仅在上一步整段回复是个没解析成功的调用时）
         force_tried = False
+        gbnf_force_once = False
         overflow_retry = 0
         usage_sum = {"prompt_tokens": 0, "completion_tokens": 0}
         self.engine.auto_restarts = 0
+        is_worker = bool(getattr(st, "depth", 0) > 0 or getattr(st, "swarm_id", None))
+        llm_role = str(getattr(st, "llm_role", None) or ("worker" if is_worker else "main"))
+        req_priority = 1 if is_worker else 0
+        id_slot = self.engine.slot_for_session(sess.id, is_worker=is_worker) if hasattr(self.engine, "slot_for_session") else None
         for step in range(1, max_steps + 1):
+            # 运行中实时轮询 Swarm Mailbox 与 Mid-Turn Steering 队列
+            mb = getattr(ctx, "mailbox", None)
+            aid = getattr(st, "agent_id", "") or ""
+            if mb is not None and aid:
+                try:
+                    live_mails = mb.read(aid, unread_only=True, mark_read=True)
+                    if live_mails:
+                        mail_txt = "\n".join(f"[{m.from_agent}→{aid} ({m.kind})]: {m.body}" for m in live_mails)
+                        sess.history.append({"role": "user", "_internal": True, "content": f"[实时协作邮箱消息]\n{mail_txt}"})
+                        run.emit("notice", {"level": "info", "text": f"已实时接收 {len(live_mails)} 条 Swarm 协作消息。"})
+                except Exception:  # noqa: BLE001
+                    pass
+            if run.steer_queue:
+                steers = list(run.steer_queue)
+                run.steer_queue.clear()
+                combined_steer = "\n\n".join(steers)
+                sess.history.append({"role": "user", "content": f"[用户实时转向指示]\n{combined_steer}"})
+                sess.ui.append({
+                    "id": uuid.uuid4().hex[:8], "role": "user", "ts": time.time(),
+                    "text": combined_steer, "steer": True, "hist_index": len(sess.history) - 1, "turn_id": run.id,
+                })
+                run.emit("steer_applied", {"text": combined_steer})
+
             run.emit("step_start", {"step": step})
             run.stats.steps = step
             mode = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else self._session_mode(sess)
@@ -707,15 +839,38 @@ class Agent:
             eff_allowed = self._eff_allowed(getattr(st, "allowed_tools", None), getattr(st, "skill_allowed_tools", None))
             tools = self.tools_for(mode, bool(ws), st.tool_groups, eff_allowed)
             schemas = [t.schema() for t in tools]
-            await self.engine.ensure_ready()
+            remote_target = (
+                self.router.provider.resolve(llm_role).kind != "local"
+                if hasattr(self, "router") and hasattr(self.router, "provider")
+                else False
+            )
+            if not remote_target:
+                await self.engine.ensure_ready()
             ctx.vision = self.engine.vision
             await self._fit_context(run, sess, meter, schemas, mode, ws)
-            body = self._body(sess, mode, ws, schemas, gen, nothink_once, force_tool_once)
+            body = self._body(sess, mode, ws, schemas, gen, nothink_once, force_tool_once, id_slot=id_slot)
+            if gbnf_force_once and schemas and cfg.get("agent", "gbnf_fallback", default=True):
+                tool_names = [t.name for t in tools[:40]]
+                if tool_names:
+                    from .inference import schema_to_gbnf
+                    body["grammar"] = schema_to_gbnf({
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "enum": tool_names},
+                            "arguments": {"type": "object"},
+                        },
+                        "required": ["name", "arguments"],
+                    })
+                    body.pop("tool_choice", None)
+                    body["messages"] = body["messages"] + [{
+                        "role": "system",
+                        "content": "请直接输出单个 JSON 对象调用工具：{\"name\":\"工具名\",\"arguments\":{...}}",
+                    }]
             was_forced = body.get("tool_choice") == "required"
             raw_est = meter.last_raw
-            nothink_once = force_tool_once = False
+            nothink_once = force_tool_once = gbnf_force_once = False
             try:
-                res = await self._stream_step(run, ui, body)
+                res = await self._stream_step(run, ui, body, role=llm_role, priority=req_priority, id_slot=id_slot)
             except net.HTTPStatusError as e:
                 txt = (e.body or "").lower()
                 if e.status == 400 and ("context" in txt or "exceed" in txt or "too long" in txt) and overflow_retry < 2:
@@ -732,7 +887,11 @@ class Agent:
                         await self._force_shrink(run, sess, meter, ws)
                     continue
                 if was_forced and e.status == 400:
-                    run.emit("notice", {"level": "info", "text": "引擎不支持强制工具调用，已改回自动模式。"})
+                    if cfg.get("agent", "gbnf_fallback", default=True):
+                        gbnf_force_once = True
+                        run.emit("notice", {"level": "info", "text": "引擎不支持强制 tool_choice，改用 GBNF 结构化工具兜底重试。"})
+                    else:
+                        run.emit("notice", {"level": "info", "text": "引擎不支持强制工具调用，已改回自动模式。"})
                     continue
                 return "error", f"引擎返回错误 HTTP {e.status}: {e.body[:300]}"
             u = res["usage"]
@@ -781,6 +940,8 @@ class Agent:
                         sess.history.append({"role": "user", "_internal": True, "content": nudge})
                         run.emit("notice", {"level": "info", "text": "改动后还没跑验证命令，已提醒模型先验证再收尾。"})
                         continue
+                if run.steer_queue:
+                    continue
                 self.store.save(sess)
                 return "done", None
             for batch in self._batches(tcs):
@@ -805,7 +966,10 @@ class Agent:
                 if pics:                # 图片放在这一批所有 tool 结果之后，避免打断 tool 消息序列（部分模板会拒绝）
                     sess.history.append({"role": "user", "_internal": True,
                                          "content": [{"type": "text", "text": "（上一个工具返回的图片）"}] + [{"type": "image_url", "image_url": {"url": u}} for u in pics]})
-            self.store.save(sess)
+            if hasattr(self.store, "save_step"):
+                self.store.save_step(sess)
+            else:
+                self.store.save(sess)
         run.emit("notice", {"level": "warn", "text": f"已达到单次任务的最大步数（{max_steps}）。可发送“继续”接着做。"})
         return "max_steps", None
 
@@ -834,11 +998,14 @@ class Agent:
             out.append(cur)
         return out
 
-    def _body(self, sess: Session, mode: str, ws: str, schemas: list[dict], gen: dict, nothink: bool, force_tool: bool = False) -> dict:
+    def _body(self, sess: Session, mode: str, ws: str, schemas: list[dict], gen: dict, nothink: bool,
+              force_tool: bool = False, *, id_slot: int | None = None) -> dict:
         msgs = [{"role": "system", "content": self.system_prompt(sess, mode, ws)}] + C.project_api_messages(sess.history, getattr(sess, "kv_prune_upto", 0))
         b: dict[str, Any] = {"model": "local", "messages": msgs, "stream": True, "stream_options": {"include_usage": True},
                              "temperature": gen["temperature"], "top_p": gen["top_p"], "top_k": gen["top_k"], "min_p": gen["min_p"],
                              "max_tokens": gen["max_tokens"], "cache_prompt": True}
+        if id_slot is not None and getattr(self.engine, "slots_count", lambda: 1)() > 1:
+            b["id_slot"] = int(id_slot)
         if gen.get("presence_penalty"):
             b["presence_penalty"] = gen["presence_penalty"]
         rb = int(gen.get("reasoning_budget", -1))
@@ -853,7 +1020,8 @@ class Agent:
         return b
 
     # ------------------------------------------------------------ 流式一步
-    async def _stream_step(self, run: Run, ui: dict, body: dict) -> dict:
+    async def _stream_step(self, run: Run, ui: dict, body: dict, *, role: str = "main",
+                           priority: int = 0, id_slot: int | None = None) -> dict:
         content, reasoning = "", ""
         tcs: dict[int, dict] = {}
         finish, usage, tps = "", {}, 0.0
@@ -892,7 +1060,12 @@ class Agent:
             content += s
             run.emit("text_delta", {"text": s})
 
-        async for ch in self.engine.chat_stream(body):
+        if hasattr(self, "router") and hasattr(self.router, "provider"):
+            agen = self.router.provider.stream_chat(body, role=role, priority=priority, id_slot=id_slot)
+        else:
+            from .providers import _stream_engine_compat
+            agen = _stream_engine_compat(self.engine, body, priority=priority)
+        async for ch in agen:
             if run.cancel_evt.is_set():
                 raise asyncio.CancelledError
             if ch.get("usage"):
@@ -1058,8 +1231,9 @@ class Agent:
 
         # ---- 路径与敏感性
         mode = (getattr(st, "sub_mode", "") or "plan") if getattr(st, "depth", 0) > 0 else self._session_mode(sess)
-        eff_kind = "write" if (name in ("delegate_task", "spawn_agent") and args.get("mode") == "worker") else tool.kind
+        eff_kind = infer_delegated_kind(name, args, tool.kind)
         sensitive = None
+        lease_rels: list[tuple[str, bool]] = []
         try:
             for pa in tool.path_args:
                 val = args.get(pa)
@@ -1067,7 +1241,9 @@ class Agent:
                 for item in items:
                     need_w = eff_kind in ("write", "delete") and not (name == "copy_path" and pa == "src") and not (name == "bundle_artifacts" and pa == "files")
                     p = call_ctx.guard.resolve(item, write=need_w)
-                    sensitive = sensitive or sec.sensitive_reason(call_ctx.guard.rel(p))
+                    rel_item = call_ctx.guard.rel(p)
+                    lease_rels.append((rel_item, need_w))
+                    sensitive = sensitive or sec.sensitive_reason(rel_item)
         except sec.SecurityError as e:
             finish("error", f"安全限制: {e}")
             return f"安全限制: {e}", []
@@ -1094,12 +1270,12 @@ class Agent:
             sandboxed = bool(self.mcp is not None and self.mcp.contained(str(tool.extra.get("server", ""))))
         tainted_eff = st.tainted and bool(self.cfg.get("security", "taint_tracking", default=True))
 
-        # ---- 自定义细粒度权限规则评估（未匹配时回退到默认 Policy）
+        # ---- 自定义细粒度权限规则评估（未匹配时回退到默认 Policy；plan/verify 不变量在内部优先执行）
         custom_dec = None
         if ws_curr:
             perm_mgr = self._get_perm_mgr(ws_curr)
             custom_dec = perm_mgr.evaluate(kind=eff_kind, name=name, args=args, tainted=tainted_eff,
-                                           sensitive=sensitive, command=command, sandboxed=sandboxed)
+                                           sensitive=sensitive, command=command, sandboxed=sandboxed, mode=mode)
         if custom_dec is not None:
             dec = custom_dec
         else:
@@ -1126,7 +1302,13 @@ class Agent:
                 self.audit.append(event="mission_blocked", session=sess.id, tool=name, target=verdict.target, reason=verdict.reason, **self._audit_ctx(run))
                 run.cancel_evt.set()
                 return f"操作超出无人值守授权范围（{verdict.reason}），已阻塞并加入待批清单。", []
-            if verdict.reason not in ("safe_read", "readonly_tool"):
+            # 安全单调性：PermissionManager 的 ask/deny 不可被 Mission 策略覆盖；无沙箱主机上的 wildcard('*') 命令亦不盲目绕过确认
+            perm_ask_lock = custom_dec is not None and custom_dec.action in ("ask", "deny")
+            unsandboxed_wildcard = (
+                eff_kind == "exec" and not sandboxed and verdict.reason == "allowlisted_command"
+                and any(p.strip() in ("*", "**") for p in m_guard["policy"].allow_commands)
+            )
+            if not perm_ask_lock and not unsandboxed_wildcard and verdict.reason not in ("safe_read", "readonly_tool"):
                 dec = sec.Decision("allow", f"mission_policy:{verdict.reason}", dec.risk, dec.key)
         if dec.action == "ask":
             decision = await self._ask(run, call_ctx, blk, tool, args, dec, tainted_eff)
@@ -1136,6 +1318,26 @@ class Agent:
                 return "用户拒绝了此操作。不要重复尝试相同操作；请换个方式或询问用户想怎么做。", []
             if decision == "allow_session" and not sensitive and not tainted_eff and eff_kind in ("write", "exec", "mcp"):
                 st.allow_keys.add(dec.key)
+
+        # ---- 文件协作租约（Swarm 并发访问防竞态）
+        leases_mgr = getattr(call_ctx, "leases", None)
+        lease_owner = getattr(st, "agent_id", "") or sess.id
+        acquired_leases: list[str] = []
+        if leases_mgr is not None and lease_rels:
+            for rel_p, need_w in lease_rels:
+                ok_l = False
+                for _attempt in range(8):
+                    ok_l = leases_mgr.acquire_write(rel_p, lease_owner) if need_w else leases_mgr.acquire_read(rel_p, lease_owner)
+                    if ok_l:
+                        break
+                    await asyncio.sleep(0.05)
+                if not ok_l:
+                    for al in acquired_leases:
+                        leases_mgr.release(al, lease_owner)
+                    msg_l = f"文件租约冲突: {rel_p} 正被并发代理占用，请稍后重试。"
+                    finish("error", msg_l)
+                    return msg_l, []
+                acquired_leases.append(rel_p)
         # ---- 执行
         t0 = time.time()
         try:
@@ -1154,6 +1356,10 @@ class Agent:
         except Exception as e:  # noqa: BLE001
             finish("error", f"{type(e).__name__}: {e}", dur=int((time.time() - t0) * 1000))
             return f"工具执行出错: {type(e).__name__}: {e}", []
+        finally:
+            if leases_mgr is not None and acquired_leases:
+                for rel_p in acquired_leases:
+                    leases_mgr.release(rel_p, lease_owner)
         dur = int((time.time() - t0) * 1000)
         if ws_curr:
             try:
@@ -1353,11 +1559,12 @@ class Agent:
             if e > 0.85 * usable() and can_grow:
                 new = min(eng.ctx_cap, eng.ctx * 2)
                 run.emit("context_event", {"kind": "grow_start", "detail": f"上下文 {eng.ctx} → {new}，正在重载模型（约需几十秒）…"})
+                slot_id = eng.slot_for_session(sess.id, is_worker=bool(getattr(sess, "swarm_id", None))) if hasattr(eng, "slot_for_session") else 0
                 slot_file = f"grow_{str(getattr(sess, 'id', 'sess'))[:12]}.bin"
                 saved_slot = False
                 if hasattr(eng, "save_slot") and getattr(eng, "status", "") == "ready":
                     try:
-                        saved_slot = await eng.save_slot(0, slot_file)
+                        saved_slot = await eng.save_slot(slot_id, slot_file)
                     except Exception:  # noqa: BLE001
                         saved_slot = False
                 await eng.restart(ctx=new)
@@ -1365,7 +1572,7 @@ class Agent:
                     raise EngineError(eng.error or "扩容后引擎未能启动")
                 if saved_slot and hasattr(eng, "restore_slot"):
                     try:
-                        await eng.restore_slot(0, slot_file)
+                        await eng.restore_slot(slot_id, slot_file)
                     except Exception:  # noqa: BLE001
                         pass
                 run.emit("context_event", {"kind": "grow_done", "detail": f"上下文已扩展到 {eng.ctx}"})
@@ -1431,51 +1638,18 @@ class Agent:
     # ------------------------------------------------------------ 子代理
     @staticmethod
     def _git_cmd(cwd: Path, *args: str, timeout: float = 30.0) -> tuple[int, str, str]:
-        import subprocess
-        kw: dict[str, Any] = {"creationflags": 0x08000000} if sec.IS_WIN else {}
-        r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, **kw)
-        return r.returncode, r.stdout or "", r.stderr or ""
+        return git_cmd(cwd, *args, timeout=timeout)
 
     def _apply_worktree(self, wt_dir: Path, ws_dir: Path, sid: str, turn_id: str) -> tuple[list[str], str]:
-        from .journal import sha256_bytes
-        rc, status_out, _ = self._git_cmd(wt_dir, "status", "--porcelain", "-uall")
-        if rc != 0 or not status_out.strip():
-            return [], ""
-        _, diff_out, _ = self._git_cmd(wt_dir, "diff", "HEAD")
-        changed: list[str] = []
-        guard_ws = sec.PathGuard(ws_dir, protected=self.protected, hidden=self.hidden)
-        for ln in status_out.splitlines():
-            if len(ln) < 4:
-                continue
-            st_code = ln[:2]
-            rel_path = ln[3:].strip().strip('"').split(" -> ")[-1]
-            src_p = wt_dir / rel_path
-            try:
-                dst_p = guard_ws.resolve(rel_path, write=True)
-            except sec.SecurityError:
-                continue
-            if "D" in st_code and not src_p.exists():
-                if dst_p.exists():
-                    if self.journal:
-                        tid = self.journal.trash(dst_p, sid)
-                        self.journal.record(sid, op="delete", path=dst_p, summary=f"[worktree] 删除 {rel_path}",
-                                            extra={"trash_id": tid, "turn_id": turn_id})
-                    else:
-                        dst_p.unlink()
-                    changed.append(f"D {rel_path}")
-            elif src_p.is_file():
-                data = src_p.read_bytes()
-                existed = dst_p.is_file()
-                snap = self.journal.snapshot(dst_p) if (existed and self.journal) else None
-                dst_p.parent.mkdir(parents=True, exist_ok=True)
-                from .journal import atomic_write
-                atomic_write(dst_p, data)
-                if self.journal:
-                    self.journal.record(sid, op="edit" if existed else "write", path=dst_p,
-                                        summary=f"[worktree] {'更新' if existed else '新增'} {rel_path}",
-                                        snap=snap, existed=existed, after=sha256_bytes(data), extra={"turn_id": turn_id})
-                changed.append(("M " if existed else "A ") + rel_path)
-        return changed, diff_out
+        return apply_worktree_changes(
+            wt_dir,
+            ws_dir,
+            sid,
+            turn_id,
+            journal=self.journal,
+            protected=self.protected,
+            hidden=self.hidden,
+        )
 
     async def run_subagent(self, parent_ctx: ToolCtx, prompt: str, mode: str = "explore", max_steps: int = 8, apply_changes: bool = True) -> str:
         """运行独立子代理循环（explore / plan / verify 为只读；worker 在隔离 Git Worktree 中运行并安全合并补丁）。"""
@@ -1495,7 +1669,8 @@ class Agent:
             rc, top, _ = self._git_cmd(Path(ws), "rev-parse", "--show-toplevel")
             if rc != 0 or not top.strip():
                 return "错误: worker 隔离模式要求工作区是 Git 仓库（请先 git init 或改用主代理）。"
-            wt_root = self.store.dir.parent / "worktrees"
+            import tempfile
+            wt_root = Path(tempfile.gettempdir()) / "localagent_worktrees" / "sub"
             wt_root.mkdir(parents=True, exist_ok=True)
             wt_dir = wt_root / sub_sid
             rc_w, _out_w, err_w = self._git_cmd(Path(ws), "worktree", "add", "--detach", str(wt_dir), "HEAD")
@@ -1632,6 +1807,7 @@ class Agent:
         sub_st.depth = node.depth
         sub_st.sub_mode = ctx_info.get("permission_mode", "plan")
         sub_st.turn_id = node.id
+        sub_st.llm_role = role_spec.name  # type: ignore[attr-defined]
         sub_st.tool_groups = set(role_spec.tool_groups)
         sub_st.allowed_tools = set(role_spec.allowed_tools) if role_spec.allowed_tools else None
 
@@ -1642,20 +1818,64 @@ class Agent:
             swarm_id=sw.id,
             mission_id=sw.mission_id,
         )
+        self.runs[sub_run.id] = sub_run
+        parent_run = next((r for r in list(self.runs.values()) if r.session_id == sw.session_id and not r.finished and r.id != sub_run.id), None)
+
         sub_ctx = self._make_ctx(sub_run, sub_sess, sub_st, eff_ws)
         sub_ctx.agent = self
         sub_ctx.depth = node.depth
         sub_ctx.turn_id = node.id
+        sub_ctx.approval_run = parent_run or sub_run  # type: ignore[attr-defined]
+        sub_ctx.leases = ctx_info.get("leases")  # type: ignore[attr-defined]
+        sub_ctx.mailbox = ctx_info.get("mailbox")  # type: ignore[attr-defined]
+
+        guard_state: dict[str, Any] | None = None
+        m_pol_raw = ctx_info.get("mission_policy")
+        if m_pol_raw:
+            from .mission.policy import MissionPolicy
+            guard_state = {
+                "policy": MissionPolicy(m_pol_raw, sub_ctx.guard, workspace=Path(eff_ws or sw.workspace or ".")),
+                "approved": set(ctx_info.get("mission_approved") or ()),
+                "watchdog": ctx_info.get("watchdog"),
+                "blocked_out": None,
+                "stall_out": None,
+            }
+            sub_ctx.mission_guard = guard_state  # type: ignore[attr-defined]
+
+        async def _bridged_ask(q: str, options: list[str]) -> str:
+            qid = uuid.uuid4().hex[:10]
+            fut = asyncio.get_running_loop().create_future()
+            target_r = parent_run if (parent_run and not parent_run.finished) else sub_run
+            target_r.questions[qid] = fut
+            payload = {"question_id": qid, "question": q, "options": options, "agent_id": node.id, "swarm_id": sw.id}
+            target_r.emit("question", payload)
+            if self.notify:
+                self.notify("question", {**payload, "run_id": target_r.id})
+            try:
+                return await asyncio.wait_for(fut, 3600)
+            except asyncio.TimeoutError:
+                return "（用户未回答）"
+            finally:
+                target_r.questions.pop(qid, None)
+
+        sub_ctx.ask = _bridged_ask
+
         emit_step = ctx_info.get("emit_step")
-        if callable(emit_step):
-            orig_emit = sub_run.emit
+        orig_emit = sub_run.emit
 
-            def _fwd(ev: str, d: dict) -> None:
-                orig_emit(ev, d)
-                if ev in ("tool_start", "tool_result"):
-                    emit_step({"phase": ev, "name": d.get("name", ""), "status": d.get("status", "running")})
+        def _fwd(ev: str, d: dict) -> None:
+            orig_emit(ev, d)
+            if ev in ("tool_start", "tool_result") and callable(emit_step):
+                emit_step({"phase": ev, "name": d.get("name", ""), "status": d.get("status", "running")})
+            if ev in ("approval_request", "approval_resolved", "question", "notice"):
+                if callable(emit_step):
+                    emit_step({"phase": ev, **d})
+                if parent_run and not parent_run.finished and ev in ("approval_request", "approval_resolved", "notice"):
+                    parent_run.emit(ev, {**d, "sub_agent_id": node.id})
+                if self.notify and ev in ("approval_request", "approval_resolved"):
+                    self.notify(ev, {**d, "swarm_id": sw.id, "agent_id": node.id})
 
-            sub_run.emit = _fwd  # type: ignore[method-assign]
+        sub_run.emit = _fwd  # type: ignore[method-assign]
 
         mailbox_notes = ctx_info["mailbox"].read(node.id, unread_only=True, mark_read=True)
         mail_blob = "\n".join(f"[{m.from_agent}→{node.id} ({m.kind})]: {m.body}" for m in mailbox_notes)
@@ -1668,17 +1888,42 @@ class Agent:
         max_steps = max(1, min(int((node.budget or {}).get("steps") or role_spec.default_steps), 60))
         try:
             await self._loop(sub_run, sub_sess, sub_st, sub_ctx, sub_ui, max_steps_override=max_steps)
+        except asyncio.CancelledError:
+            if not (guard_state and (guard_state.get("blocked_out") or guard_state.get("stall_out"))):
+                await sub_run.finish()
+                raise
         except Exception as e:  # noqa: BLE001
-            return {"status": "failed", "error": str(e), "result": "", "steps": sub_run.stats.steps, "tainted": sub_st.tainted}
+            await sub_run.finish()
+            return {
+                "status": "failed",
+                "error": str(e),
+                "result": "",
+                "blocked": guard_state.get("blocked_out") if guard_state else None,
+                "steps": sub_run.stats.steps,
+                "tainted": sub_st.tainted,
+            }
+        finally:
+            if not sub_run.finished:
+                await sub_run.finish()
 
         texts = [b["text"] for b in sub_ui.get("blocks", []) if b.get("type") == "text" and b.get("text")]
         summary = "\n\n".join(texts).strip()
         if not summary:
             t_blocks = [b.get("content", "") for b in sub_ui.get("blocks", []) if b.get("type") == "tool" and b.get("content")]
             summary = "\n".join(t_blocks)[-2000:] or "节点执行完成（无文本摘要）。"
+        blocked_out = guard_state.get("blocked_out") if guard_state else None
+        stall_out = guard_state.get("stall_out") if guard_state else None
+        node_status = "failed" if (blocked_out or stall_out) else "done"
+        node_err = (
+            f"mission_blocked:{blocked_out['reason']}" if blocked_out
+            else (f"stall:{stall_out.get('detail')}" if stall_out else None)
+        )
         return {
-            "status": "done",
+            "status": node_status,
             "result": summary,
+            "error": node_err,
+            "blocked": blocked_out,
+            "stall_signal": stall_out,
             "steps": sub_run.stats.steps,
             "tokens": int((sub_sess.usage or {}).get("used", 0) or 0),
             "tool_calls": sum(1 for b in sub_ui.get("blocks", []) if b.get("type") == "tool"),
@@ -1787,9 +2032,10 @@ class Agent:
         max_steps = max(1, min(int((mission.budget or {}).get("episode_max_steps") or 25), 40))
 
         err: str | None = None
+        loop_status = "done"
         try:
             await self.engine.ensure_ready()
-            _st_res, loop_err = await self._loop(ep_run, ep_sess, ep_st, ep_ctx, ep_ui, max_steps_override=max_steps)
+            loop_status, loop_err = await self._loop(ep_run, ep_sess, ep_st, ep_ctx, ep_ui, max_steps_override=max_steps)
             err = loop_err or ep_ui.get("error")
         except asyncio.CancelledError:
             if guard_state["blocked_out"] is None and guard_state["stall_out"] is None and not cancel_event.is_set():
@@ -1811,12 +2057,27 @@ class Agent:
             summary = "\n".join(t_blocks)[-1500:] or f"Episode #{episode.id} finished."
         tool_cnt = sum(1 for b in ep_ui.get("blocks", []) if b.get("type") == "tool")
         tokens_used = int((ep_sess.usage or {}).get("used", 0) or 0)
+
+        ho_meta = _extract_episode_handoff(summary, loop_status, has_acceptance=bool(getattr(milestone, "acceptance", None)), tool_calls=tool_cnt)
+        if ho_meta.get("clean_summary"):
+            summary = ho_meta["clean_summary"]
+        ms_ready = (
+            guard_state["blocked_out"] is None
+            and guard_state["stall_out"] is None
+            and not err
+            and not cancel_event.is_set()
+            and loop_status != "max_steps"
+            and bool(ho_meta.get("milestone_ready", True))
+        )
         return EpisodeOutcome(
             steps=max(1, ep_run.stats.steps),
             tokens=tokens_used,
             tool_calls=tool_cnt,
             summary=summary[:2500],
-            milestone_ready=(guard_state["blocked_out"] is None and guard_state["stall_out"] is None and not err and not cancel_event.is_set()),
+            milestone_ready=ms_ready,
+            next_actions=list(ho_meta.get("next_actions") or []),
+            open_questions=list(ho_meta.get("open_questions") or []),
+            decisions=list(ho_meta.get("decisions") or []),
             blocked=guard_state["blocked_out"],
             stall_signal=guard_state["stall_out"],
             run_id=ep_run.id,

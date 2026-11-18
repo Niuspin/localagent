@@ -142,8 +142,12 @@
 
 ## MCP 生态、Model Hub、记忆、技能与系统控制
 
-- **MCP (`/api/mcp`, `/api/mcp/{name}`, `/api/mcp/{name}/start|stop`)**: 支持 `"stdio"`（`sandbox` 受控启动）与 `"http"`（Streamable HTTP / SSE，Header 密钥隔离脱敏）传输；支持复杂 JSON Schema (`$ref`/`$defs`/`anyOf`/`oneOf`) 与 `roots/list`、`list_changed` 热推送。
-- **MCP Resources / Prompts**: `GET /api/mcp/{name}/resources`、`POST /api/mcp/{name}/resources/read`、`GET /api/mcp/{name}/prompts`、`POST /api/mcp/{name}/prompts/get`。
+- **MCP (`/api/mcp`, `/api/mcp/catalog`, `/api/mcp/{name}`, `/api/mcp/{name}/start|stop`)**: 支持 `"stdio"`（`sandbox` 受控启动）与 `"http"`（Streamable HTTP + 双向 GET SSE 通知监听器，Header 密钥隔离脱敏）传输；支持复杂 JSON Schema (`$ref`/`$defs`/`anyOf`/`oneOf`) 与 `roots/list`、`list_changed` 热推送，以及 `/mcp:<server>:<prompt>` 与 `@mcp:<server>:<uri>` 绑定调用。
+- **MCP Resources / Prompts**: `GET /api/mcp/catalog`、`GET /api/mcp/{name}/resources`、`POST /api/mcp/{name}/resources/read`、`GET /api/mcp/{name}/prompts`、`POST /api/mcp/{name}/prompts/get`。
+- **会话分支与运行中实时转向**:
+  - `POST /api/sessions/{sid}/fork` (`{"from_index"?: int, "title"?: str}`): 从指定消息位置克隆独立分支会话（`201 Created`），配合 Append-Only JSONL 增量步存提升长对话可靠性。
+  - `POST /api/runs/{rid}/steer` (`{"text": str}`): 向运行中的 Run 注入实时转向指令（在当前步或下一次 LLM 请求前立即生效，触发 `steer_queued` / `steer_applied` SSE 事件）。
+- **无头 CLI 与多协议模式 (`run.py` / `lagent.launcher`)**: 支持 `-p/--prompt <text>`（`--output-format text|json` 单次执行）、`--daemon`（关窗后台守护）与 `--acp`（ACP JSON-RPC 2.0 stdio 模式）。
 - **Model Hub (`/api/hub/recommend`, `/api/hub/downloads`, `/api/hub/download`, `/api/hub/downloads/{tid}/cancel`)**: 硬件显存/内存自适应推荐、官方/国内镜像（`hf-mirror`）切换、HTTP `Range` 断点续传与 SHA-256 校验（离线模式严格拦截）。
 - **记忆 (`/api/memory`, `/api/memory/export`, `/api/memory/import`, `/api/memory/{mid}`, `/api/memory/{mid}/approve`)**: SQLite FTS5 + `mem_vectors` 混合向量 RRF 检索与污染记忆人工审批。
 - **技能 (`/api/skills`, `/api/skills/packs`, `/api/skills/pack`, `/api/skills/lint`, `/api/skills/route`, `/api/skills/install`, `/api/skills/create`, `/api/skills/{name}`, `/api/skills/{name}/enable`)**: Spec v2 内置技能包与自定义技能管理：`/api/skills` 返回 `pack`/`tags`/`risk`/`version`/`description_en`/`allowed_tools` 等元数据；`/api/skills/packs` 返回 7 大技能包统计与 `skills.lock` SHA-256 校验状态；`/api/skills/pack`（`{"pack": str, "enabled": bool}`）按包批量启停；`/api/skills/route`（`{"text": str, "files"?: list, "mimes"?: list, "top_k"?: int}`）执行自动路由匹配；`/api/skills/lint` 运行规范与完整性检查。

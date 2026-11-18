@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import difflib
 import subprocess
 import time
@@ -22,8 +23,17 @@ class ConflictCard:
     details: list[dict[str, Any]]
     status: str = "pending"          # pending | resolved_ours | resolved_theirs | dismissed
     created_at: float = field(default_factory=time.time)
+    snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        # snapshots 仅作磁盘恢复使用，摘要视图省略大 blob 可读更清晰，但保留 has_snapshots 标志
+        snaps = d.pop("snapshots", {}) or {}
+        if snaps:
+            d["has_snapshots"] = True
+        return d
+
+    def to_persist_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -142,6 +152,7 @@ class MergeQueue:
         self._lock = asyncio.Lock()
         self.history: list[dict[str, Any]] = []
         self.conflicts: dict[str, ConflictCard] = {}
+        self._payloads: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _git_show(repo: Path, rev_path: str) -> tuple[bool, bytes]:
@@ -300,15 +311,62 @@ class MergeQueue:
                 staged.append((dst, rel, ours_live, merged_txt.encode("utf-8")))
 
         if conflict_files:
+            snaps: dict[str, dict[str, Any]] = {}
+            payload_items: list[dict[str, Any]] = []
+            for rel in conflict_files:
+                _b, _o, theirs_val = file_ops[rel]
+                dst = (workspace / rel).resolve()
+                dst.relative_to(workspace)
+                ours_live = dst.read_bytes() if dst.is_file() else _o
+                payload_items.append({"rel": rel, "conflict": True, "before": ours_live, "theirs": theirs_val})
+                if (len(ours_live or b"") + len(theirs_val or b"")) <= 512_000:
+                    snaps[rel] = {
+                        "conflict": True,
+                        "before_b64": base64.b64encode(ours_live).decode("ascii") if ours_live is not None else None,
+                        "theirs_b64": base64.b64encode(theirs_val).decode("ascii") if theirs_val is not None else None,
+                    }
+            for dst, rel, before_b, after_b in staged:
+                payload_items.append({"rel": rel, "conflict": False, "before": before_b, "after": after_b})
+                if (len(before_b or b"") + len(after_b or b"")) <= 512_000:
+                    snaps[rel] = {
+                        "conflict": False,
+                        "before_b64": base64.b64encode(before_b).decode("ascii") if before_b is not None else None,
+                        "after_b64": base64.b64encode(after_b).decode("ascii") if after_b is not None else None,
+                    }
             card = ConflictCard(
                 id=f"cnf_{uuid.uuid4().hex[:10]}",
                 agent_id=agent_id,
                 files=conflict_files,
                 details=conflict_details,
+                snapshots=snaps,
             )
+            self._payloads[card.id] = {
+                "workspace": str(workspace),
+                "session_id": session_id,
+                "turn_id": turn_id or agent_id,
+                "items": payload_items,
+            }
             self.conflicts[card.id] = card
             return MergeResult(ok=False, conflict=card, error=f"检测到 {len(conflict_files)} 个合并冲突，主工作区保持未修改")
 
+        merged_rels = self._commit_staged(staged, agent_id=agent_id, session_id=session_id, turn_id=turn_id)
+        rec = {
+            "ts": round(time.time(), 3),
+            "agent_id": agent_id,
+            "files": merged_rels,
+            "status": "merged",
+        }
+        self.history.append(rec)
+        return MergeResult(ok=True, merged_files=merged_rels, diff_summary=f"已安全合并 {len(merged_rels)} 个文件")
+
+    def _commit_staged(
+        self,
+        staged: list[tuple[Path, str, bytes | None, bytes | None]],
+        *,
+        agent_id: str,
+        session_id: str = "",
+        turn_id: str = "",
+    ) -> list[str]:
         merged_rels: list[str] = []
         for dst, rel, before_b, after_b in staged:
             existed = before_b is not None and dst.is_file()
@@ -355,20 +413,87 @@ class MergeQueue:
                     except OSError:
                         pass
             merged_rels.append(rel)
+        return merged_rels
 
-        rec = {
-            "ts": round(time.time(), 3),
-            "agent_id": agent_id,
-            "files": merged_rels,
-            "status": "merged",
-        }
-        self.history.append(rec)
-        return MergeResult(ok=True, merged_files=merged_rels, diff_summary=f"已安全合并 {len(merged_rels)} 个文件")
+    def load_conflicts(self, raw_conflicts: list[dict[str, Any]] | None) -> None:
+        for rc in raw_conflicts or []:
+            if not isinstance(rc, dict) or not rc.get("id"):
+                continue
+            cid = str(rc["id"])
+            card = ConflictCard(
+                id=cid,
+                agent_id=str(rc.get("agent_id") or ""),
+                files=list(rc.get("files") or []),
+                details=list(rc.get("details") or []),
+                status=str(rc.get("status") or "pending"),
+                created_at=float(rc.get("created_at") or time.time()),
+                snapshots=dict(rc.get("snapshots") or {}),
+            )
+            self.conflicts[cid] = card
 
-    def resolve_conflict(self, conflict_id: str, decision: str) -> ConflictCard | None:
+    def resolve_conflict(
+        self,
+        conflict_id: str,
+        decision: str,
+        *,
+        workspace: str | Path | None = None,
+        session_id: str = "",
+        turn_id: str = "",
+    ) -> ConflictCard | None:
         card = self.conflicts.get(conflict_id)
         if not card:
             return None
-        if decision in ("resolved_ours", "resolved_theirs", "dismissed"):
-            card.status = decision
+        if decision not in ("resolved_ours", "resolved_theirs", "dismissed"):
+            return card
+
+        if decision in ("resolved_ours", "resolved_theirs"):
+            pay = self._payloads.get(conflict_id)
+            ws_raw = workspace or (pay.get("workspace") if pay else None)
+            if ws_raw:
+                ws = Path(ws_raw).resolve()
+                sid = session_id or (pay.get("session_id") if pay else "") or ""
+                tid = turn_id or (pay.get("turn_id") if pay else "") or card.agent_id
+                staged: list[tuple[Path, str, bytes | None, bytes | None]] = []
+                if pay:
+                    for it in pay.get("items") or []:
+                        rel = str(it["rel"])
+                        dst = (ws / rel).resolve()
+                        dst.relative_to(ws)
+                        before_b = dst.read_bytes() if dst.is_file() else it.get("before")
+                        if not it.get("conflict"):
+                            staged.append((dst, rel, before_b, it.get("after")))
+                        elif decision == "resolved_theirs":
+                            staged.append((dst, rel, before_b, it.get("theirs")))
+                elif card.snapshots:
+                    for rel, sn in card.snapshots.items():
+                        dst = (ws / rel).resolve()
+                        dst.relative_to(ws)
+                        b_b64 = sn.get("before_b64")
+                        before_b = dst.read_bytes() if dst.is_file() else (base64.b64decode(b_b64) if b_b64 else None)
+                        if not sn.get("conflict"):
+                            a_b64 = sn.get("after_b64")
+                            staged.append((dst, rel, before_b, base64.b64decode(a_b64) if a_b64 is not None else None))
+                        elif decision == "resolved_theirs":
+                            t_b64 = sn.get("theirs_b64")
+                            staged.append((dst, rel, before_b, base64.b64decode(t_b64) if t_b64 is not None else None))
+                if staged:
+                    merged_rels = self._commit_staged(staged, agent_id=card.agent_id, session_id=sid, turn_id=tid)
+                    self.history.append({
+                        "ts": round(time.time(), 3),
+                        "agent_id": card.agent_id,
+                        "files": merged_rels,
+                        "status": decision,
+                        "conflict_id": conflict_id,
+                    })
+                elif decision == "resolved_ours":
+                    self.history.append({
+                        "ts": round(time.time(), 3),
+                        "agent_id": card.agent_id,
+                        "files": list(card.files),
+                        "status": decision,
+                        "conflict_id": conflict_id,
+                    })
+
+        self._payloads.pop(conflict_id, None)
+        card.status = decision
         return card

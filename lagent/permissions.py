@@ -49,20 +49,119 @@ def match_glob(target: str, pattern: str) -> bool:
     return False
 
 
+def split_shell_segments(cmd: str) -> tuple[list[str], bool]:
+    """按引号感知拆解复合 shell 命令段，并检测子 shell/命令替换/重定向等绕过语法。
+
+    返回 (segments, has_unsafe_syntax)：
+    - 若存在反引号、$(...)、<(、>(、裸换行注入、非引号内的输入输出重定向 > / >>，has_unsafe_syntax=True；
+    - 否则按 &&, ||, ;, |, & 拆分并返回各独立非空命令段。
+    """
+    s = (cmd or "").strip()
+    if not s:
+        return [], False
+    if "\n" in s or "\r" in s or "\x00" in s:
+        return [], True
+    segs: list[str] = []
+    buf: list[str] = []
+    in_sq = False
+    in_dq = False
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "\\" and not in_sq and i + 1 < n:
+            buf.append(ch)
+            buf.append(s[i + 1])
+            i += 2
+            continue
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_sq:
+            in_dq = not in_dq
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_sq:
+            if ch == "`":
+                return [], True
+            if ch == "$" and i + 1 < n and s[i + 1] == "(":
+                return [], True
+        if not in_sq and not in_dq:
+            if ch in ("(", ")"):
+                return [], True
+            if ch == ">" or (ch == "<" and i + 1 < n and s[i + 1] == "("):
+                return [], True
+            if s[i:i + 2] in ("&&", "||"):
+                part = "".join(buf).strip()
+                if part:
+                    segs.append(part)
+                buf.clear()
+                i += 2
+                continue
+            if ch in (";", "|", "&"):
+                part = "".join(buf).strip()
+                if part:
+                    segs.append(part)
+                buf.clear()
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    if in_sq or in_dq:
+        return [], True
+    tail = "".join(buf).strip()
+    if tail:
+        segs.append(tail)
+    return segs, False
+
+
+def _match_single_command(seg: str, pattern: str) -> bool:
+    seg = (seg or "").strip()
+    pattern = (pattern or "").strip()
+    if not seg or not pattern:
+        return False
+    if pattern in ("*", "**"):
+        return True
+    if fnmatch.fnmatch(seg, pattern):
+        return True
+    if pattern.endswith("*"):
+        raw_base = pattern[:-1]
+        base = raw_base.strip()
+        if not base:
+            return True
+        if raw_base.endswith(" "):
+            return seg == base or seg.startswith(base + " ") or seg.startswith(base + "\t")
+        if seg == base or seg.startswith(base + " ") or seg.startswith(base + "\t"):
+            return True
+    return False
+
+
 def match_command(cmd: str, pattern: str) -> bool:
-    """命令通配符匹配，如 'git status*' 匹配 'git status' 和 'git status -s'。"""
+    """安全命令通配符匹配：拆分 && / || / ; / | 复合段，阻止命令替换与拼接绕过。"""
     cmd = (cmd or "").strip()
     pattern = pattern.strip()
     if pattern in ("*", "**"):
         return True
-    if fnmatch.fnmatch(cmd, pattern):
+    segs, unsafe = split_shell_segments(cmd)
+    if unsafe or not segs:
+        return False
+    return all(_match_single_command(seg, pattern) for seg in segs)
+
+
+def match_commands(cmd: str, patterns: list[str] | tuple[str, ...] | set[str]) -> bool:
+    """针对白名单列表匹配复合命令：每条拆分后的命令段都必须命中至少一条允许规则。"""
+    pats = [str(p).strip() for p in patterns if str(p).strip()]
+    if not pats:
+        return False
+    if any(p in ("*", "**") for p in pats):
         return True
-    # 去除末尾通配符后前缀匹配
-    if pattern.endswith("*"):
-        base = pattern[:-1].strip()
-        if cmd.startswith(base):
-            return True
-    return False
+    segs, unsafe = split_shell_segments(cmd)
+    if unsafe or not segs:
+        return False
+    return all(any(_match_single_command(seg, pat) for pat in pats) for seg in segs)
 
 
 @dataclass
@@ -89,6 +188,40 @@ def parse_rule(raw: str, action: str) -> PermissionRule:
         "tool": "tool",
     }.get(typ, typ)
     return PermissionRule(action=action, rule_type=norm_type, pattern=pat, raw=raw_str)
+
+
+def infer_delegated_kind(name: str, args: dict[str, Any], default_kind: str) -> str:
+    """识别派生子代理/Swarm 任务是否包含写能力节点，用于防止只读策略绕过。"""
+    if name in ("delegate_task", "spawn_agent"):
+        if args.get("mode") == "worker":
+            return "write"
+        role = str(args.get("role") or "").strip().lower()
+        if role:
+            try:
+                from .swarm.roles import get_role
+                if get_role(role).write_capable:
+                    return "write"
+            except Exception:  # noqa: BLE001
+                if role in ("coder", "worker", "editor", "fixer"):
+                    return "write"
+    elif name == "swarm_plan":
+        nodes = args.get("nodes")
+        if isinstance(nodes, list):
+            for nd in nodes:
+                if not isinstance(nd, dict):
+                    continue
+                if nd.get("mode") == "worker":
+                    return "write"
+                role = str(nd.get("role") or "").strip().lower()
+                if role:
+                    try:
+                        from .swarm.roles import get_role
+                        if get_role(role).write_capable:
+                            return "write"
+                    except Exception:  # noqa: BLE001
+                        if role in ("coder", "worker", "editor", "fixer"):
+                            return "write"
+    return default_kind
 
 
 class PermissionManager:
@@ -166,13 +299,21 @@ class PermissionManager:
         sensitive: str | None = None,
         command: str | None = None,
         sandboxed: bool = True,
+        mode: str = "ask",
     ) -> sec.Decision | None:
         """评估自定义规则。返回 sec.Decision 或 None（无匹配时回退到默认 Policy）。"""
-        # 1. 绝对硬拒绝：不可被任何规则绕过
+        # 1. 绝对硬拒绝与只读模式不变量：不可被工作区规则文件绕过
         if command:
             hard = sec.hard_deny_reason(command)
             if hard:
                 return sec.Decision("deny", f"命令被系统安全规则硬拒绝（{hard}）", "high", "hard_deny")
+
+        risk = {"write": "medium", "delete": "high", "exec": "high", "skill": "high", "mcp": "high", "net_fetch": "medium"}.get(kind, "low")
+        key_ro = f"exec:{sec.normalize_cmd(command)}" if (kind == "exec" and command) else name
+        if mode == "plan" and kind in ("write", "delete", "exec", "skill", "mcp"):
+            return sec.Decision("deny", "当前为「规划（只读）」模式：不能修改文件、执行命令或调用外部工具。请切换权限模式后重试。", risk, key_ro)
+        if mode == "verify" and kind in ("write", "delete", "skill", "mcp"):
+            return sec.Decision("deny", "验证子代理禁止写入、删除、改技能或调用外部工具，仅可执行只读检查与验证命令。", risk, key_ro)
 
         path = ""
         for k in ("path", "src", "dst"):

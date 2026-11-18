@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .. import security as sec
+from . import shadow_git
 from .budget import MissionBudgetTracker
 from .gates import format_gate_failures, run_acceptance_checks
 from .model import (
@@ -141,14 +142,32 @@ def _git_commit_milestone(ws: Path, mission_id: str, ms: Milestone) -> str | Non
     return head.stdout.strip() if head.returncode == 0 else None
 
 
-def _git_rollback(ws: Path, commit_sha: str) -> bool:
+def _git_rollback(ws: Path, commit_sha: str, *, preserve_untracked: set[str] | None = None) -> bool:
+    """回滚 Git 提交点，同时保护 Mission 启动前既有未跟踪文件及 .localagent 状态目录（绝不盲目 git clean -fd）。"""
     if not _is_git_repo(ws) or not commit_sha:
         return False
     res = _run_git(ws, "reset", "--hard", commit_sha)
     if res.returncode != 0:
         return False
-    _run_git(ws, "clean", "-fd", "-e", ".localagent/")
+    pres = {p.replace("\\", "/").strip("/") for p in (preserve_untracked or set())}
+    st = _run_git(ws, "ls-files", "--others", "--exclude-standard")
+    if st.returncode == 0:
+        for ln in (st.stdout or "").splitlines():
+            rel = ln.strip().replace("\\", "/")
+            if not rel or rel.startswith(".localagent/") or rel in pres:
+                continue
+            p = (ws / rel).resolve()
+            try:
+                p.relative_to(ws.resolve())
+                if p.is_file() or p.is_symlink():
+                    p.unlink()
+            except Exception:  # noqa: BLE001
+                continue
     return True
+
+
+def _shadow_dir(ws: Path, mission_id: str) -> Path:
+    return ws / ".localagent" / "missions" / "shadow.git"
 
 
 def build_episode_prompt(
@@ -543,7 +562,10 @@ class MissionManager:
         if m is None:
             raise KeyError(f"mission not found: {mission_id}")
         ws = Path(m.workspace) if m.workspace else None
-        if ws is None or not _is_git_repo(ws):
+        if ws is None or not ws.is_dir():
+            raise ValueError("当前工作区无效，无法执行回滚")
+        use_shadow = str((m.policy or {}).get("_git_mode") or "") == "shadow" or not _is_git_repo(ws)
+        if not use_shadow and not _is_git_repo(ws):
             raise ValueError("当前工作区不是 Git 仓库，无法执行提交点回滚")
 
         target_sha: str | None = None
@@ -564,7 +586,12 @@ class MissionManager:
         if m.id in self._tasks and not self._tasks[m.id].done():
             self.pause_mission(m.id, reason="rollback")
 
-        if not _git_rollback(ws, target_sha):
+        preserve = set((m.policy or {}).get("_pre_existing_untracked") or [])
+        if use_shadow:
+            ok_rb = shadow_git.rollback(ws, _shadow_dir(ws, m.id), target_sha, preserve_paths=preserve)
+        else:
+            ok_rb = _git_rollback(ws, target_sha, preserve_untracked=preserve)
+        if not ok_rb:
             raise RuntimeError(f"git reset 回滚失败: {target_sha}")
 
         if target_idx is not None:
@@ -604,16 +631,30 @@ class MissionManager:
             cur_m.budget = dict(tracker.cfg)
             return self.store.save(cur_m, prefer_disk=prefer_disk)
 
-        # 建立隔离 git 分支（若工作区为 Git 仓库）
-        if not m.base_commit and _is_git_repo(ws):
-            base_br, base_sha, active_br = await asyncio.to_thread(
-                _setup_mission_branch, ws, str(m.branch or f"mission/{m.id}")
-            )
-            m.base_branch = m.base_branch or base_br
-            m.base_commit = m.base_commit or base_sha
-            if active_br:
-                m.branch = active_br
-            self.store.save(m)
+        # 建立隔离检查点（优先遵守 git_strategy=shadow，其次在 git 仓库创建 mission/<id> 并快照保护既有未跟踪文件，非 git 仓库退化到 Shadow Git）
+        git_strategy = str((m.policy or {}).get("git_strategy") or "auto").lower()
+        if not m.base_commit:
+            if git_strategy == "shadow" or (not _is_git_repo(ws) and shadow_git.has_git()):
+                m.policy["_git_mode"] = "shadow"
+                m.policy["_pre_existing_untracked"] = m.policy.get("_pre_existing_untracked") or shadow_git.list_user_untracked(ws)
+                sh_sha = await asyncio.to_thread(shadow_git.snapshot, ws, _shadow_dir(ws, m.id), f"mission({m.id}): base")
+                if sh_sha:
+                    m.base_commit = sh_sha
+                    m.branch = m.branch or f"shadow/{m.id}"
+                    self.store.save(m)
+            elif _is_git_repo(ws):
+                m.policy["_git_mode"] = "branch"
+                pre_untracked = await asyncio.to_thread(shadow_git.list_user_untracked, ws)
+                m.policy["_pre_existing_untracked"] = pre_untracked
+                await asyncio.to_thread(shadow_git.snapshot, ws, _shadow_dir(ws, m.id), f"pre-mission({m.id})")
+                base_br, base_sha, active_br = await asyncio.to_thread(
+                    _setup_mission_branch, ws, str(m.branch or f"mission/{m.id}")
+                )
+                m.base_branch = m.base_branch or base_br
+                m.base_commit = m.base_commit or base_sha
+                if active_br:
+                    m.branch = active_br
+                self.store.save(m)
 
         self._inhibitor.acquire()
         hb_task = asyncio.create_task(self._heartbeat_loop(m.id, tracker))
@@ -912,9 +953,14 @@ class MissionManager:
                         ms.error = None
                         ms.completed_at = time.time()
                         ep.status = "completed"
-                        if m.policy.get("auto_commit", True) and _is_git_repo(ws):
+                        if m.policy.get("auto_commit", True):
                             _persist(m, prefer_disk=False)
-                            sha = await asyncio.to_thread(_git_commit_milestone, ws, m.id, ms)
+                            if str((m.policy or {}).get("_git_mode") or "") == "shadow" or not _is_git_repo(ws):
+                                sha = await asyncio.to_thread(
+                                    shadow_git.snapshot, ws, _shadow_dir(ws, m.id), f"mission({m.id}): {ms.id} - {ms.title}"
+                                )
+                            else:
+                                sha = await asyncio.to_thread(_git_commit_milestone, ws, m.id, ms)
                             if sha:
                                 ms.commit_sha = sha
                         self._record_timeline(m, "milestone_done", {
@@ -1001,6 +1047,8 @@ class MissionManager:
         ws: Path,
         spec: dict[str, Any],
         default_role: str,
+        approved_actions: set[str] | None = None,
+        watchdog: StallWatchdog | None = None,
         cancel_event: asyncio.Event | None = None,
         timeout_s: float = 600.0,
     ) -> Any:
@@ -1015,6 +1063,9 @@ class MissionManager:
             explicit_auto_worker=(mission.mode == "unattended"),
             budget=spec.get("budget") if isinstance(spec.get("budget"), dict) else None,
             mission_id=mission.id,
+            mission_policy=dict(mission.policy or {}),
+            mission_approved=set(approved_actions or ()),
+            watchdog=watchdog,
             start=True,
         )
         wait_done = asyncio.create_task(sw.done_evt.wait())
@@ -1066,6 +1117,8 @@ class MissionManager:
                         ws=ws,
                         spec=spec,
                         default_role=default_role,
+                        approved_actions=approved_actions,
+                        watchdog=watchdog,
                         cancel_event=cancel_event,
                     )
                     nodes = list(sw.graph.nodes.values())
@@ -1074,7 +1127,9 @@ class MissionManager:
                     tokens = int(totals.get("tokens") or 0)
                     tool_calls = int(totals.get("tool_calls") or 0)
                     steps = max(1, int(totals.get("steps") or 0), len(nodes))
-                    ok = sw.status == "done" and bool(nodes) and done_cnt == len(nodes)
+                    blocked_sig = getattr(sw, "last_blocked", None)
+                    stall_sig = getattr(sw, "last_stall", None)
+                    ok = sw.status == "done" and bool(nodes) and done_cnt == len(nodes) and blocked_sig is None and stall_sig is None
                     node_notes = [f"[{n.role}:{n.status}] {(n.result or n.error or '')[:200]}" for n in nodes[:6]]
                     summary = f"Swarm {sw.id}: {sw.status} ({done_cnt}/{len(nodes)})"
                     if node_notes:
@@ -1085,7 +1140,9 @@ class MissionManager:
                         tool_calls=tool_calls,
                         summary=summary,
                         milestone_ready=ok,
-                        error=None if ok else f"swarm_{sw.status}",
+                        blocked=blocked_sig,
+                        stall_signal=stall_sig,
+                        error=None if (ok or blocked_sig or stall_sig) else f"swarm_{sw.status}",
                     )
                 except asyncio.CancelledError:
                     raise

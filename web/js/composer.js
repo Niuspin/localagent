@@ -72,8 +72,10 @@
     LA.clear(hint);
     if (run) {
       if (hasContent() && !busy) {
-        hint.appendChild(document.createTextNode('运行中 · 按 Enter 排队 · '));
-        hint.appendChild(el('a', { text: '加入队列', on: { click: function () { enqueueDraft(); } } }));
+        hint.appendChild(document.createTextNode('运行中 · '));
+        hint.appendChild(el('a', { text: '插话转向', title: '在当前步骤完成后立即注入指令转向（Ctrl+Enter）', on: { click: function () { steerLive(); } } }));
+        hint.appendChild(document.createTextNode(' · '));
+        hint.appendChild(el('a', { text: '加入队列', title: '等待当前回答结束后发送（Enter）', on: { click: function () { enqueueDraft(); } } }));
       } else if (queued.length) {
         hint.textContent = '已完成本轮后将自动发送队列 (' + queued.length + ')';
       }
@@ -420,6 +422,16 @@
       ));
     });
   }
+  function steerLive() {
+    if (!LA.live || busy) return;
+    var text = input.value.trim();
+    if (!text) return;
+    busy = true; updateSend();
+    LA.post('/api/runs/' + LA.live.runId + '/steer', { text: text }).then(function () {
+      input.value = ''; autosize(); closePop();
+      LA.toast('已注入实时转向指令，将在下一步生效', 'ok', 2200);
+    }).catch(LA.fail).then(function () { busy = false; updateSend(); });
+  }
   function enqueueDraft() {
     var text = input.value.trim();
     if (LA.S.attachments.some(function (a) { return a.uploading; })) { LA.toast('附件还在上传…'); return; }
@@ -523,7 +535,12 @@
       if (e.key === 'Escape' && !pop.hidden) { e.preventDefault(); e.stopPropagation(); closePop(); return; }
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
         e.preventDefault();
-        if (LA.live) { if (hasContent() && !busy) enqueueDraft(); }
+        if (LA.live) {
+          if (hasContent() && !busy) {
+            if (e.ctrlKey || e.metaKey) steerLive();
+            else enqueueDraft();
+          }
+        }
         else if (!btnSend.disabled) send();
       }
       if (e.key === 'Backspace' && !input.value && LA.S.chosen.length) { LA.S.chosen.pop(); renderChips(); }

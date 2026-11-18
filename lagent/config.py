@@ -25,7 +25,7 @@ SECRETS_PATH = DATA_DIR / "secrets.json"
 
 SECRET_NAMES = (
     "brave", "google_cse", "google_cx", "tavily", "serper",
-    "compact_api_key", "embed_api_key", "swarm_worker_api_key",
+    "main_api_key", "compact_api_key", "embed_api_key", "swarm_worker_api_key",
 )
 SEARCH_PROVIDERS = ("duckduckgo", "bing", "baidu", "yahoo", "brave", "google_cse", "searxng", "tavily", "serper")
 _ROLE_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
@@ -66,6 +66,10 @@ DEFAULTS: dict[str, Any] = {
         "compact_endpoint": "",               # 可选：用于摘要压缩的外部 OpenAI / Anthropic 兼容端点（留空走本地引擎）
         "compact_model": "",                  # 可选：摘要压缩专用轻量模型名
         "compact_provider": "auto",           # compact 协议：auto / openai / anthropic
+        "main_endpoint": "",                  # 可选：主对话外部 OpenAI / Anthropic 兼容端点（留空走本地 llama-server）
+        "main_model": "",                     # 可选：主对话外部模型名
+        "main_provider": "auto",              # 主对话协议：auto / local / openai / anthropic
+        "gbnf_fallback": True,                # 小模型结构化输出与工具调用失败时的 GBNF 语法兜底
         "embed_endpoint": "",                 # 可选：外部 Embedding 端点（/v1/embeddings，留空走本地引擎或离线哈希向量）
         "embed_model": "",                    # 可选：Embedding 模型名
     },
@@ -253,6 +257,7 @@ SPECIAL: dict[str, Callable[[str, Any], Any]] = {
     "agent.permission_mode": _enum("ask", "auto_edit", "plan", "auto"),
     "agent.profile": _enum("auto", "compact", "standard", "large", "off"),
     "agent.compact_provider": _enum("auto", "openai", "anthropic"),
+    "agent.main_provider": _enum("auto", "local", "openai", "anthropic"),
     "security.command_sandbox": _enum("auto", "off"),
     "search.mode": _enum("merge", "first"),
     "search.safe": _enum("off", "moderate", "strict"),

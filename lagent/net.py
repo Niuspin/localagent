@@ -440,3 +440,121 @@ async def sse_post(host: str, port: int, path: str, body: dict, headers: dict | 
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+async def sse_post_url(
+    url: str,
+    body: dict,
+    *,
+    headers: dict[str, str] | None = None,
+    read_timeout: float = 300.0,
+    allow_private: bool = True,
+) -> AsyncIterator[dict]:
+    """向通用 HTTP/HTTPS SSE 端点 POST 并逐事件产出解析后的 JSON dict（支持 OpenAI 与 Anthropic 流格式）。"""
+    sp = urlsplit(url)
+    if sp.scheme not in ("http", "https"):
+        raise NetError(f"只支持 http/https: {url[:80]}")
+    host = sp.hostname or ""
+    if os.environ.get("LOCALAGENT_OFFLINE") == "1" and host.lower().strip("[]") not in ("127.0.0.1", "::1", "localhost"):
+        raise NetError("离线模式（--offline）已禁用所有外部网络连接")
+    port = sp.port or (443 if sp.scheme == "https" else 80)
+    path = (sp.path or "/") + (("?" + sp.query) if sp.query else "")
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+    stop = threading.Event()
+    holder: dict[str, Any] = {}
+
+    def put(item: tuple) -> None:
+        try:
+            loop.call_soon_threadsafe(q.put_nowait, item)
+        except RuntimeError:
+            pass
+
+    def worker() -> None:
+        try:
+            ctx = ssl.create_default_context() if sp.scheme == "https" else None
+            if allow_private:
+                conn = (
+                    http.client.HTTPSConnection(host, port, timeout=15, context=ctx)
+                    if sp.scheme == "https"
+                    else http.client.HTTPConnection(host, port, timeout=15)
+                )
+            else:
+                ips = resolve_public(host, port)
+                conn = (
+                    _PinnedHTTPS(host, port, ips, 15, ctx)
+                    if sp.scheme == "https"
+                    else _PinnedHTTP(host, port, ips, 15)
+                )
+            holder["conn"] = conn
+            hdrs = {
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                "User-Agent": UA,
+                **(headers or {}),
+            }
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            conn.request("POST", path, body=data, headers=hdrs)
+            if conn.sock:
+                conn.sock.settimeout(read_timeout)
+            resp = conn.getresponse()
+            if resp.status >= 400:
+                put(("http_error", resp.status, resp.read(8000).decode("utf-8", "replace")))
+                return
+            cur_event = ""
+            while not stop.is_set():
+                line_b = resp.readline()
+                if not line_b:
+                    break
+                line = line_b.strip()
+                if not line:
+                    cur_event = ""
+                    continue
+                if line.startswith(b"event:"):
+                    cur_event = line[6:].strip().decode("utf-8", "replace")
+                    continue
+                if not line.startswith(b"data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == b"[DONE]":
+                    break
+                try:
+                    parsed = json.loads(payload)
+                    if isinstance(parsed, dict) and cur_event and "type" not in parsed:
+                        parsed = {**parsed, "_sse_event": cur_event}
+                    put(("data", parsed))
+                except ValueError:
+                    continue
+        except Exception as e:  # noqa: BLE001
+            if not stop.is_set():
+                put(("exc", e))
+        finally:
+            put(("end",))
+
+    t = threading.Thread(target=worker, daemon=True, name="sse-post-url")
+    t.start()
+    try:
+        while True:
+            item = await q.get()
+            k = item[0]
+            if k == "data":
+                yield item[1]
+            elif k == "http_error":
+                raise HTTPStatusError(item[1], item[2])
+            elif k == "exc":
+                raise NetError(f"与远端模型端点通信失败: {item[1]}")
+            else:
+                break
+    finally:
+        stop.set()
+        conn = holder.get("conn")
+        if conn is not None:
+            try:
+                if conn.sock:
+                    conn.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass

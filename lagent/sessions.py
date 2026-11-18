@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import secrets
 import threading
@@ -125,8 +126,11 @@ class Session:
         self.agent_id: str = "main"           # 默认归属主代理
         self.swarm_id: str | None = None
         self.mission_id: str | None = None
+        self.parent_session_id: str | None = None
+        self.forked_from_index: int | None = None
         self.active_run: str | None = None   # 仅内存
         self._migrated_from_v1: bool = False  # 仅内存：首次写回前备份 v1 原文件
+        self._step_persisted_hist: int = 0    # 仅内存：增量 JSONL 已追加的历史水位线
 
     # ------------------------------------------------------------ 序列化
     def to_disk(self) -> dict:
@@ -136,7 +140,8 @@ class Session:
                 "history": self.history, "usage": self.usage, "nonce": self.nonce, "user_domains": self.user_domains, "calib": self.calib,
                 "tool_groups": self.tool_groups, "seen": self.seen, "kv_prune_upto": self.kv_prune_upto,
                 "permission_mode": self.permission_mode, "shell_cwd": self.shell_cwd, "shell_env": self.shell_env,
-                "agent_id": self.agent_id, "swarm_id": self.swarm_id, "mission_id": self.mission_id}
+                "agent_id": self.agent_id, "swarm_id": self.swarm_id, "mission_id": self.mission_id,
+                "parent_session_id": self.parent_session_id, "forked_from_index": self.forked_from_index}
 
     @classmethod
     def from_disk(cls, d: dict) -> "Session":
@@ -146,7 +151,7 @@ class Session:
         s = cls(src["id"], src.get("workspace", ""))
         for k in ("title", "created", "updated", "pinned", "tainted", "summary", "todos", "ui", "history", "usage", "nonce",
                   "user_domains", "calib", "tool_groups", "seen", "kv_prune_upto", "permission_mode", "shell_cwd", "shell_env",
-                  "agent_id", "swarm_id", "mission_id"):
+                  "agent_id", "swarm_id", "mission_id", "parent_session_id", "forked_from_index"):
             if k in src:
                 setattr(s, k, src[k])
         s.schema_version = SESSION_SCHEMA_VERSION
@@ -164,11 +169,13 @@ class Session:
 
     def meta(self) -> dict:
         return {"id": self.id, "title": self.title, "created": self.created, "updated": self.updated, "workspace": self.workspace,
-                "msg_count": len(self.ui), "pinned": self.pinned, "schema_version": self.schema_version}
+                "msg_count": len(self.ui), "pinned": self.pinned, "schema_version": self.schema_version,
+                "parent_session_id": self.parent_session_id}
 
     def view(self) -> dict:
         return {"id": self.id, "schema_version": self.schema_version,
                 "agent_id": self.agent_id, "swarm_id": self.swarm_id, "mission_id": self.mission_id,
+                "parent_session_id": self.parent_session_id, "forked_from_index": self.forked_from_index,
                 "title": self.title, "workspace": self.workspace, "created": self.created, "updated": self.updated,
                 "pinned": self.pinned, "tainted": self.tainted, "summary": self.summary,
                 "permission_mode": self.permission_mode,
@@ -222,6 +229,44 @@ class SessionStore:
             self.save(s)
             return s
 
+    def _events_path(self, sid: str) -> Path:
+        return self.dir / f"{sid}.events.jsonl"
+
+    def _replay_jsonl(self, s: Session) -> bool:
+        ev_p = self._events_path(s.id)
+        if not ev_p.is_file():
+            return False
+        replayed = False
+        try:
+            for ln in ev_p.read_text("utf-8", "replace").splitlines():
+                if not ln.strip():
+                    continue
+                rec = json.loads(ln)
+                kind = rec.get("kind")
+                if kind == "history_append":
+                    idx = int(rec.get("index", len(s.history)))
+                    msg = rec.get("msg")
+                    if isinstance(msg, dict):
+                        if idx == len(s.history):
+                            s.history.append(msg)
+                            replayed = True
+                        elif 0 <= idx < len(s.history):
+                            s.history[idx] = msg
+                            replayed = True
+                elif kind == "ui_tail":
+                    ui_msg = rec.get("ui")
+                    if isinstance(ui_msg, dict) and s.ui and s.ui[-1].get("id") == ui_msg.get("id"):
+                        s.ui[-1] = ui_msg
+                        replayed = True
+                elif kind == "meta":
+                    if "usage" in rec and isinstance(rec["usage"], dict):
+                        s.usage = rec["usage"]
+                        replayed = True
+        except (OSError, ValueError):
+            pass
+        s._step_persisted_hist = len(s.history)
+        return replayed
+
     def get(self, sid: str) -> Session | None:
         if not SID_RE.match(sid or ""):
             return None
@@ -233,6 +278,7 @@ class SessionStore:
                 return None
             try:
                 s = Session.from_disk(json.loads(f.read_text("utf-8")))
+                self._replay_jsonl(s)
                 self._cache[sid] = s
                 self._metas[sid] = s.meta()
                 return s
@@ -242,6 +288,31 @@ class SessionStore:
     def list(self) -> list[dict]:
         with self._lock:
             return [dict(m) for m in sorted(self._metas.values(), key=lambda x: x.get("updated", 0), reverse=True)]
+
+    def save_step(self, s: Session) -> None:
+        """O(1) Append-Only 增量事件追加：运行步骤内避免整文件 JSON 覆写与全盘 fsync。"""
+        with self._lock:
+            self._cache[s.id] = s
+            self._metas[s.id] = s.meta()
+            ev_p = self._events_path(s.id)
+            start = max(0, min(getattr(s, "_step_persisted_hist", 0), len(s.history)))
+            if not ev_p.exists() and not (self.dir / f"{s.id}.json").is_file():
+                self.save(s)
+                return
+            lines: list[str] = []
+            ts = time.time()
+            for idx in range(start, len(s.history)):
+                lines.append(json.dumps({"ts": ts, "kind": "history_append", "index": idx, "msg": s.history[idx]}, ensure_ascii=False))
+            if s.ui:
+                lines.append(json.dumps({"ts": ts, "kind": "ui_tail", "ui": s.ui[-1]}, ensure_ascii=False))
+            lines.append(json.dumps({"ts": ts, "kind": "meta", "usage": s.usage}, ensure_ascii=False))
+            payload = ("\n".join(lines) + "\n").encode("utf-8")
+            fd = os.open(str(ev_p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
+            s._step_persisted_hist = len(s.history)
 
     def save(self, s: Session) -> None:
         with self._lock:
@@ -258,7 +329,53 @@ class SessionStore:
             self._cache[s.id] = s
             self._metas[s.id] = s.meta()
             atomic_write(target, json.dumps(s.to_disk(), ensure_ascii=False).encode("utf-8"))
+            s._step_persisted_hist = len(s.history)
+            try:
+                self._events_path(s.id).unlink(missing_ok=True)
+            except OSError:
+                pass
             self._save_index()
+
+    def fork(self, sid: str, *, at_ui_index: int | None = None, title: str | None = None) -> Session | None:
+        """基于现有会话（或指定 UI 消息索引）安全分支复制出独立新会话，保持原会话不可变。"""
+        with self._lock:
+            src = self.get(sid)
+            if src is None:
+                return None
+            new_s = Session(workspace=src.workspace)
+            new_s.title = (str(title).strip()[:120] if title else f"{src.title[:96]} (分支)")
+            new_s.parent_session_id = src.id
+            new_s.summary = src.summary
+            new_s.todos = copy.deepcopy(src.todos)
+            new_s.user_domains = list(src.user_domains)
+            new_s.calib = src.calib
+            new_s.tool_groups = list(src.tool_groups)
+            new_s.seen = dict(src.seen)
+            new_s.permission_mode = src.permission_mode
+            new_s.shell_cwd = src.shell_cwd
+            new_s.shell_env = dict(src.shell_env)
+            new_s.agent_id = src.agent_id
+            new_s.tainted = src.tainted
+
+            if at_ui_index is None or at_ui_index >= len(src.ui) - 1:
+                new_s.ui = copy.deepcopy(src.ui)
+                new_s.history = copy.deepcopy(src.history)
+                new_s.kv_prune_upto = src.kv_prune_upto
+                new_s.forked_from_index = len(src.ui) - 1 if src.ui else None
+            else:
+                idx = max(0, int(at_ui_index))
+                new_s.ui = copy.deepcopy(src.ui[: idx + 1])
+                new_s.forked_from_index = idx
+                cut_hi: int | None = None
+                if idx + 1 < len(src.ui):
+                    cut_hi = src.ui[idx + 1].get("hist_index")
+                if cut_hi is None:
+                    cur_hi = src.ui[idx].get("hist_index")
+                    cut_hi = (cur_hi + 1) if isinstance(cur_hi, int) else len(src.history)
+                new_s.history = copy.deepcopy(src.history[:cut_hi])
+                new_s.kv_prune_upto = min(src.kv_prune_upto, len(new_s.history))
+            self.save(new_s)
+            return new_s
 
     def delete(self, sid: str) -> bool:
         with self._lock:
@@ -267,7 +384,7 @@ class SessionStore:
             self._metas.pop(sid, None)
             if not existed:
                 return False
-            for suffix in (".json", ".json.bak"):
+            for suffix in (".json", ".json.bak", ".events.jsonl"):
                 try:
                     (self.dir / f"{sid}{suffix}").unlink()
                 except OSError:

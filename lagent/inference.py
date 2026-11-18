@@ -468,19 +468,27 @@ def schema_to_gbnf(schema: dict) -> str:
             if not props:
                 return "json-obj"
             req = set(node.get("required") or [])
-            parts: list[str] = ['"{" ws']
             keys = list(props.keys())
+            req_keys = [k for k in keys if k in req]
+            # 若全量或最后字段可选，先用所有必填字段成序列或宽松合法对象，避免尾逗号非法 JSON
+            if len(req_keys) == len(keys) or (len(keys) == 1):
+                parts: list[str] = ['"{" ws']
+                for idx, k in enumerate(keys):
+                    val_rule = compile_node(props[k], f"{hint}-{idx}")
+                    k_esc = str(k).replace('"', '\\"')
+                    sep = '"," ws ' if idx < len(keys) - 1 else ""
+                    field_expr = f'"\\"{k_esc}\\":" ws {val_rule}'
+                    parts.append(f"{field_expr} {sep}".strip() if k in req else f"({field_expr} {sep})?".strip())
+                parts.append('"}" ws')
+                return add_rule(f"obj-{hint}-{len(seen)}", " ".join(parts))
+            # 含可选字段组合时构建零尾逗号合法键值对交替语法
+            kv_alts: list[str] = []
             for idx, k in enumerate(keys):
                 val_rule = compile_node(props[k], f"{hint}-{idx}")
                 k_esc = str(k).replace('"', '\\"')
-                sep = '"," ws ' if idx < len(keys) - 1 else ""
-                field_expr = f'"\\"{k_esc}\\":" ws {val_rule}'
-                if keys and idx < len(keys) - 1:
-                    parts.append(f"({field_expr} {sep})" if k in req else f"({field_expr} {sep})?")
-                else:
-                    parts.append(field_expr if k in req else f"({field_expr})?")
-            parts.append('"}" ws')
-            return add_rule(f"obj-{hint}-{len(seen)}", " ".join(parts))
+                kv_alts.append(f'"\\"{k_esc}\\":" ws {val_rule}')
+            kv_rule = add_rule(f"kv-{hint}-{len(seen)}", " | ".join(kv_alts))
+            return add_rule(f"obj-{hint}-{len(seen)}", f'"{{" ws ({kv_rule} ("," ws {kv_rule})*)? "}}" ws')
         return "json-value"
 
     root_ref = compile_node(schema or {}, "root")

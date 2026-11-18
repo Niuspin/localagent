@@ -6,16 +6,18 @@ import logging
 from typing import Any
 
 from . import net
+from .providers import UnifiedProvider, strip_think_tags
 
 logger = logging.getLogger(__name__)
 
 
 class ModelRouter:
-    """按任务角色（main / compact / embedding）选择推理后端，支持 OpenAI / Anthropic 兼容端点。"""
+    """按任务角色（main / compact / worker / embedding）选择推理后端，支持 OpenAI / Anthropic 兼容端点与 GBNF 结构化输出。"""
 
     def __init__(self, cfg: Any, engine: Any):
         self.cfg = cfg
         self.engine = engine
+        self.provider = UnifiedProvider(cfg, engine)
 
     def _compact_target(self) -> tuple[str, str, str, str]:
         ep = str(self.cfg.get("agent", "compact_endpoint", default="") or "").strip().rstrip("/")
@@ -87,83 +89,8 @@ class ModelRouter:
         timeout: float = 900.0,
         disable_thinking: bool = True,
         response_format: dict | None = None,
+        schema: dict | None = None,
     ) -> str:
-        if role == "compact":
-            url, model_name, api_key, prov = self._compact_target()
-            if url:
-                try:
-                    hdrs = {"Content-Type": "application/json", "Accept": "application/json"}
-                    if prov == "anthropic":
-                        if api_key:
-                            hdrs["x-api-key"] = api_key
-                        hdrs["anthropic-version"] = "2023-06-01"
-                        payload = self._to_anthropic_payload(model_name, messages, temperature, max_tokens)
-                    else:
-                        if api_key:
-                            hdrs["Authorization"] = f"Bearer {api_key}"
-                        payload = {
-                            "model": model_name,
-                            "messages": messages,
-                            "temperature": temperature,
-                            "max_tokens": max_tokens,
-                            "stream": False,
-                        }
-                        if response_format:
-                            payload["response_format"] = response_format
-                    resp = await net.fetch(
-                        url,
-                        method="POST",
-                        headers=hdrs,
-                        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                        timeout=min(float(timeout), 90.0),
-                        max_bytes=2_000_000,
-                        allow_private=True,
-                    )
-                    if resp.status == 200:
-                        data = json.loads(resp.body.decode("utf-8", "replace"))
-                        if prov == "anthropic":
-                            blocks = data.get("content") or []
-                            txt = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text").strip()
-                        else:
-                            txt = ((data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "").strip()
-                        if txt:
-                            return txt
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("外部压缩模型端点调用失败，已回退本地引擎: %s", e)
-
-        if role in ("researcher", "summarizer", "reader", "worker", "coder", "reviewer", "verifier"):
-            w_url, w_model, w_key = self._worker_target()
-            if w_url:
-                try:
-                    hdrs = {"Content-Type": "application/json", "Accept": "application/json"}
-                    if w_key:
-                        hdrs["Authorization"] = f"Bearer {w_key}"
-                    w_payload: dict[str, Any] = {
-                        "model": w_model,
-                        "messages": messages,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "stream": False,
-                    }
-                    if response_format:
-                        w_payload["response_format"] = response_format
-                    resp = await net.fetch(
-                        w_url,
-                        method="POST",
-                        headers=hdrs,
-                        data=json.dumps(w_payload, ensure_ascii=False).encode("utf-8"),
-                        timeout=min(float(timeout), 120.0),
-                        max_bytes=2_000_000,
-                        allow_private=True,
-                    )
-                    if resp.status == 200:
-                        data = json.loads(resp.body.decode("utf-8", "replace"))
-                        txt = ((data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "").strip()
-                        if txt:
-                            return txt
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("外部 Swarm Worker 端点调用失败，已回退本地引擎: %s", e)
-
         body: dict[str, Any] = {
             "model": "local",
             "messages": messages,
@@ -174,11 +101,16 @@ class ModelRouter:
             body["chat_template_kwargs"] = {"enable_thinking": False}
         if response_format:
             body["response_format"] = response_format
-        try:
-            r = await self.engine.chat(body, timeout=timeout, priority=1 if role != "main" else 0)
-        except TypeError:
-            r = await self.engine.chat(body, timeout=timeout)
-        return (r.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+        r = await self.provider.complete(
+            body,
+            role=role,
+            timeout=timeout,
+            priority=1 if role != "main" else 0,
+            schema=schema,
+            allow_fallback=True,
+        )
+        raw = ((r.get("choices") or [{}])[0].get("message", {}).get("content", "") or "")
+        return strip_think_tags(raw) if schema is not None else raw.strip()
 
     async def embed(self, texts: list[str], *, timeout: float = 15.0) -> list[list[float]] | None:
         """为混合记忆检索生成密集向量；未配置外部端点且本地引擎不支持时返回 None。"""

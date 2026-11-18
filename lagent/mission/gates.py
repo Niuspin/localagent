@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -117,35 +118,68 @@ def run_single_check(
                 summary="unsafe_verify_command",
                 evidence={"reason": "blocked_by_verify_command_guard"},
             )
-        env = sec.clean_env(str(workspace))
+        gate_home = Path(tempfile.gettempdir()) / "localagent_gatehome"
+        gate_home.mkdir(parents=True, exist_ok=True)
+        env = sec.clean_env(str(gate_home))
+        allow_net = bool(cfg.get("security", "allow_network_commands", default=False)) if cfg else False
+        timeout_s = max(1.0, float(chk.timeout_s or 60.0))
+        pid = 0
+        proc: subprocess.Popen[str] | None = None
         try:
-            cp = subprocess.run(
-                target,
-                shell=True,
+            if sec.IS_WIN:
+                popen_cmd: Any = target
+                use_shell = True
+                cflags = 0x08000000 | 0x00000200
+            else:
+                argv, _sb_kind = sec.wrap_in_sandbox(
+                    ["/bin/sh", "-c", target], workspace, allow_net, gate_home, sandbox_home=str(gate_home)
+                )
+                popen_cmd = argv
+                use_shell = False
+                cflags = 0
+            proc = subprocess.Popen(
+                popen_cmd,
+                shell=use_shell,
                 cwd=str(workspace),
                 env=env,
-                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=max(1.0, float(chk.timeout_s or 60.0)),
+                creationflags=cflags,
+                start_new_session=not sec.IS_WIN,
             )
-            out = (cp.stdout or "") + ("\n" + cp.stderr if cp.stderr else "")
-            ok = cp.returncode == 0 and _expect_match(out, chk.expect)
+            pid = proc.pid or 0
+            if pid:
+                sec.harden_windows_process(pid)
+            stdout_s, stderr_s = proc.communicate(timeout=timeout_s)
+            out = (stdout_s or "") + ("\n" + stderr_s if stderr_s else "")
+            ok = proc.returncode == 0 and _expect_match(out, chk.expect)
             return GateResult(
                 check_id=chk.id,
                 kind=kind,
                 target=target,
                 ok=ok,
-                summary="ok" if ok else (f"exit_{cp.returncode}" if cp.returncode != 0 else "expect_mismatch"),
+                summary="ok" if ok else (f"exit_{proc.returncode}" if proc.returncode != 0 else "expect_mismatch"),
                 evidence={
-                    "exit_code": cp.returncode,
-                    "stdout_tail": _clip(cp.stdout),
-                    "stderr_tail": _clip(cp.stderr),
+                    "exit_code": proc.returncode,
+                    "stdout_tail": _clip(stdout_s),
+                    "stderr_tail": _clip(stderr_s),
                     "duration_ms": int((time.monotonic() - t0) * 1000),
                 },
             )
         except subprocess.TimeoutExpired as e:
+            if proc is not None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.communicate(timeout=2)
+                except Exception:  # noqa: BLE001
+                    pass
             return GateResult(
                 check_id=chk.id,
                 kind=kind,
@@ -167,6 +201,9 @@ def run_single_check(
                 summary=f"exec_error: {e}",
                 evidence={"error": str(e), "duration_ms": int((time.monotonic() - t0) * 1000)},
             )
+        finally:
+            if pid:
+                sec.release_windows_job(pid)
 
     return GateResult(chk.id, kind, target, False, summary=f"unknown_check_kind: {kind}")
 

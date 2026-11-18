@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .. import security as sec
-from ..permissions import match_command, match_glob
+from ..permissions import infer_delegated_kind, match_commands, match_glob
 from ..tools.base import TOOLS
 
 READONLY_TOOLS = {
@@ -89,15 +89,14 @@ class MissionPolicy:
         tname = str(tool or "")
         tool_obj = TOOLS.get(tname)
         raw_kind = tool_obj.kind if tool_obj is not None else ""
-        if tname in ("delegate_task", "spawn_agent") and args.get("mode") == "worker":
-            eff_kind = "write"
-        elif tname in ("shell", "run_command", "bash") or raw_kind == "exec":
+        eff_raw = infer_delegated_kind(tname, args, raw_kind)
+        if tname in ("shell", "run_command", "bash") or eff_raw == "exec":
             eff_kind = "exec"
-        elif tname in WRITE_TOOLS or raw_kind in ("write", "delete"):
+        elif tname in WRITE_TOOLS or eff_raw in ("write", "delete"):
             eff_kind = "write"
-        elif tname in NET_TOOLS or raw_kind == "net_fetch":
+        elif tname in NET_TOOLS or eff_raw == "net_fetch":
             eff_kind = "net_fetch"
-        elif tname in READONLY_TOOLS or raw_kind in ("read", "meta", "memory_read", "net_search"):
+        elif tname in READONLY_TOOLS or eff_raw in ("read", "meta", "memory_read", "net_search"):
             eff_kind = "read"
         else:
             eff_kind = "other"
@@ -129,8 +128,8 @@ class MissionPolicy:
                 if sec.is_readonly_command(cmd) and not self.allow_commands:
                     return PolicyVerdict(True, "allow", "readonly_command", target=cmd)
                 return PolicyVerdict(False, "block", "attended_approval_required", target=cmd)
-            # unattended 模式严格核对 command allowlist
-            if self.allow_commands and any(match_command(cmd, pat) for pat in self.allow_commands):
+            # unattended 模式严格核对 command allowlist（拆分复合段防 && 绕过）
+            if self.allow_commands and match_commands(cmd, self.allow_commands):
                 return PolicyVerdict(True, "allow", "allowlisted_command", target=cmd)
             return PolicyVerdict(False, "block", "command_outside_allowlist", target=cmd)
 
@@ -179,6 +178,11 @@ class MissionPolicy:
                 if approved_actions and (target_sigs & approved_actions):
                     return PolicyVerdict(True, "allow", "explicitly_approved", target=target_rel)
                 if not write_rels:
+                    if tname in ("delegate_task", "spawn_agent", "swarm_plan"):
+                        if self.mode == "unattended" and self.allow_paths:
+                            return PolicyVerdict(True, "allow", "delegated_with_policy", target=target_rel)
+                        if self.mode != "unattended":
+                            return PolicyVerdict(False, "block", "attended_write_requires_approval", target=target_rel)
                     return PolicyVerdict(False, "block", "path_outside_allowlist", target=target_rel)
                 # Mission 自身状态目录允许在内部更新，或全部写路径匹配 allow_paths
                 if all(r.startswith(".localagent/missions/") for r in write_rels):

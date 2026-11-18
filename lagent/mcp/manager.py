@@ -319,6 +319,24 @@ class McpManager:
             self.sync_registry()
         return ok
 
+    def list_all_resources(self) -> list[dict]:
+        out: list[dict] = []
+        for name, cfg in sorted(self.store.servers.items()):
+            if not cfg.enabled:
+                continue
+            for r in self._resources.get(name, []):
+                out.append({"server": name, **r})
+        return out
+
+    def list_all_prompts(self) -> list[dict]:
+        out: list[dict] = []
+        for name, cfg in sorted(self.store.servers.items()):
+            if not cfg.enabled:
+                continue
+            for p in self._prompts.get(name, []):
+                out.append({"server": name, **p})
+        return out
+
     # ------------------------------------------------------------ 视图
     def view(self, name: str) -> dict:
         cfg = self.store.get(name)

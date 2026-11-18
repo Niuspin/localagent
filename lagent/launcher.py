@@ -110,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--load", action="store_true", help="启动后立即加载 config 里上次的模型")
     ap.add_argument("--offline", action="store_true", help="纯离线模式启动（不提示联网或在线搜索配置）")
     ap.add_argument("--resume-missions", action="store_true", help="启动时自动恢复上次运行中未完成的 Mission")
+    ap.add_argument("-p", "--prompt", help="无头单次 CLI 执行模式：传入单条指令，运行完成后退出")
+    ap.add_argument("--output-format", choices=("text", "json"), default="text", help="-p 模式输出格式（text | json）")
+    ap.add_argument("--daemon", action="store_true", help="守护驻留模式：关闭桌面窗口时保持后台引擎与 Mission 运行")
+    ap.add_argument("--acp", action="store_true", help="无头 ACP JSON-RPC stdio 协议模式")
     ap.add_argument("--version", action="version", version=f"LocalAgent {__version__}")
     a = ap.parse_args(argv)
     if a.offline:
@@ -139,6 +143,15 @@ def main(argv: list[str] | None = None) -> int:
     st = State(sec.new_token(), port)
     if a.workspace:
         st.cfg.set_workspace(str(sec.validate_workspace(a.workspace)))
+
+    # 0. 无头单次 CLI (-p/--prompt) 或 ACP JSON-RPC stdio (--acp) 模式
+    if a.prompt is not None or a.acp:
+        import asyncio
+        from .runtime.cli import run_acp_stdio, run_oneshot_prompt
+        if a.acp:
+            return asyncio.run(run_acp_stdio(st))
+        return asyncio.run(run_oneshot_prompt(st, a.prompt, output_format=a.output_format))
+
     url = f"http://127.0.0.1:{port}/?t={st.token}"
     print("=" * 62)
     print(f" LocalAgent {__version__} 已启动（仅本机可访问）")
@@ -193,9 +206,21 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyboardInterrupt, SystemExit):
             ok = True
         finally:
-            setattr(server, "should_exit", True)
+            if not a.daemon:
+                setattr(server, "should_exit", True)
+            else:
+                print(f"[Daemon] 桌面窗口已关闭，后台服务继续监听: {url}", flush=True)
 
-        if ok:
+        if ok and not a.daemon:
+            server_thread.join(timeout=5)
+            return 0
+        if ok and a.daemon:
+            while not getattr(server, "should_exit", False):
+                try:
+                    time.sleep(0.5)
+                except (KeyboardInterrupt, SystemExit):
+                    setattr(server, "should_exit", True)
+                    break
             server_thread.join(timeout=5)
             return 0
 

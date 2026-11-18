@@ -22,6 +22,7 @@ import socket
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -471,7 +472,17 @@ class Engine:
             a.append("--jinja")
         rf = str(e.get("reasoning_format", "auto") or "auto")
         if self.has("--reasoning-format") and rf != "none":
-            a += ["--reasoning-format", "deepseek" if rf == "auto" else rf]
+            if rf == "auto":
+                m_low = str(plan.get("model") or "").lower()
+                arch_low = str((self.model or {}).get("arch") or "").lower()
+                is_think_family = any(
+                    k in m_low or k in arch_low
+                    for k in ("deepseek", "r1", "qwq", "qwen", "glm", "minimax", "seed", "step", "think", "reason", "gpt-oss")
+                )
+                if is_think_family:
+                    a += ["--reasoning-format", "deepseek"]
+            else:
+                a += ["--reasoning-format", rf]
         if self.has("--slot-save-path"):
             sd = self.slots_dir()
             sd.mkdir(parents=True, exist_ok=True)
@@ -847,6 +858,19 @@ class Engine:
         except Exception:  # noqa: BLE001
             return None
         return None
+
+    def slots_count(self) -> int:
+        s = (self.plan_info or {}).get("slots") if isinstance(getattr(self, "plan_info", None), dict) else None
+        if s is not None:
+            return max(1, int(s))
+        return max(1, int(getattr(self._slot_sched, "slots", 1) or 1))
+
+    def slot_for_session(self, session_id: str, *, is_worker: bool = False) -> int:
+        """为会话/工作节点分配稳定的 KV 槽位：多槽位时主会话固定占槽位 0，后台 Worker 哈希分槽防相互逐出。"""
+        n = self.slots_count()
+        if n <= 1 or not is_worker:
+            return 0
+        return 1 + (zlib.crc32(str(session_id or "w").encode("utf-8")) % (n - 1))
 
     async def save_slot(self, slot_id: int = 0, filename: str = "active.bin") -> bool:
         """保存热点 KV 槽位到 data/slots，用于扩容/重启后的快速恢复。"""

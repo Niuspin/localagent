@@ -418,7 +418,9 @@ def make_app(st: State) -> Starlette:
                 st.agent.cancel(s.active_run)
             st.store.delete(s.id)
             from .tools import jobs as _jobs
-            _jobs.stop_session(s.id)           # 会话没了，它启动的后台任务也一并终止
+            from . import shell_session as _sh_sess
+            _jobs.stop_session(s.id)           # 会话没了，它启动的后台任务与持久终端也一并终止
+            await _sh_sess.close_session_shell(s.id)
             st.agent.seen_files.pop(s.id, None)
             st.outputs.drop(s.id)
             st.artifacts.drop_session(s.id)
@@ -1059,8 +1061,18 @@ def make_app(st: State) -> Starlette:
     async def swarm_conflict_resolve(req: Request) -> Response:
         d = await jbody(req)
         decision = str(d.get("decision") or "dismissed")
-        sw = st.swarms.swarms.get(req.path_params["swid"])
-        card = sw.merges.resolve_conflict(req.path_params["cid"], decision) if sw else None
+        swid = req.path_params["swid"]
+        sw = st.swarms.swarms.get(swid) or st.swarms.resume(swid)
+        card = (
+            sw.merges.resolve_conflict(
+                req.path_params["cid"],
+                decision,
+                workspace=sw.workspace,
+                session_id=sw.session_id,
+            )
+            if sw
+            else None
+        )
         if not card:
             return bad("冲突记录不存在", 404)
         st.swarms._persist(sw)
@@ -1712,6 +1724,9 @@ def make_app(st: State) -> Starlette:
         ws = ws or st.cfg.get("workspace", default="")
         return J({"hooks": HookManager(ws or None).list_hooks()})
 
+    from .routes.ops import register_ops_routes
+    register_ops_routes(R, st, sess_or_404=sess_or_404, jbody=jbody, json_res=J, bad=bad)
+
     # ------------------------------------------------------------ 静态文件
     async def static(req: Request) -> Response:
         rel = req.path_params.get("p", "") or "index.html"
@@ -1740,6 +1755,8 @@ def make_app(st: State) -> Starlette:
             await st.research.stop_all()
             await st.missions.stop_all()
             await st.swarms.stop_all()
+            from . import shell_session as _sh_sess
+            await _sh_sess.close_all_shells()
             st.hub.cancel_all()
             await st.mcp.stop_all()
             await st.engine.stop()

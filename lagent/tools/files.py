@@ -632,6 +632,16 @@ def _run_diagnostics_sync(ctx: ToolCtx, target_rel: str) -> ToolResult:
                     issues.append(f"{ctx.guard.rel(fp)}: {msg}")
             except Exception:  # noqa: BLE001
                 pass
+    try:
+        from ..lsp import query_lsp_diagnostics
+        lsp_issues = query_lsp_diagnostics(ctx.guard.ws, files_to_check, timeout_s=4.0)
+        seen_iss = set(issues)
+        for li in lsp_issues:
+            if li not in seen_iss:
+                issues.append(li)
+                seen_iss.add(li)
+    except Exception:  # noqa: BLE001
+        pass
     if not issues:
         return ToolResult(f"诊断完成（检查 {len(files_to_check)} 个文件）：未发现语法或静态检查错误。")
     return ToolResult("发现以下诊断问题:\n" + "\n".join(issues[:40]))
@@ -655,7 +665,8 @@ async def repo_map(ctx: ToolCtx, a: dict) -> ToolResult:
         return err(f"不是目录: {sub}")
     rel = ctx.guard.rel(p)
     max_files = max(10, min(int(a.get("max_files") or 80), 200))
-    return ToolResult(build_repo_map(ctx.guard.ws, subdir=rel, max_files=max_files, guard=ctx.guard))
+    focus = list((getattr(ctx.session, "seen", None) or {}).keys())
+    return ToolResult(build_repo_map(ctx.guard.ws, subdir=rel, max_files=max_files, guard=ctx.guard, focus_files=focus))
 
 
 register(Tool(
@@ -1095,17 +1106,50 @@ async def run_command(ctx: ToolCtx, a: dict) -> ToolResult:
         from . import jobs
         return await jobs.start_job(ctx, cmd, a.get("cwd"))
     timeout = max(1, min(int(a.get("timeout") or ctx.cfg.get("security", "command_timeout_s", default=120)), 3600))
+    stdin_text = str(a.get("stdin") or "")
+    if a.get("persistent"):
+        from .. import shell_session
+        allow_net = bool(ctx.cfg.get("security", "allow_network_commands", default=False))
+        mode = ctx.cfg.get("security", "command_sandbox", default="auto")
+        home = ctx.journal.dir / "cmdhome"
+        sh = shell_session.get_or_create_shell(ctx.sid, ctx.guard.ws, allow_net=allow_net, home=home, sandbox_mode=mode)
+        t0 = time.time()
+        try:
+            code, out_txt, new_cwd = await sh.run(cmd, stdin_data=stdin_text, timeout=float(timeout))
+        except asyncio.TimeoutError:
+            return ToolResult(f"[持久终端命令超时（{timeout}s）已重置会话]", error=True, meta={"sandbox": sh.kind, "persistent": True})
+        except Exception as e:  # noqa: BLE001
+            return err(f"持久终端执行失败: {e}")
+        ctx.session.shell_cwd = new_cwd
+        dur = time.time() - t0
+        body = (out_txt or "(无输出)") + (f"\n[退出码 {code}]" if code else "")
+        return ToolResult(body, error=bool(code), meta={"sandbox": sh.kind, "duration_s": round(dur, 1), "persistent": True})
     try:
         pr = prepare_exec(ctx, cmd, a.get("cwd"))
     except ValueError as e:
         return err(str(e))
     allow_net, mode, kind = pr.allow_net, pr.mode, pr.kind
     t0 = time.time()
+    use_pipe_stdin = bool(stdin_text)
     try:
-        proc = await asyncio.create_subprocess_exec(*pr.argv, cwd=str(pr.cwd), env=pr.env, stdin=asyncio.subprocess.DEVNULL,
-                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **pr.kw)
+        proc = await asyncio.create_subprocess_exec(
+            *pr.argv,
+            cwd=str(pr.cwd),
+            env=pr.env,
+            stdin=asyncio.subprocess.PIPE if use_pipe_stdin else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            **pr.kw,
+        )
     except OSError as e:
         return err(f"无法启动命令: {e}")
+    if use_pipe_stdin and proc.stdin:
+        try:
+            proc.stdin.write(stdin_text.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+        except OSError:
+            pass
     if proc.pid:
         sec.harden_windows_process(proc.pid)
     buf = bytearray()
@@ -1211,9 +1255,11 @@ async def command_preview(ctx: ToolCtx, a: dict) -> dict | None:
 register(Tool(
     "run_command", "在工作区内执行 shell 命令（Windows 用 PowerShell，其他系统用 bash）。用于运行测试、构建、git、脚本等。"
                    "有超时与输出截断；不会继承你的环境变量/密钥。读文件、改文件请用专用工具而不是 cat/sed。"
-                   "长时间运行的进程（监视测试、开发服务器、大型构建）设 background=true：立即返回任务 id，之后用 job_output 看输出。",
+                   "可选 stdin 传递标准输入，或设 persistent=true 在跨步骤交互式会话中保留虚拟环境/函数/目录状态；长时间运行的进程设 background=true。",
     obj({"command": P("string", "要执行的命令"), "cwd": P("string", "工作目录（相对工作区），默认工作区根"),
-         "timeout": P("integer", "超时秒数（前台命令）"), "background": P("boolean", "后台运行，立即返回任务 id")}, ["command"]),
+         "timeout": P("integer", "超时秒数（前台命令）"), "background": P("boolean", "后台运行，立即返回任务 id"),
+         "stdin": P("string", "可选：向命令标准输入传入的文本"),
+         "persistent": P("boolean", "是否在当前会话的持久终端状态中运行（保留 env/venv/函数）")}, ["command"]),
     run_command, "exec", title=lambda a: "$ " + (a.get("command", "")[:80]), preview=command_preview, path_args=("cwd",)))
 
 

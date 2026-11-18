@@ -374,8 +374,8 @@ def sandbox_info() -> dict:
     if sys.platform == "darwin" and shutil.which("sandbox-exec"):
         return {"available": True, "kind": "sandbox-exec", "note": "macOS sandbox-exec：仅工作区及系统白名单可读、工作区可写，默认禁止联网"}
     if IS_WIN:
-        return {"available": False, "kind": "none", "hardening": "win32-job",
-                "note": "无文件系统沙箱（Windows 已启用 Job Object 进程上限与剪贴板/UI 隔离；命令仍需审批）"}
+        return {"available": False, "kind": "none", "hardening": "win32-job+mitigation",
+                "note": "无文件系统沙箱（Windows 已启用 Job Object 进程/内存上限、异常终止与剪贴板/UI/远程镜像加载隔离；命令仍需审批）"}
     return {"available": False, "kind": "none",
             "note": "无 OS 级沙箱（未安装 bubblewrap（apt install bubblewrap）或用户命名空间被禁用）：所有命令都需要人工审批，且不会被自动放行"}
 
@@ -427,10 +427,11 @@ def harden_windows_process(pid: int) -> bool:
         if not hjob:
             return False
         ext = _ExtLimit()
-        ext.BasicLimitInformation.LimitFlags = 0x2000 | 0x0008  # KILL_ON_JOB_CLOSE | ACTIVE_PROCESS
+        ext.BasicLimitInformation.LimitFlags = 0x2000 | 0x0008 | 0x0400 | 0x0200  # KILL_ON_JOB_CLOSE | ACTIVE_PROCESS | DIE_ON_UNHANDLED_EXCEPTION | JOB_MEMORY
         ext.BasicLimitInformation.ActiveProcessLimit = 64
+        ext.JobMemoryLimit = 4 * 1024 * 1024 * 1024  # 4 GiB 进程树内存上限，防 fork/malloc 失控
         ui = _UiLimit(0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0040 | 0x0080)
-        hproc = k32.OpenProcess(0x0100 | 0x0001, False, int(pid))
+        hproc = k32.OpenProcess(0x0100 | 0x0001 | 0x0200, False, int(pid))
         if not hproc:
             k32.CloseHandle(hjob)
             return False

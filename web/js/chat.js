@@ -259,6 +259,14 @@
       LA.composer.focus();
     }).catch(LA.fail);
   }
+  function forkFrom(idx) {
+    if (!guardIdle() || !LA.S.cur) return;
+    LA.post('/api/sessions/' + LA.S.cur.id + '/fork', { from_index: idx }).then(function (v) {
+      LA.setSession(v);
+      LA.refreshSessions();
+      LA.toast('已基于此处创建独立分支对话', 'ok');
+    }).catch(LA.fail);
+  }
   function regenerate(idx) {
     if (!guardIdle()) return;
     var msgs = LA.S.cur.messages, u = idx - 1;
@@ -333,6 +341,7 @@
     this.acts.appendChild(el('button', { class: 'act', html: icon('copy', 14) + ' 复制回答', on: { click: function () {
       LA.copyText((m.blocks || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('\n\n')); } } }));
     this.acts.appendChild(el('button', { class: 'act', html: icon('refresh', 14) + ' 重新生成', on: { click: function () { regenerate(self.idx); } } }));
+    this.acts.appendChild(el('button', { class: 'act', html: icon('gitBranch', 14) + ' 分支', title: '从此处克隆一条独立新对话', on: { click: function () { forkFrom(self.idx); } } }));
   };
 
   function todoList(items) {
@@ -822,6 +831,8 @@
         view.renderFooter(); LA.S.cur.context = { ctx: d.ctx, used: d.used, pct: d.pct }; LA.bus.emit('context', LA.S.cur.context);
       },
       context_event: function (d) { endBlocks(); view.addNote(d.detail, d.kind === 'trimmed'); if (d.kind === 'grow_done') LA.refreshState(); },
+      steer_queued: function (d) { view.addNote('已收到实时转向（当前步完成后生效）: ' + (d.text || ''), false); },
+      steer_applied: function (d) { endBlocks(); view.addNote('↪ 实时转向已注入对话: ' + (d.text || ''), false); },
       notice: function (d) { view.addNote(d.text, d.level === 'warn'); },
       taint: function () { LA.S.cur.tainted = true; LA.bus.emit('taint', true); },
       assistant_done: function () { endBlocks(); },

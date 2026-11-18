@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import ssl
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -242,6 +243,9 @@ class HttpMcpSession(_BaseMcpSession):
         self.session_id: str | None = None
         self._alive = False
         self._next = 0
+        self._sse_task: asyncio.Task | None = None
+        self._sse_stop = threading.Event()
+        self._sse_conn: http.client.HTTPConnection | None = None
 
     @property
     def alive(self) -> bool:
@@ -385,9 +389,85 @@ class HttpMcpSession(_BaseMcpSession):
             await self.stop()
             raise e if isinstance(e, McpError) else McpError(self._why("HTTP 握手失败", e))
         self.last_used = time.monotonic()
+        if self._sse_task is None or self._sse_task.done():
+            self._sse_stop.clear()
+            self._sse_task = asyncio.create_task(self._listen_sse())
+
+    def _listen_sse_sync(self, loop: asyncio.AbstractEventLoop) -> None:
+        if os.environ.get("LOCALAGENT_OFFLINE") == "1":
+            h = (urlsplit(self.cfg.url).hostname or "").lower().strip("[]")
+            if h not in ("127.0.0.1", "::1", "localhost"):
+                return
+        if self.policy is not None:
+            dec = self.policy.evaluate_url(self.cfg.url, purpose="mcp_http_sse", allow_loopback=True)
+            if not dec.allowed:
+                return
+        conn = None
+        try:
+            conn, path = self._open_conn(60.0)
+            self._sse_conn = conn
+            hdrs = {"Accept": "text/event-stream", **self.cfg.headers}
+            if self.session_id:
+                hdrs["Mcp-Session-Id"] = self.session_id
+            conn.request("GET", path, headers=hdrs)
+            resp = conn.getresponse()
+            ct = (resp.getheader("Content-Type") or "").lower()
+            if resp.status != 200 or "text/event-stream" not in ct:
+                return
+            buf: list[str] = []
+            while not self._sse_stop.is_set() and self._alive:
+                raw = resp.readline(2_000_000)
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if not line:
+                    if buf:
+                        try:
+                            msg = json.loads("\n".join(buf))
+                        except ValueError:
+                            buf.clear()
+                            continue
+                        buf.clear()
+                        for m in (msg if isinstance(msg, list) else [msg]):
+                            if isinstance(m, dict) and "method" in m and "id" not in m:
+                                loop.call_soon_threadsafe(self._notification, str(m["method"]), m.get("params") or {})
+                    continue
+                if line.startswith("data:"):
+                    buf.append(line[5:].lstrip())
+        except Exception:  # noqa: BLE001
+            return
+        finally:
+            self._sse_conn = None
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    async def _listen_sse(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            await asyncio.to_thread(self._listen_sse_sync, loop)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
 
     async def stop(self) -> None:
         self._alive = False
+        self._sse_stop.set()
+        if self._sse_conn is not None:
+            try:
+                self._sse_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._sse_task is not None and not self._sse_task.done():
+            self._sse_task.cancel()
+            try:
+                await self._sse_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._sse_task = None
         sid = self.session_id
         self.session_id = None
         if sid:

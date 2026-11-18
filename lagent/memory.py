@@ -35,7 +35,8 @@ def local_embed(text: str, dim: int = 128) -> list[float]:
         h = int.from_bytes(d, "little")
         idx = h % dim
         sign = 1.0 if ((h >> 8) & 1) else -1.0
-        vec[idx] += sign
+        weight = 1.0 + 0.15 * min(len(f), 8)
+        vec[idx] += sign * weight
     norm = math.sqrt(sum(v * v for v in vec))
     if norm > 0:
         inv = 1.0 / norm
@@ -92,6 +93,10 @@ class Memory:
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(memories)")}
         if "norm" not in cols:
             self.db.execute("ALTER TABLE memories ADD COLUMN norm TEXT NOT NULL DEFAULT ''")
+        if "supersedes_id" not in cols:
+            self.db.execute("ALTER TABLE memories ADD COLUMN supersedes_id TEXT NOT NULL DEFAULT ''")
+        if "superseded_by" not in cols:
+            self.db.execute("ALTER TABLE memories ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''")
         self.db.execute("CREATE INDEX IF NOT EXISTS memories_norm ON memories(scope, workspace, norm)")
         todo = self.db.execute("SELECT id,text FROM memories WHERE norm=''").fetchall()
         if todo:
@@ -163,9 +168,12 @@ class Memory:
     # ------------------------------------------------------------ 内部
     @staticmethod
     def _row(r: sqlite3.Row) -> dict:
+        keys = r.keys()
         return {"id": r["id"], "text": r["text"], "kind": r["kind"], "tags": json.loads(r["tags"]), "scope": r["scope"],
                 "workspace": r["workspace"], "source": r["source"], "trusted": bool(r["trusted"]), "pinned": bool(r["pinned"]),
-                "created": r["created"], "updated": r["updated"], "uses": r["uses"]}
+                "created": r["created"], "updated": r["updated"], "uses": r["uses"],
+                "supersedes_id": r["supersedes_id"] if "supersedes_id" in keys else "",
+                "superseded_by": r["superseded_by"] if "superseded_by" in keys else ""}
 
     @staticmethod
     def _clean_tags(tags: Any) -> list[str]:
@@ -200,8 +208,30 @@ class Memory:
                 return self.get(dup["id"])  # type: ignore[return-value]
             mid = uuid.uuid4().hex[:12]
             tag_list = self._clean_tags(tags)
-            self.db.execute("INSERT INTO memories(id,text,kind,tags,scope,workspace,source,trusted,pinned,created,updated,norm) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (mid, text, kind, json.dumps(tag_list, ensure_ascii=False), scope, ws, source, int(trusted), int(pinned), now, now, n))
+            supersedes = ""
+            if trusted and kind in ("fact", "preference", "project"):
+                qt_new = set(tokens(text))
+                if len(qt_new) >= 3:
+                    candidates = self.db.execute(
+                        "SELECT id, text FROM memories WHERE scope=? AND workspace=? AND kind=? AND trusted=1 AND superseded_by='' ORDER BY updated DESC LIMIT 80",
+                        (scope, ws, kind),
+                    ).fetchall()
+                    for cand in candidates:
+                        qt_old = set(tokens(cand["text"]))
+                        if not qt_old:
+                            continue
+                        inter = len(qt_new & qt_old)
+                        min_sz = max(1, min(len(qt_new), len(qt_old)))
+                        overlap = inter / min_sz
+                        # 高主题词重叠且内容不同（覆盖更新旧偏好/事实，如「使用深色主题」替代「使用浅色主题」）
+                        if overlap >= 0.55 and inter >= 2 and self._norm(cand["text"]) != n:
+                            supersedes = cand["id"]
+                            self.db.execute("UPDATE memories SET superseded_by=? WHERE id=?", (mid, supersedes))
+                            break
+            self.db.execute(
+                "INSERT INTO memories(id,text,kind,tags,scope,workspace,source,trusted,pinned,created,updated,norm,supersedes_id,superseded_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (mid, text, kind, json.dumps(tag_list, ensure_ascii=False), scope, ws, source, int(trusted), int(pinned), now, now, n, supersedes, ""),
+            )
             if self.fts:
                 self._fts_put(mid, text, tag_list)
             self._vec_put(mid, text, tag_list)
@@ -278,6 +308,7 @@ class Memory:
             if scope:
                 where.append("scope=?"), args.append(scope)
             where.append("trusted=0" if pending else "trusted=1")
+            where.append("superseded_by=''")
             rows = [self._row(r) for r in self.db.execute(f"SELECT * FROM memories WHERE {' AND '.join(where)} ORDER BY pinned DESC, updated DESC", args)]
         if q.strip():
             qt = set(tokens(q))
@@ -317,7 +348,7 @@ class Memory:
             return {}
         with self._lock:
             sql = ("SELECT m.id, v.vec FROM mem_vectors v JOIN memories m ON v.id=m.id "
-                   "WHERE m.trusted=1 AND v.dim=? AND (m.scope='global' OR m.workspace=?)")
+                   "WHERE m.trusted=1 AND m.superseded_by='' AND v.dim=? AND (m.scope='global' OR m.workspace=?)")
             args: list[Any] = [dim, workspace]
             if kind:
                 sql += " AND m.kind=?"
@@ -398,12 +429,12 @@ class Memory:
             return []
         with self._lock:
             ph = ",".join("?" * len(ids))
-            sql = f"SELECT * FROM memories WHERE trusted=1 AND id IN ({ph})" + (" AND kind=?" if kind else "")
+            sql = f"SELECT * FROM memories WHERE trusted=1 AND superseded_by='' AND id IN ({ph})" + (" AND kind=?" if kind else "")
             return [self._row(r) for r in self.db.execute(sql, (*ids, *([kind] if kind else [])))]
 
     def _pinned(self, workspace: str, limit: int = 8) -> list[dict]:
         with self._lock:
-            rs = self.db.execute("SELECT * FROM memories WHERE trusted=1 AND pinned=1 AND (scope='global' OR workspace=?) "
+            rs = self.db.execute("SELECT * FROM memories WHERE trusted=1 AND superseded_by='' AND pinned=1 AND (scope='global' OR workspace=?) "
                                  "ORDER BY updated DESC LIMIT ?", (workspace, limit)).fetchall()
             return [self._row(r) for r in rs]
 

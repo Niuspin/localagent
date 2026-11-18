@@ -684,8 +684,10 @@ def resolve_context_mentions(
     max_bytes = max_file_mb * 1024 * 1024
 
     for m in matches:
+        if m.group(0).lstrip().startswith("@mcp:"):
+            continue
         rel = m.group(1).replace("\\", "/").rstrip(".,;:!?，。；！？")
-        if not rel:
+        if not rel or rel == "mcp":
             continue
 
         try:

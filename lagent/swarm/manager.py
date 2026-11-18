@@ -5,6 +5,7 @@ import asyncio
 import secrets
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -51,6 +52,11 @@ class SwarmInstance:
     live_subs: set[asyncio.Queue] = field(default_factory=set)
     base_sha: str = ""
     worktrees: dict[str, Path] = field(default_factory=dict)
+    mission_policy: dict[str, Any] | None = None
+    mission_approved: set[str] = field(default_factory=set)
+    watchdog: Any = None
+    last_blocked: dict[str, Any] | None = None
+    last_stall: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         self.pause_evt.set()
@@ -75,7 +81,7 @@ class SwarmManager:
         self.journal = journal
         self.audit = audit
         self.notify = notify or (lambda _e, _d: None)
-        self.worktree_root = Path(worktree_root) if worktree_root else (self.store.dir.parent / "worktrees" / "swarm")
+        self.worktree_root = Path(worktree_root) if worktree_root else (Path(tempfile.gettempdir()) / "localagent_worktrees" / "swarm")
         self.worktree_root.mkdir(parents=True, exist_ok=True)
         self.default_runner = default_runner
         self.leases = FileLeaseManager()
@@ -130,7 +136,9 @@ class SwarmManager:
                 "graph": sw.graph.to_dict(),
                 "budget": sw.budget.snapshot(),
                 "merges": sw.merges.history,
-                "conflicts": [c.to_dict() for c in sw.merges.conflicts.values()],
+                "conflicts": [c.to_persist_dict() for c in sw.merges.conflicts.values()],
+                "mission_policy": sw.mission_policy,
+                "mission_approved": sorted(sw.mission_approved),
             },
         )
 
@@ -200,6 +208,9 @@ class SwarmManager:
         explicit_auto_worker: bool = False,
         budget: dict[str, Any] | None = None,
         mission_id: str | None = None,
+        mission_policy: dict[str, Any] | None = None,
+        mission_approved: set[str] | list[str] | None = None,
+        watchdog: Any = None,
         runner: RunnerFn | None = None,
         start: bool = True,
     ) -> SwarmInstance:
@@ -252,6 +263,9 @@ class SwarmManager:
             mailbox=Mailbox(self.store.mailbox_path(sw_id)),
             merges=MergeQueue(self.journal),
             mission_id=mission_id,
+            mission_policy=dict(mission_policy) if mission_policy else None,
+            mission_approved=set(mission_approved or ()),
+            watchdog=watchdog,
         )
         if sw.workspace and Path(sw.workspace).is_dir():
             rc, sha, _ = self._git_cmd(Path(sw.workspace), "rev-parse", "HEAD")
@@ -347,6 +361,7 @@ class SwarmManager:
             else:
                 ctx_info = {
                     "swarm": sw,
+                    "swarms": self,
                     "workspace": eff_ws,
                     "main_workspace": sw.workspace,
                     "permission_mode": eff_mode,
@@ -354,6 +369,9 @@ class SwarmManager:
                     "mailbox": sw.mailbox,
                     "budget": sw.budget,
                     "leases": self.leases,
+                    "mission_policy": sw.mission_policy,
+                    "mission_approved": set(sw.mission_approved),
+                    "watchdog": sw.watchdog,
                     "emit_step": lambda st_d: self._emit(sw, "agent_step", st_d, agent_id=node.id),
                 }
                 res_d = await runner(node, ctx_info)
@@ -396,6 +414,10 @@ class SwarmManager:
             node.result = raw_res + merge_note
             node.artifacts = list(res_d.get("artifacts") or [])
             node.tainted = tainted
+            if res_d.get("blocked"):
+                sw.last_blocked = res_d["blocked"]
+            if res_d.get("stall_signal"):
+                sw.last_stall = res_d["stall_signal"]
             node.status = "done" if res_d.get("status", "done") == "done" else "failed"
             if node.status != "done":
                 node.error = str(res_d.get("error") or "执行失败")
@@ -543,7 +565,12 @@ class SwarmManager:
             created_at=float(st.get("created_at") or time.time()),
             mission_id=st.get("mission_id"),
             base_sha=st.get("base_sha", ""),
+            mission_policy=st.get("mission_policy"),
+            mission_approved=set(st.get("mission_approved") or ()),
         )
+        sw.merges.load_conflicts(st.get("conflicts"))
+        if isinstance(st.get("merges"), list):
+            sw.merges.history = list(st["merges"])
         if runner:
             self._node_runner[sw.id] = runner
         self.swarms[sw.id] = sw

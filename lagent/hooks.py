@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -150,11 +151,15 @@ class HookManager:
             logger.warning("钩子命令因硬拒绝规则被跳过: %s (%s)", hook.command, why)
             return HookResult(action="deny", reason=f"钩子命令包含危险行为被拦截: {why}", exit_code=126)
 
-        # 环境变量清洗与字符串强制转换
-        env = sec.clean_env(str(ws))
+        # 环境变量清洗与 OS 沙箱包装（Linux bwrap / macOS seatbelt，禁用联网）
+        hook_home = Path(tempfile.gettempdir()) / "localagent_hookhome"
+        hook_home.mkdir(parents=True, exist_ok=True)
+        env = sec.clean_env(str(hook_home))
         for k, v in env_extra.items():
             env[str(k)] = str(v)
         argv = _shell_argv(hook.command)
+        if ws and ws.is_dir():
+            argv, _sb_kind = sec.wrap_in_sandbox(argv, ws, False, hook_home, sandbox_home=str(hook_home))
 
         creationflags = 0
         if sec.IS_WIN:
@@ -166,6 +171,7 @@ class HookManager:
                 *argv,
                 cwd=str(ws),
                 env=env,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=creationflags,
