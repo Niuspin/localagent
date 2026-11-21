@@ -285,9 +285,23 @@
       mcp: function (d) { LA.bus.emit('mcp', d); },
       hub: function (d) { LA.bus.emit('hub', d); },
       state: function (d) {
-        if (d && d.session_id && LA.S.cur && LA.S.cur.id === d.session_id && 'permission_mode' in d) {
-          LA.S.cur.permission_mode = d.permission_mode || null;
-          LA.bus.emit('sessionmeta', LA.S.cur);
+        if (d && d.session_id && LA.S.cur && LA.S.cur.id === d.session_id) {
+          var changed = false;
+          if ('permission_mode' in d) {
+            LA.S.cur.permission_mode = d.permission_mode || null;
+            changed = true;
+          }
+          if ('web_auth' in d) {
+            LA.S.cur.web_auth = d.web_auth || null;
+            if (LA.S.state && 'effective_web_auth' in d) LA.S.state.web_auth = d.effective_web_auth;
+            changed = true;
+          }
+          if ('approved_domains' in d && Array.isArray(d.approved_domains)) {
+            LA.S.cur.approved_domains = d.approved_domains;
+            if (LA.S.state) LA.S.state.approved_domains = d.approved_domains;
+            changed = true;
+          }
+          if (changed) LA.bus.emit('sessionmeta', LA.S.cur);
         }
       },
       notice: function (n) { LA.toast(n.text, n.level === 'warn' ? 'err' : null, 4500); },

@@ -27,7 +27,7 @@ SECRET_NAMES = (
     "brave", "google_cse", "google_cx", "tavily", "serper",
     "main_api_key", "compact_api_key", "embed_api_key", "swarm_worker_api_key",
 )
-SEARCH_PROVIDERS = ("duckduckgo", "bing", "baidu", "yahoo", "brave", "google_cse", "searxng", "tavily", "serper")
+SEARCH_PROVIDERS = ("duckduckgo", "bing", "baidu", "yahoo", "wikipedia", "github", "brave", "google_cse", "searxng", "tavily", "serper")
 _ROLE_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 DEFAULTS: dict[str, Any] = {
@@ -83,7 +83,7 @@ DEFAULTS: dict[str, Any] = {
         "html_scrapers_ack": False,
         "keys": {n: False for n in SECRET_NAMES},
     },
-    "web": {"timeout_s": 20, "max_bytes": 3_000_000, "max_chars": 12000},
+    "web": {"timeout_s": 20, "max_bytes": 3_000_000, "max_chars": 12000, "js_render_fallback": False, "batch_max_urls": 5},
     "research": {
         "mode": "off",
         "user_agent": "LocalAgentResearch/0.2 (+local-desktop)",
@@ -289,7 +289,7 @@ RANGES: dict[str, tuple[float, float]] = {
     "agent.max_steps": (1, 200), "agent.memory_recall_k": (0, 30), "agent.subagent_max_steps": (1, 30),
     "security.command_timeout_s": (1, 3600), "security.max_file_mb": (1, 2048),
     "security.trash_retention_days": (0, 3650),
-    "web.timeout_s": (3, 120), "web.max_bytes": (10_000, 50_000_000), "web.max_chars": (1000, 200_000),
+    "web.timeout_s": (3, 120), "web.max_bytes": (10_000, 50_000_000), "web.max_chars": (1000, 200_000), "web.batch_max_urls": (1, 10),
     "search.max_results": (1, 30),
     "research.per_domain_rps": (0.1, 5.0), "research.per_domain_conc": (1, 4),
     "research.max_requests_per_task": (1, 2000), "research.cache_ttl_h": (1, 720),

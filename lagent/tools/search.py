@@ -12,7 +12,7 @@ import base64
 import json
 import re
 from typing import Any, Callable
-from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urlsplit
 
 from .. import net
 from ..research.policy import ResearchPolicy, safe_user_agent
@@ -296,9 +296,72 @@ def serper(q: str, env: Env, n: int) -> list[Result]:
             for x in (data.get("organic") or [])[:n]]
 
 
+def wikipedia(q: str, env: Env, n: int) -> list[Result]:
+    """Wikipedia 官方公开 MediaWiki Action API（零密钥、结构化 JSON）。"""
+    lang = "zh" if (re.search(r"[\u4e00-\u9fff]", q) or env.region.lower().startswith(("cn", "zh"))) else "en"
+    base = f"https://{lang}.wikipedia.org"
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": q,
+        "srlimit": str(min(max(n, 3), 15)),
+        "format": "json",
+        "utf8": "1",
+    }
+    r = env.get(f"{base}/w/api.php?" + urlencode(params), headers={"Accept": "application/json"})
+    _http_ok(r, "Wikipedia")
+    data = json.loads(r.text())
+    items = (data.get("query") or {}).get("search") or []
+    out: list[Result] = []
+    for x in items[:n]:
+        title = _clean(x.get("title"))
+        if not title:
+            continue
+        slug = quote(title.replace(" ", "_"), safe="()_-:.")
+        snip = _clean(re.sub(r"<[^>]+>", "", str(x.get("snippet") or "")))
+        out.append({
+            "title": title,
+            "url": f"{base}/wiki/{slug}",
+            "snippet": snip,
+            "engine": "wikipedia",
+        })
+    return out
+
+
+def github(q: str, env: Env, n: int) -> list[Result]:
+    """GitHub 官方公开仓库搜索 REST API（匿名公开限频、零密钥、结构化 JSON）。"""
+    params = {"q": q, "per_page": str(min(max(n, 3), 15))}
+    r = env.get(
+        "https://api.github.com/search/repositories?" + urlencode(params),
+        headers={"Accept": "application/vnd.github+json"},
+    )
+    _http_ok(r, "GitHub")
+    data = json.loads(r.text())
+    items = data.get("items") or []
+    out: list[Result] = []
+    for x in items[:n]:
+        url = str(x.get("html_url") or "")
+        if not url:
+            continue
+        full_name = _clean(x.get("full_name") or x.get("name"))
+        desc = _clean(x.get("description") or "")
+        stars = x.get("stargazers_count")
+        lang = x.get("language")
+        meta = " · ".join(p for p in (f"★{stars}" if stars is not None else "", str(lang or "")) if p)
+        snippet = f"[{meta}] {desc}".strip() if meta else desc
+        out.append({
+            "title": full_name,
+            "url": url,
+            "snippet": snippet[:300],
+            "engine": "github",
+        })
+    return out
+
+
 PROVIDERS: dict[str, Callable[[str, Env, int], list[Result]]] = {
-    "duckduckgo": ddg, "bing": bing, "baidu": baidu, "yahoo": yahoo, "searxng": searxng,
-    "brave": brave, "google_cse": google_cse, "tavily": tavily, "serper": serper,
+    "duckduckgo": ddg, "bing": bing, "baidu": baidu, "yahoo": yahoo,
+    "wikipedia": wikipedia, "github": github,
+    "searxng": searxng, "brave": brave, "google_cse": google_cse, "tavily": tavily, "serper": serper,
 }
 
 
@@ -351,10 +414,12 @@ def _configured_official(cfg: Any, s: dict) -> list[str]:
 
 async def run_search(cfg: Any, query: str, *, limit: int | None = None, providers: list[str] | None = None,
                      time_range: str = "", research: Any = None, session_id: str | None = None,
-                     agent_id: str = "main") -> tuple[list[Result], dict[str, str]]:
+                     agent_id: str = "main", mode_override: str | None = None,
+                     allowed_domains: list[str] | None = None,
+                     blocked_domains: list[str] | None = None) -> tuple[list[Result], dict[str, str]]:
     policy = research.policy if research is not None else ResearchPolicy(cfg)
     ledger = research.ledger if research is not None else None
-    q_dec = policy.evaluate_query(query)
+    q_dec = policy.evaluate_query(query, mode_override=mode_override)
     if not q_dec.allowed:
         if ledger is not None:
             ledger.record(
@@ -446,14 +511,50 @@ async def run_search(cfg: Any, query: str, *, limit: int | None = None, provider
         return []
 
     if s.get("mode") == "first" and not providers:
+        fused: list[Result] = []
         for name in provs:
             res = await one(name)
             if res:
-                return res[:n], errors
-        return [], errors
-    got = await asyncio.gather(*[one(p) for p in provs])
-    lists = [g for g in got if g]
-    return (fuse(lists, n) if lists else []), errors
+                fused = res[:n]
+                break
+    else:
+        got = await asyncio.gather(*[one(p) for p in provs])
+        lists = [g for g in got if g]
+        fused = fuse(lists, max(n * 2, n)) if lists else []
+
+    # 当已确认公开搜索但常规 HTML 引擎全部因风控/故障返回空结果时，自动回退到免密钥官方公开 REST API (Wikipedia / GitHub)
+    if not fused and html_ack and not providers and errors:
+        fb_provs = [p for p in ("wikipedia", "github") if p not in provs]
+        if fb_provs:
+            fb_got = await asyncio.gather(*[one(p) for p in fb_provs])
+            fb_lists = [g for g in fb_got if g]
+            if fb_lists:
+                fused = fuse(fb_lists, max(n * 2, n))
+
+    if fused:
+        allow_set = [str(d).strip().lower().lstrip("*.") for d in (allowed_domains or []) if str(d).strip()]
+        block_set = [str(d).strip().lower().lstrip("*.") for d in (blocked_domains or []) if str(d).strip()]
+
+        def _dom_hit(dom: str, pats: list[str]) -> bool:
+            return any(dom == p or dom.endswith("." + p) for p in pats)
+
+        filtered: list[Result] = []
+        for item in fused:
+            u = str(item.get("url") or "")
+            dom = net.domain_of(u)
+            if not dom:
+                continue
+            if policy.category_for(u):
+                continue
+            if allow_set and not _dom_hit(dom, allow_set):
+                continue
+            if block_set and _dom_hit(dom, block_set):
+                continue
+            filtered.append(item)
+            if len(filtered) >= n:
+                break
+        return filtered, errors
+    return [], errors
 
 
 def format_results(results: list[Result]) -> str:
@@ -466,30 +567,36 @@ async def web_search(ctx: ToolCtx, a: dict) -> ToolResult:
     if a.get("site"):
         q += f" site:{a['site'].strip()}"
     research = getattr(ctx, "research", None)
+    web_auth = getattr(ctx.session, "web_auth", None) if ctx.session else None
     results, errors = await run_search(
         ctx.cfg, q, limit=a.get("max_results"), time_range=a.get("time_range", ""),
         research=research, session_id=ctx.sid, agent_id=getattr(ctx.session, "agent_id", "main"),
+        mode_override=web_auth,
+        allowed_domains=a.get("allowed_domains"),
+        blocked_domains=a.get("blocked_domains"),
     )
     for r in results:
         d = net.domain_of(r["url"])
-        if d:
+        if d and ctx.session:
             ctx.session.user_domains.add(d)
     if not results:
         msg = "没有搜索结果。"
         if errors:
             msg += "\n引擎错误:\n" + "\n".join(f"- {k}: {v}" for k, v in errors.items())
-        msg += "\n可尝试：换关键词/英文关键词；在 设置→搜索 启用更多引擎或配置代理。"
+        msg += "\n可尝试：换关键词/英文关键词；在对话框「联网授权」或 设置→搜索 中启用公开搜索源/配置引擎。"
         return ToolResult(msg, error=bool(errors), meta={"results": 0})
     txt = format_results(results)
     if errors:
         txt += "\n\n(部分引擎失败: " + "; ".join(f"{k}: {v[:60]}" for k, v in errors.items()) + ")"
-    txt += "\n\n需要细节时，用 web_fetch 读取上面某个网址的正文。"
+    txt += "\n\n需要细节时，用 web_fetch(url, prompt=...) 读取目标网页正文。"
     return ToolResult(txt, meta={"results": len(results)}, taint="网页搜索结果", untrusted_source=f"web_search:{q[:80]}")
 
 
 register(Tool(
-    "web_search", "联网搜索，返回标题/网址/摘要。会同时查询用户配置的多个搜索引擎并融合排序。查最新信息、事实核对、找资料时使用；之后用 web_fetch 读正文。",
+    "web_search", "联网搜索，返回标题/网址/摘要。支持按站点或域名过滤。查最新信息、事实核对、找资料时使用；之后用 web_fetch 精读正文。",
     obj({"query": P("string", "搜索关键词（简洁，必要时用英文）"), "max_results": P("integer", "结果数，默认按设置"),
          "site": P("string", "限定站点，如 github.com"),
+         "allowed_domains": {"type": "array", "items": {"type": "string"}, "description": "仅保留这些域名下的结果"},
+         "blocked_domains": {"type": "array", "items": {"type": "string"}, "description": "排除这些域名下的结果"},
          "time_range": P("string", "时间范围", enum=["day", "week", "month", "year"])}, ["query"]),
     web_search, "net_search", group="web", title=lambda a: f"搜索「{a.get('query', '')}」"))

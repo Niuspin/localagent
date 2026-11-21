@@ -65,6 +65,7 @@ BUILTIN_COMMANDS: list[dict[str, str]] = [
     {"name": "clear", "description": "清空当前会话历史", "kind": "builtin"},
     {"name": "plan", "description": "制定只读规划方案（/plan <任务>）", "kind": "builtin"},
     {"name": "mode", "description": "查看或切换权限模式（/mode <ask|auto_edit|plan|auto>）", "kind": "builtin"},
+    {"name": "web", "description": "查看或切换联网授权（/web <off|ask|allowlist|open|status|allow <domain>>）", "kind": "builtin"},
     {"name": "permissions", "description": "查看细粒度权限规则列表与生效状态", "kind": "builtin"},
     {"name": "hooks", "description": "查看当前配置的生命周期钩子", "kind": "builtin"},
     {"name": "doctor", "description": "诊断工作区、引擎、沙箱与环境状态", "kind": "builtin"},
@@ -310,6 +311,88 @@ def dispatch_command(text: str, ctx: CommandContext) -> CommandResult | None:
             return CommandResult(handled=True, is_prompt=False, text=f"❌ 无效的模式 `{args_str}`。可选模式: {', '.join(valid_modes)}")
         cur = ctx.cfg.get("agent", "permission_mode", default="ask") if ctx.cfg else "ask"
         return CommandResult(handled=True, is_prompt=False, text=f"当前权限模式: `{cur}`。可用 `/mode <ask|auto_edit|plan|auto>` 切换。")
+
+    if cmd == "web":
+        valid_web = ("off", "ask", "allowlist", "open")
+        offline = os.environ.get("LOCALAGENT_OFFLINE") == "1"
+        sess = ctx.session
+        toks = args_str.split() if args_str else []
+        sub = toks[0].lower() if toks else "status"
+
+        def _norm_dom(raw: str) -> str:
+            d = raw.strip().lower().lstrip("*.")
+            if "://" in d:
+                from urllib.parse import urlsplit
+                d = (urlsplit(d).hostname or "").lower()
+            d = d.split("/")[0].split(":")[0].rstrip(".")
+            return d[4:] if d.startswith("www.") else d
+
+        if sub in valid_web:
+            if offline and sub != "off":
+                return CommandResult(handled=True, is_prompt=False, text="❌ 当前以 `--offline` 离线模式启动，禁止开启联网授权。")
+            if sess is not None:
+                sess.web_auth = sub
+                if ctx.agent is not None:
+                    ctx.agent.store.save(sess)
+                    if ctx.agent.notify:
+                        ctx.agent.notify("state", {
+                            "session_id": sess.id,
+                            "web_auth": sess.web_auth,
+                            "effective_web_auth": sub,
+                            "approved_domains": list(getattr(sess, "approved_domains", []) or []),
+                        })
+            elif ctx.cfg and sub in valid_web:
+                ctx.cfg.patch({"research": {"mode": sub}})
+            labels = {"off": "关闭 (off)", "ask": "逐域确认 (ask)", "allowlist": "仅白名单 (allowlist)", "open": "自由合规 (open)"}
+            return CommandResult(handled=True, is_prompt=False, text=f"🌐 本会话联网授权已切换为: **{labels[sub]}**", data={"web_auth": sub})
+
+        if sub in ("allow", "trust") and len(toks) >= 2:
+            dom = _norm_dom(toks[1])
+            if not dom:
+                return CommandResult(handled=True, is_prompt=False, text="用法: `/web allow <domain>`")
+            if sess is not None:
+                doms = list(getattr(sess, "approved_domains", []) or [])
+                if dom not in doms:
+                    doms.append(dom)
+                    sess.approved_domains = doms[:200]
+                if ctx.agent is not None:
+                    ctx.agent.store.save(sess)
+                    if ctx.agent.notify:
+                        ctx.agent.notify("state", {
+                            "session_id": sess.id,
+                            "web_auth": sess.web_auth,
+                            "approved_domains": list(sess.approved_domains),
+                        })
+            return CommandResult(handled=True, is_prompt=False, text=f"✅ 已在本会话信任域名 `{dom}`")
+
+        if sub in ("revoke", "deny", "remove") and len(toks) >= 2:
+            dom = _norm_dom(toks[1])
+            if sess is not None:
+                sess.approved_domains = [x for x in (getattr(sess, "approved_domains", []) or []) if x != dom]
+                if ctx.agent is not None:
+                    ctx.agent.store.save(sess)
+                    if ctx.agent.notify:
+                        ctx.agent.notify("state", {
+                            "session_id": sess.id,
+                            "web_auth": sess.web_auth,
+                            "approved_domains": list(sess.approved_domains),
+                        })
+            return CommandResult(handled=True, is_prompt=False, text=f"已撤销域名 `{dom}` 的本会话信任。")
+
+        if sub in ("status", ""):
+            global_web = str(ctx.cfg.get("research", "mode", default="off") if ctx.cfg else "off").lower()
+            sess_web = getattr(sess, "web_auth", None) if sess is not None else None
+            eff_web = "off" if offline else (sess_web or global_web)
+            doms = list(getattr(sess, "approved_domains", []) or []) if sess is not None else []
+            lines = [
+                "### 🌐 联网授权状态",
+                f"- **当前生效档位**: `{eff_web}`" + ("（`--offline` 强制锁定）" if offline else (f"（会话覆盖；全局默认 `{global_web}`）" if sess_web else "（继承全局默认）")),
+                f"- **本会话已信任域名**: {', '.join(f'`{d}`' for d in doms) if doms else '无'}",
+                "- **用法**: `/web <off|ask|allowlist|open>` 或 `/web allow <domain>` / `/web revoke <domain>`",
+            ]
+            return CommandResult(handled=True, is_prompt=False, text="\n".join(lines))
+
+        return CommandResult(handled=True, is_prompt=False, text=f"❌ 无效的参数 `{args_str}`。用法: `/web <off|ask|allowlist|open|status|allow <domain>>`")
 
     if cmd == "plan":
         if args_str:

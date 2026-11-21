@@ -679,8 +679,15 @@
       });
     }
 
+    var isNetFetch = b.name === 'web_fetch';
     var ok = el('button', { class: 'btn primary', type: 'button', text: '允许一次', on: { click: function () { decide('allow'); } } });
-    var sess = el('button', { class: 'btn', type: 'button', text: '本会话允许', title: '本会话内对相同类型的操作不再询问（敏感文件/不可信上下文除外）', on: { click: function () { decide('allow_session'); } } });
+    var sess = el('button', {
+      class: 'btn',
+      type: 'button',
+      text: isNetFetch ? '本会话信任该域名' : '本会话允许',
+      title: isNetFetch ? '将此域名加入本会话已授权列表，后续访问该站无需再次确认' : '本会话内对相同类型的操作不再询问（敏感文件/不可信上下文除外）',
+      on: { click: function () { decide('allow_session'); } }
+    });
     var no = el('button', { class: 'btn danger', type: 'button', text: '拒绝', on: { click: function () { decide('deny'); } } });
     card.appendChild(el('div', { class: 'approve-btns' }, ok, sess, no));
 

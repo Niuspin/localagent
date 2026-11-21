@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var LA = window.LA, el = LA.el, icon = LA.icon;
-  var input, chipsBox, pop, btnSend, hint, modePill, thinkPill, taintChip, fileInput, composerEl;
+  var input, chipsBox, pop, btnSend, hint, modePill, thinkPill, webAuthPill, taintChip, fileInput, composerEl;
   var popItems = [], popSel = 0, popRange = null;
   var busy = false;      // 正在发送请求（防双击）
   var queued = [];       // 运行中排队的后续指令（Steer / Follow-up Queue）
@@ -18,6 +18,12 @@
     { value: 'auto', label: '思考：自动', desc: '由模型模板决定' },
     { value: 'on', label: '思考：开启', desc: '更适合复杂任务，但更慢' },
     { value: 'off', label: '思考：关闭', desc: '响应更快' }
+  ];
+  var WEB_AUTH_MODES = [
+    { value: 'off', label: '联网：关闭', short: '关闭', desc: '纯本地零出网，隐藏网页搜索与抓取工具' },
+    { value: 'ask', label: '联网：逐域确认', short: '逐域确认（推荐）', desc: '允许搜索；抓取未信任域名时弹窗确认' },
+    { value: 'allowlist', label: '联网：白名单', short: '仅白名单', desc: '仅允许访问全局/本会话已授权域名' },
+    { value: 'open', label: '联网：自由合规', short: '自由合规查询', desc: '按需自动搜索与读页，仍受 SSRF/robots/防注入约束' }
   ];
   var MAX_IMG = 1568, MAX_IMAGES = 6;
   var RES_TIERS = [
@@ -90,6 +96,23 @@
       } else if (LA.engine().status === 'starting') hint.textContent = '模型加载中，发送后会自动排队…';
     }
   }
+  function currentWebAuth() {
+    if (LA.S.state && LA.S.state.offline) return 'off';
+    if (LA.S.cur && LA.S.cur.web_auth) return LA.S.cur.web_auth;
+    if (!LA.S.cur && LA.S.draftWebAuth) return LA.S.draftWebAuth;
+    return LA.cfg('research.mode', (LA.S.state && LA.S.state.web_auth) || 'off') || 'off';
+  }
+  function currentApprovedDomains() {
+    if (LA.S.cur && Array.isArray(LA.S.cur.approved_domains)) return LA.S.cur.approved_domains.slice();
+    if (!LA.S.cur && Array.isArray(LA.S.draftApprovedDomains)) return LA.S.draftApprovedDomains.slice();
+    return [];
+  }
+  function hasOfficialSearchConfigured() {
+    var sc = LA.cfg('search', {}) || {};
+    if (sc.searxng_url) return true;
+    var keys = sc.keys || {};
+    return !!(keys.brave || keys.google_cse || keys.tavily || keys.serper);
+  }
   function updatePills() {
     var isOv = !!(LA.S.cur && LA.S.cur.permission_mode);
     var mode = (LA.S.cur && LA.S.cur.permission_mode) || LA.cfg('agent.permission_mode', (LA.S.state && LA.S.state.permission_mode) || 'ask');
@@ -102,6 +125,20 @@
     var t = THINK.filter(function (x) { return x.value === th; })[0] || THINK[0];
     thinkPill.innerHTML = icon('brain', 14);
     thinkPill.appendChild(el('span', { text: t.label }));
+
+    if (webAuthPill) {
+      var offline = !!(LA.S.state && LA.S.state.offline);
+      var wa = currentWebAuth();
+      var wm = WEB_AUTH_MODES.filter(function (x) { return x.value === wa; })[0] || WEB_AUTH_MODES[0];
+      var wCls = 'pill' + (offline ? ' web-offline' : wa === 'ask' ? ' web-ask' : wa === 'allowlist' ? ' web-allow' : wa === 'open' ? ' web-open' : '');
+      webAuthPill.className = wCls;
+      webAuthPill.innerHTML = icon(offline ? 'lock' : 'globe', 14);
+      webAuthPill.appendChild(el('span', { text: offline ? '离线锁定' : wm.label }));
+      webAuthPill.title = offline
+        ? '当前以 --offline 离线模式启动，禁止所有外部网络请求'
+        : (wm.desc + '（点击切换联网授权与信任域名）');
+    }
+
     var tainted = !!(LA.S.cur && LA.S.cur.tainted);
     taintChip.hidden = !tainted;
     if (tainted) {
@@ -235,6 +272,7 @@
     { name: 'plan', desc: '进入只读规划模式或制定详细步骤' },
     { name: 'status', desc: '查看工作区、会话、污染与权限状态' },
     { name: 'mode', desc: '切换或查看当前权限模式' },
+    { name: 'web', desc: '查看或切换联网授权（/web off|ask|allowlist|open）' },
     { name: 'context', desc: '查看当前上下文 Token 分布明细' },
     { name: 'undo', desc: '撤销上一个回合产生的文件修改' },
     { name: 'doctor', desc: '诊断工作区、引擎、沙箱与环境状态' },
@@ -478,7 +516,7 @@
   /* ------------------------------------------------------------ 初始化 */
   LA.composer.init = function () {
     input = LA.$('#input'); chipsBox = LA.$('#attachChips'); pop = LA.$('#slashPop'); btnSend = LA.$('#btnSend'); hint = LA.$('#sendHint');
-    modePill = LA.$('#modePill'); thinkPill = LA.$('#thinkPill'); taintChip = LA.$('#taintChip'); fileInput = LA.$('#fileInput'); composerEl = LA.$('#composer');
+    modePill = LA.$('#modePill'); thinkPill = LA.$('#thinkPill'); webAuthPill = LA.$('#webAuthPill'); taintChip = LA.$('#taintChip'); fileInput = LA.$('#fileInput'); composerEl = LA.$('#composer');
     queueBox = el('div', { class: 'queue-box', id: 'queueBox', hidden: true });
     composerEl.insertBefore(queueBox, chipsBox);
     LA.$('#btnAttach').innerHTML = icon('clip', 19);
@@ -575,6 +613,124 @@
     thinkPill.addEventListener('click', function () {
       LA.menu(thinkPill, THINK, function (v) { LA.cfgSet('generation.thinking', v, { immediate: true }); }, LA.cfg('generation.thinking', 'auto'));
     });
+
+    function openWebAuthMenu() {
+      if (!webAuthPill) return;
+      if (LA.S.state && LA.S.state.offline) {
+        LA.toast('当前以 --offline 离线模式启动，已强制禁止所有外网连接', 'err');
+        return;
+      }
+      var existing = document.getElementById('webAuthMenu');
+      if (existing) { existing.remove(); return; }
+      var host = webAuthPill.parentNode;
+      var wa = currentWebAuth();
+      var doms = currentApprovedDomains();
+      var m = el('div', { class: 'menu web-auth-menu', id: 'webAuthMenu' });
+
+      m.appendChild(el('div', { class: 'wa-head' },
+        el('b', { text: '联网授权（当前会话）' }),
+        el('span', { class: 'wa-sub', text: '严格遵循 SSRF / robots.txt / 防注入隔离' })
+      ));
+
+      WEB_AUTH_MODES.forEach(function (opt) {
+        var row = el('button', {
+          type: 'button',
+          class: 'menu-item' + (opt.value === wa ? ' sel' : ''),
+          on: {
+            click: function () {
+              m.remove();
+              LA.setSessionWebAuth(opt.value).then(function () {
+                if (opt.value !== 'off' && !hasOfficialSearchConfigured() && !LA.cfg('search.html_scrapers_ack', false)) {
+                  LA.toast('提示：可在联网授权菜单或 设置→搜索 开启公开搜索引擎，或配置 SearXNG/API Key', null, 3800);
+                }
+              });
+            }
+          }
+        },
+          el('b', { text: (opt.value === wa ? '✓ ' : '') + opt.short }),
+          el('small', { text: opt.desc })
+        );
+        m.appendChild(row);
+      });
+
+      if (!hasOfficialSearchConfigured()) {
+        var ackChecked = !!LA.cfg('search.html_scrapers_ack', false);
+        var ackInp = el('input', { type: 'checkbox', checked: ackChecked });
+        ackInp.addEventListener('change', function () {
+          LA.cfgSet('search.html_scrapers_ack', ackInp.checked, { immediate: true });
+          LA.toast(ackInp.checked ? '已启用内置公开搜索引擎（DuckDuckGo / Bing 等）' : '已关闭内置公开 HTML 搜索引擎', 'ok');
+        });
+        m.appendChild(el('label', { class: 'wa-ack' },
+          ackInp,
+          el('span', { text: '启用内置公开搜索源（DuckDuckGo/Bing 等，无需密钥）' })
+        ));
+      }
+
+      var spaChecked = !!LA.cfg('web.js_render_fallback', false);
+      var spaInp = el('input', { type: 'checkbox', checked: spaChecked });
+      spaInp.addEventListener('change', function () {
+        LA.cfgSet('web.js_render_fallback', spaInp.checked, { immediate: true });
+        LA.toast(spaInp.checked ? '已启用只读 SPA 动态渲染兜底（Playwright 沙箱）' : '已关闭 SPA 动态渲染兜底', 'ok');
+      });
+      m.appendChild(el('label', { class: 'wa-ack' },
+        spaInp,
+        el('span', { text: '启用 SPA 动态网页只读渲染兜底（Playwright 沙箱）' })
+      ));
+
+      var domSection = el('div', { class: 'wa-doms' });
+      domSection.appendChild(el('div', { class: 'wa-dom-title', text: '本会话已信任域名 (' + doms.length + ')' }));
+      var chipsWrap = el('div', { class: 'wa-dom-chips' });
+      if (!doms.length) {
+        chipsWrap.appendChild(el('span', { class: 'wa-dom-empty', text: '暂无；可在对话审批时点击「本会话信任该域名」或下方添加' }));
+      } else {
+        doms.forEach(function (d) {
+          chipsWrap.appendChild(el('span', { class: 'wa-dom-chip' },
+            el('span', { text: d }),
+            el('button', { type: 'button', title: '撤销信任 ' + d, text: '×', on: { click: function (ev) {
+              ev.stopPropagation();
+              var next = currentApprovedDomains().filter(function (x) { return x !== d; });
+              LA.setSessionWebAuth(undefined, next).then(function () {
+                if (document.getElementById('webAuthMenu')) { m.remove(); openWebAuthMenu(); }
+              });
+            } } })
+          ));
+        });
+      }
+      domSection.appendChild(chipsWrap);
+
+      var addInp = el('input', { type: 'text', class: 'wa-dom-inp', placeholder: '输入信任域名，如 docs.python.org', spellcheck: false });
+      var addBtn = el('button', { type: 'button', class: 'btn sm', text: '信任', on: { click: function (ev) {
+        ev.stopPropagation();
+        var raw = addInp.value.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0].replace(/^www\./, '');
+        if (!raw || raw.indexOf('.') < 0) { LA.toast('请输入合法域名，例如 docs.python.org', 'err'); return; }
+        var next = currentApprovedDomains();
+        if (next.indexOf(raw) < 0) next.push(raw);
+        LA.setSessionWebAuth(undefined, next).then(function () {
+          if (document.getElementById('webAuthMenu')) { m.remove(); openWebAuthMenu(); }
+        });
+      } } });
+      addInp.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); ev.stopPropagation(); addBtn.click(); }
+      });
+      domSection.appendChild(el('div', { class: 'wa-dom-add' }, addInp, addBtn));
+      m.appendChild(domSection);
+
+      m.appendChild(el('div', { class: 'wa-foot' },
+        el('button', { type: 'button', class: 'btn sm ghost', text: '网络账本', on: { click: function () { m.remove(); if (LA.panels && LA.panels.openNet) LA.panels.openNet(); } } }),
+        el('button', { type: 'button', class: 'btn sm ghost', text: '高级搜索设置', on: { click: function () { m.remove(); if (LA.settings && LA.settings.open) LA.settings.open('search'); } } })
+      ));
+
+      host.appendChild(m);
+      setTimeout(function () {
+        function close(ev) {
+          if (m.contains(ev.target) || ev.target === webAuthPill || webAuthPill.contains(ev.target)) return;
+          m.remove();
+          document.removeEventListener('mousedown', close);
+        }
+        document.addEventListener('mousedown', close);
+      }, 0);
+    }
+    if (webAuthPill) webAuthPill.addEventListener('click', openWebAuthMenu);
 
     ['state', 'config', 'runstate', 'taint', 'sessionmeta', 'session'].forEach(function (n) { LA.bus.on(n, function () { updatePills(); updateSend(); syncCapsUi(); }); });
     LA.bus.on('fschanged', function () { fileTreeCache.ts = 0; });

@@ -121,6 +121,8 @@ class Session:
         self.seen: dict[str, str] = {}        # 已读/写文本文件 sha256（跨重启保留）
         self.kv_prune_upto: int = 0           # 单调递增的 Append-Only KV 前缀裁剪水位线
         self.permission_mode: str | None = None  # 会话级权限模式覆盖（None 表示跟随全局配置）
+        self.web_auth: str | None = None         # 会话级联网授权档位（None 表示继承默认 off；可选 off/ask/allowlist/open）
+        self.approved_domains: list[str] = []    # 用户显式信任的域名列表（ask/allowlist 模式放行）
         self.shell_cwd: str = ""              # 会话级终端当前相对工作目录
         self.shell_env: dict[str, str] = {}   # 会话级安全终端环境变量覆盖
         self.agent_id: str = "main"           # 默认归属主代理
@@ -139,7 +141,9 @@ class Session:
                 "pinned": self.pinned, "tainted": self.tainted, "summary": self.summary, "todos": self.todos, "ui": self.ui,
                 "history": self.history, "usage": self.usage, "nonce": self.nonce, "user_domains": self.user_domains, "calib": self.calib,
                 "tool_groups": self.tool_groups, "seen": self.seen, "kv_prune_upto": self.kv_prune_upto,
-                "permission_mode": self.permission_mode, "shell_cwd": self.shell_cwd, "shell_env": self.shell_env,
+                "permission_mode": self.permission_mode, "web_auth": self.web_auth,
+                "approved_domains": self.approved_domains,
+                "shell_cwd": self.shell_cwd, "shell_env": self.shell_env,
                 "agent_id": self.agent_id, "swarm_id": self.swarm_id, "mission_id": self.mission_id,
                 "parent_session_id": self.parent_session_id, "forked_from_index": self.forked_from_index}
 
@@ -150,7 +154,8 @@ class Session:
         src = migrate_v1_to_v2(d) if migrated else d
         s = cls(src["id"], src.get("workspace", ""))
         for k in ("title", "created", "updated", "pinned", "tainted", "summary", "todos", "ui", "history", "usage", "nonce",
-                  "user_domains", "calib", "tool_groups", "seen", "kv_prune_upto", "permission_mode", "shell_cwd", "shell_env",
+                  "user_domains", "calib", "tool_groups", "seen", "kv_prune_upto", "permission_mode", "web_auth",
+                  "approved_domains", "shell_cwd", "shell_env",
                   "agent_id", "swarm_id", "mission_id", "parent_session_id", "forked_from_index"):
             if k in src:
                 setattr(s, k, src[k])
@@ -179,6 +184,8 @@ class Session:
                 "title": self.title, "workspace": self.workspace, "created": self.created, "updated": self.updated,
                 "pinned": self.pinned, "tainted": self.tainted, "summary": self.summary,
                 "permission_mode": self.permission_mode,
+                "web_auth": self.web_auth,
+                "approved_domains": list(self.approved_domains),
                 "context": {**self.usage, "summarized": bool(self.summary)}, "todos": self.todos, "active_run": self.active_run,
                 "messages": self.ui}
 
@@ -352,6 +359,8 @@ class SessionStore:
             new_s.tool_groups = list(src.tool_groups)
             new_s.seen = dict(src.seen)
             new_s.permission_mode = src.permission_mode
+            new_s.web_auth = src.web_auth
+            new_s.approved_domains = list(src.approved_domains)
             new_s.shell_cwd = src.shell_cwd
             new_s.shell_env = dict(src.shell_env)
             new_s.agent_id = src.agent_id

@@ -7,6 +7,7 @@
   var TABS = [['engine', '模型与引擎'], ['gen', '生成'], ['security', '安全'], ['search', '搜索'], ['mcp', '扩展'], ['ui', '外观'], ['metrics', '运行指标']];
   var SEARCH_ENGINES = {
     duckduckgo: { name: 'DuckDuckGo', note: '无需密钥' }, bing: { name: 'Bing', note: '无需密钥' }, baidu: { name: '百度', note: '无需密钥' }, yahoo: { name: 'Yahoo', note: '无需密钥' },
+    wikipedia: { name: 'Wikipedia API', note: '官方公开 REST API · 无需密钥' }, github: { name: 'GitHub Search API', note: '官方公开 REST API · 无需密钥' },
     brave: { name: 'Brave Search', note: '需要 API Key', key: 'brave' }, google_cse: { name: 'Google 可编程搜索', note: '需要 API Key 与 CX', key: 'google_cse' },
     searxng: { name: 'SearXNG', note: '需要实例地址' }, tavily: { name: 'Tavily', note: '需要 API Key', key: 'tavily' }, serper: { name: 'Serper (Google)', note: '需要 API Key', key: 'serper' }
   };
@@ -523,6 +524,8 @@
     pane.appendChild(F('单任务请求上限', num('research.max_requests_per_task', { min: 1, max: 2000 })));
     pane.appendChild(F('PII 最小化脱敏', sw('research.pii_redact', '落盘前脱敏邮箱/手机号/证件号')));
     pane.appendChild(F('Dual-LLM 隔离读取', sw('research.reader_isolation', '无工具 reader 角色隔离抽取证据')));
+    pane.appendChild(F('SPA 动态渲染兜底', sw('web.js_render_fallback', '静态正文为空时启用只读 Playwright 沙箱渲染（禁 Cookie/非 GET/防 SSRF）')));
+    pane.appendChild(F('单次批量抓取上限', num('web.batch_max_urls', { min: 1, max: 10 }), 'web_fetch(urls=[...]) 并发读取的最大网页数。'));
     function domainListField(key, label, ph) {
       var inp = el('input', { class: 'inp wide', value: (LA.cfg(key, []) || []).join(', '), placeholder: ph, spellcheck: false });
       inp.addEventListener('change', function () {

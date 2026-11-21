@@ -23,7 +23,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import __version__, appwindow, gguf, hub as hub_mod, hw, metrics as metrics_mod
+from . import __version__, appwindow, gguf, hub as hub_mod, hw, metrics as metrics_mod, net
 from .paths import FROZEN
 from . import security as sec
 from .artifacts import ArtifactStore
@@ -256,11 +256,16 @@ def make_app(st: State) -> Starlette:
         sess = st.store.get(sid) if sid else None
         global_mode = st.cfg.get("agent", "permission_mode")
         eff_mode = (getattr(sess, "permission_mode", "") if sess else "") or global_mode
+        offline = os.environ.get("LOCALAGENT_OFFLINE") == "1"
+        global_web = "off" if offline else str(st.cfg.get("research", "mode", default="off") or "off").lower()
+        eff_web = "off" if offline else ((getattr(sess, "web_auth", None) if sess else None) or global_web)
         return J({"version": __version__, "workspace": st.workspace_of(sid), "engine": st.engine.state(), "models": models,
                   "mmprojs": mms, "hw": await asyncio.to_thread(hw.detect), "sandbox": sec.sandbox_info(),
                   "capabilities": detect_capabilities(st.engine, st.cfg, st.engine.bin_dir),
                   "permission_mode": eff_mode, "global_permission_mode": global_mode,
-                  "offline": os.environ.get("LOCALAGENT_OFFLINE") == "1",
+                  "web_auth": eff_web, "global_web_auth": global_web,
+                  "approved_domains": list(getattr(sess, "approved_domains", []) or []) if sess else [],
+                  "offline": offline,
                   "tainted": bool(sess.tainted) if sess else False})
 
     @route("/api/capabilities", ["GET"])
@@ -353,6 +358,39 @@ def make_app(st: State) -> Starlette:
                 st.subs.discard(q)
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    def _norm_domains(raw: Any) -> list[str]:
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            raise ValueError("approved_domains 必须是域名字符串数组")
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            d = str(item or "").strip().lower().lstrip("*.")
+            if not d:
+                continue
+            if "://" in d:
+                d = net.domain_of(d)
+            elif d.startswith("www."):
+                d = d[4:]
+            d = d.split("/")[0].split(":")[0].rstrip(".")
+            if d and d not in seen:
+                seen.add(d)
+                out.append(d)
+            if len(out) >= 200:
+                break
+        return out
+
+    def _validate_web_auth(raw: Any) -> str | None:
+        wa = str(raw or "").strip().lower()
+        if not wa:
+            return None
+        if wa not in ("off", "ask", "allowlist", "open"):
+            raise ValueError("web_auth 只能是 off / ask / allowlist / open 或空字符串")
+        if wa != "off" and os.environ.get("LOCALAGENT_OFFLINE") == "1":
+            raise ValueError("当前以 --offline 离线模式启动，禁止开启联网授权")
+        return wa
+
     # ------------------------------------------------------------ 会话
     @route("/api/sessions", ["GET", "POST"])
     async def sessions(req: Request) -> Response:
@@ -361,7 +399,13 @@ def make_app(st: State) -> Starlette:
             ws = d.get("workspace") or ""
             if ws:
                 ws = str(sec.validate_workspace(ws))
+            wa = _validate_web_auth(d.get("web_auth")) if "web_auth" in d else None
+            doms = _norm_domains(d.get("approved_domains")) if "approved_domains" in d else []
             s = st.store.create(ws or st.cfg.get("workspace", default=""))
+            if wa is not None or doms:
+                s.web_auth = wa
+                s.approved_domains = doms
+                st.store.save(s)
             return J(s.view())
         return J(st.store.list())
 
@@ -440,8 +484,20 @@ def make_app(st: State) -> Starlette:
                 if pm and pm not in ("ask", "auto_edit", "plan", "auto"):
                     raise ValueError("permission_mode 只能是 ask / auto_edit / plan / auto 或空字符串")
                 s.permission_mode = pm or None
+            if "web_auth" in d:
+                s.web_auth = _validate_web_auth(d["web_auth"])
+            if "approved_domains" in d:
+                s.approved_domains = _norm_domains(d["approved_domains"])
             st.store.save(s)
-            st.broadcast("state", {"session_id": s.id, "permission_mode": s.permission_mode or st.cfg.get("agent", "permission_mode")})
+            offline = os.environ.get("LOCALAGENT_OFFLINE") == "1"
+            eff_web = "off" if offline else (s.web_auth or str(st.cfg.get("research", "mode", default="off") or "off").lower())
+            st.broadcast("state", {
+                "session_id": s.id,
+                "permission_mode": s.permission_mode or st.cfg.get("agent", "permission_mode"),
+                "web_auth": s.web_auth,
+                "effective_web_auth": eff_web,
+                "approved_domains": list(s.approved_domains),
+            })
         return J(s.view())
 
     @route("/api/sessions/{sid}/messages", ["POST"])

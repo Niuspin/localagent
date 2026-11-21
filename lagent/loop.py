@@ -12,6 +12,7 @@ import asyncio
 import base64
 import copy
 import json
+import os
 import platform
 import re
 import time
@@ -265,6 +266,14 @@ class Agent:
             return pm
         return self.cfg.get("agent", "permission_mode", default="ask")
 
+    def _session_web_auth(self, sess: Session | None) -> str:
+        if os.environ.get("LOCALAGENT_OFFLINE") == "1":
+            return "off"
+        wa = getattr(sess, "web_auth", None) if sess is not None else None
+        if wa in ("off", "ask", "allowlist", "open"):
+            return wa
+        return str(self.cfg.get("research", "mode", default="off") or "off").lower()
+
     def _get_perm_mgr(self, ws: str) -> PermissionManager:
         mgr = self._perm_mgrs.get(ws)
         if mgr is None:
@@ -397,10 +406,14 @@ class Agent:
         has_ws: bool,
         groups: set[str] | frozenset[str] = frozenset(),
         allowed_tools: set[str] | frozenset[str] | None = None,
+        web_auth: str | None = None,
     ) -> list[Tool]:
+        eff_web = "off" if os.environ.get("LOCALAGENT_OFFLINE") == "1" else web_auth
         out = []
         for t in TOOLS.values():
             if allowed_tools is not None and t.name not in allowed_tools:
+                continue
+            if eff_web == "off" and t.group in ("web", "research"):
                 continue
             if mode == "plan" and t.kind in ("write", "delete", "exec", "skill", "mcp"):
                 continue
@@ -429,6 +442,8 @@ class Agent:
             sess.title = make_title(text, files_)
         st = SessionState(sess.id, sess.tainted, sess.nonce, sess.todos, set(sess.user_domains),
                           self.allow_keys.setdefault(sess.id, set()),
+                          web_auth=self._session_web_auth(sess),
+                          approved_domains=set(getattr(sess, "approved_domains", []) or []),
                           shell_cwd=getattr(sess, "shell_cwd", ""),
                           shell_env=dict(getattr(sess, "shell_env", {}) or {}),
                           swarm_id=getattr(sess, "swarm_id", None),
@@ -439,6 +454,7 @@ class Agent:
             d = net.domain_of(u)
             if d:
                 st.user_domains.add(d)
+                st.approved_domains.add(d)
         st.tool_groups = set(sess.tool_groups) | toolset.detect(text, files_, skills_)
         if self.engine.tuned().preload_tools:          # 大模型：一次给全，省掉 load_tools 往返（MCP 组仍按需）
             st.tool_groups |= toolset.static_groups()
@@ -575,6 +591,7 @@ class Agent:
             if status == "done" and not sess.tainted and self.memory is not None and not getattr(st, "depth", 0):
                 self._schedule_distill(sess, text, ui_ast)
             sess.tainted, sess.todos, sess.user_domains = st.tainted, st.todos, sorted(st.user_domains)[:200]
+            sess.approved_domains = sorted(st.approved_domains)[:200]
             sess.tool_groups = sorted(st.tool_groups)
             sess.swarm_id = getattr(st, "swarm_id", None) or sess.swarm_id
             sess.shell_cwd = getattr(st, "shell_cwd", "")
@@ -751,8 +768,15 @@ class Agent:
             if block:
                 parts += f"\n\n<memory>\n{block}\n</memory>"
                 self.memory.touch(ids)
-        # 将当前日期放入本轮用户消息尾部，保持 system_prompt 跨午夜 KV 前缀稳定
-        parts = (parts + f"\n\n[环境日期: {date.today().isoformat()}]") if parts else f"[环境日期: {date.today().isoformat()}]"
+        # 将当前日期与当前联网授权提示放入本轮用户消息尾部，保持 system_prompt KV 前缀稳定
+        web_auth_eff = getattr(ctx.session, "web_auth", None) or self._session_web_auth(sess)
+        web_hint = ""
+        if web_auth_eff and web_auth_eff != "off":
+            web_hint = (
+                f"\n[联网授权: {web_auth_eff} — 可按需调用 web_search 发现权威来源，并用 web_fetch(url=..., prompt=...) 或 web_fetch(urls=[...], prompt=...) 批量对比提炼正文。"
+                "遇 robots.txt/验证码/登录墙/付费墙禁止绕过，如实告知并换源；回答请附上已核实来源链接。]"
+            )
+        parts = (parts + f"\n\n[环境日期: {date.today().isoformat()}]{web_hint}") if parts else f"[环境日期: {date.today().isoformat()}]{web_hint}"
         if images:
             if self.engine.vision:
                 content: Any = [{"type": "text", "text": parts}] + [{"type": "image_url", "image_url": {"url": u}} for u in images]
@@ -837,7 +861,8 @@ class Agent:
             if self.outputs is not None and "outputs" not in st.tool_groups and any((m.get("_pruned") or i < getattr(sess, "kv_prune_upto", 0)) and m.get("_out") for i, m in enumerate(sess.history)):
                 self._ensure_outputs_group(sess, st)       # 历史里已有“可取回”的占位（上一轮或更早精简的）
             eff_allowed = self._eff_allowed(getattr(st, "allowed_tools", None), getattr(st, "skill_allowed_tools", None))
-            tools = self.tools_for(mode, bool(ws), st.tool_groups, eff_allowed)
+            st.web_auth = self._session_web_auth(sess)
+            tools = self.tools_for(mode, bool(ws), st.tool_groups, eff_allowed, web_auth=st.web_auth)
             schemas = [t.schema() for t in tools]
             remote_target = (
                 self.router.provider.resolve(llm_role).kind != "local"
@@ -1255,16 +1280,42 @@ class Agent:
                 self.audit.append(event="hard_deny", session=sess.id, reason=why, command=command[:200], **self._audit_ctx(run))
                 return f"拒绝: 命令被安全规则禁止（{why}）。请换一种安全的做法。", []
         domain_ok = True
+        policy_ask = False
+        fetch_urls: list[str] = []
+        fetch_doms: list[str] = []
+        if eff_kind == "net_search":
+            eff_web = getattr(st, "web_auth", None) or self._session_web_auth(sess)
+            if eff_web == "off":
+                msg_off = "当前会话未开启联网授权（联网：关闭），请点击输入框下方「联网授权」开启后再搜索。"
+                finish("denied", msg_off)
+                return f"拒绝: {msg_off}", []
         if eff_kind == "net_fetch":
-            u = urlsplit(args.get("url", "") if "://" in args.get("url", "") else "https://" + args.get("url", ""))
-            domain_ok = (net.domain_of(u.geturl()) in st.user_domains) and len(u.query) <= 200 and not u.username
-            if self.research is not None:
-                pdec = self.research.policy.evaluate_url(u.geturl(), purpose="web_fetch", approved_domains=st.user_domains)
-                if pdec.action == "deny":
-                    finish("denied", pdec.reason)
-                    return f"拒绝: {pdec.reason}", []
-                if pdec.action == "ask":
+            fetch_urls = web.extract_fetch_urls(args)
+            eff_web = getattr(st, "web_auth", None) or self._session_web_auth(sess)
+            if not fetch_urls and eff_web == "off":
+                msg_off = "当前会话未开启联网授权（联网：关闭），请点击输入框下方「联网授权」开启后再读取外部网页。"
+                finish("denied", msg_off)
+                return f"拒绝: {msg_off}", []
+            for fu in fetch_urls:
+                u = urlsplit(fu)
+                fdom = net.domain_of(u.geturl())
+                if fdom and fdom not in fetch_doms:
+                    fetch_doms.append(fdom)
+                if not ((fdom in st.user_domains or fdom in st.approved_domains) and len(u.query) <= 200 and not u.username):
                     domain_ok = False
+                if self.research is not None:
+                    pdec = self.research.policy.evaluate_url(
+                        u.geturl(),
+                        purpose="web_fetch",
+                        approved_domains=st.approved_domains,
+                        mode_override=eff_web,
+                        once_approved_urls=st.once_approved_urls,
+                    )
+                    if pdec.action == "deny":
+                        finish("denied", pdec.reason)
+                        return f"拒绝: {pdec.reason}", []
+                    if pdec.action == "ask":
+                        policy_ask = True
         sandboxed = call_ctx.sandbox_kind != "none" and self.cfg.get("security", "command_sandbox", default="auto") == "auto"
         if eff_kind == "mcp":      # MCP 服务器是否“被隔离”看它自己的沙箱与联网设置，而不是命令沙箱
             sandboxed = bool(self.mcp is not None and self.mcp.contained(str(tool.extra.get("server", ""))))
@@ -1280,7 +1331,7 @@ class Agent:
             dec = custom_dec
         else:
             dec = sec.Policy.decide(kind=eff_kind, name=name, mode=mode, tainted=tainted_eff, allow_keys=st.allow_keys, sensitive=sensitive,
-                                    command=command, sandboxed=sandboxed, domain_ok=domain_ok)
+                                    command=command, sandboxed=sandboxed, domain_ok=domain_ok, policy_ask=policy_ask)
         if dec.action == "deny":
             finish("denied", dec.reason)
             return f"拒绝: {dec.reason}", []
@@ -1316,7 +1367,22 @@ class Agent:
                 finish("denied", "用户拒绝了此操作")
                 self.audit.append(event="denied", session=sess.id, tool=name, args=sec.summarize_args(args), **self._audit_ctx(run))
                 return "用户拒绝了此操作。不要重复尝试相同操作；请换个方式或询问用户想怎么做。", []
-            if decision == "allow_session" and not sensitive and not tainted_eff and eff_kind in ("write", "exec", "mcp"):
+            if eff_kind == "net_fetch":
+                if decision == "allow" and fetch_urls:
+                    st.once_approved_urls.update(fetch_urls)
+                elif decision == "allow_session" and fetch_doms:
+                    st.approved_domains.update(fetch_doms)
+                    st.user_domains.update(fetch_doms)
+                    sess.approved_domains = sorted(st.approved_domains)[:200]
+                    self.store.save(sess)
+                    if self.notify:
+                        self.notify("state", {
+                            "session_id": sess.id,
+                            "web_auth": sess.web_auth,
+                            "effective_web_auth": st.web_auth,
+                            "approved_domains": list(sess.approved_domains),
+                        })
+            elif decision == "allow_session" and not sensitive and not tainted_eff and eff_kind in ("write", "exec", "mcp"):
                 st.allow_keys.add(dec.key)
 
         # ---- 文件协作租约（Swarm 并发访问防竞态）

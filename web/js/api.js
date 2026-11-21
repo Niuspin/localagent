@@ -3,7 +3,7 @@
   'use strict';
   var LA = window.LA = window.LA || {};
 
-  LA.S = { state: null, config: null, sessions: [], missions: [], cur: null, skills: [], drawerOpen: false, drawerTab: 'files', attachments: [], chosen: [], restartNeeded: false };
+  LA.S = { state: null, config: null, sessions: [], missions: [], cur: null, skills: [], drawerOpen: false, drawerTab: 'files', attachments: [], chosen: [], restartNeeded: false, draftWebAuth: null, draftApprovedDomains: [] };
 
   /* ---------- 事件总线 ---------- */
   var subs = {};
@@ -86,6 +86,29 @@
       }).catch(LA.fail);
     }
     LA.cfgSet('agent.permission_mode', mode || 'ask', { immediate: true });
+    return Promise.resolve();
+  };
+  LA.setSessionWebAuth = function (webAuth, approvedDomains) {
+    var payload = {};
+    if (webAuth !== undefined) payload.web_auth = webAuth || '';
+    if (approvedDomains !== undefined) payload.approved_domains = approvedDomains;
+    if (LA.S.cur && LA.S.cur.id) {
+      return LA.patch('/api/sessions/' + LA.S.cur.id, payload).then(function (v) {
+        if (LA.S.cur && LA.S.cur.id === v.id) {
+          LA.S.cur.web_auth = v.web_auth || null;
+          LA.S.cur.approved_domains = v.approved_domains || [];
+        }
+        if (LA.S.state) {
+          LA.S.state.web_auth = v.web_auth || LA.cfg('research.mode', 'off');
+          LA.S.state.approved_domains = v.approved_domains || [];
+        }
+        LA.bus.emit('sessionmeta', v);
+        return v;
+      }).catch(LA.fail);
+    }
+    if (webAuth !== undefined) LA.S.draftWebAuth = webAuth || null;
+    if (approvedDomains !== undefined) LA.S.draftApprovedDomains = approvedDomains.slice();
+    LA.bus.emit('sessionmeta', null);
     return Promise.resolve();
   };
   LA.refreshConfig = function () {

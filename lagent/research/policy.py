@@ -227,14 +227,18 @@ class ResearchPolicy:
         val = self.cfg.get("research", default={}) if self.cfg else {}
         return val if isinstance(val, dict) else {}
 
-    def mode(self) -> str:
+    def mode(self, mode_override: str | None = None) -> str:
         if is_offline():
             return "off"
+        if mode_override:
+            ov = str(mode_override).strip().lower()
+            if ov in ("off", "ask", "allowlist", "open"):
+                return ov
         return str(self._rcfg().get("mode") or "off").lower()
 
-    def respect_robots(self) -> bool:
+    def respect_robots(self, mode_override: str | None = None) -> bool:
         rc = self._rcfg()
-        m = self.mode()
+        m = self.mode(mode_override)
         val = bool(rc.get("respect_robots", True))
         if not val and m != "allowlist":
             return True
@@ -249,9 +253,16 @@ class ResearchPolicy:
                 return cat
         return ""
 
-    def evaluate_query(self, query: str) -> PolicyDecision:
+    def evaluate_query(self, query: str, *, mode_override: str | None = None) -> PolicyDecision:
         if is_offline():
             return PolicyDecision(False, "deny", "离线模式（--offline）已禁用联网搜索")
+        if mode_override and str(mode_override).strip().lower() == "off":
+            return PolicyDecision(
+                False,
+                "deny",
+                "当前会话未开启联网授权（联网：关闭），请点击输入框下方「联网授权」开启后再试",
+                category="web_auth_off",
+            )
         ok, why = check_outbound_query(query)
         if not ok:
             return PolicyDecision(False, "deny", why, category="query_sanitization")
@@ -264,6 +275,8 @@ class ResearchPolicy:
         purpose: str = "web_fetch",
         approved_domains: set[str] | None = None,
         allow_loopback: bool = False,
+        mode_override: str | None = None,
+        once_approved_urls: set[str] | None = None,
     ) -> PolicyDecision:
         try:
             sp = urlsplit(url)
@@ -290,7 +303,7 @@ class ResearchPolicy:
         if cat:
             return PolicyDecision(False, "deny", f"URL 命中受限内容类别 ({cat}): {dom}", category=cat, domain=dom)
 
-        m = self.mode()
+        m = self.mode(mode_override)
         if purpose.startswith("research"):
             if m == "off":
                 return PolicyDecision(False, "deny", "自主联网调研默认关闭（research.mode=off），请在 设置→搜索 中开启后使用", domain=dom)
@@ -307,13 +320,19 @@ class ResearchPolicy:
                 return PolicyDecision(False, "ask", f"research.mode=ask：首次访问域名 {dom} 需要用户确认", domain=dom)
             return PolicyDecision(True, "allow", "open", domain=dom)
 
+        if mode_override is not None and m == "off" and purpose == "web_fetch" and not (allow_loopback and is_loopback_host(host)):
+            return PolicyDecision(False, "deny", "当前会话未开启联网授权（联网：关闭），请点击输入框下方「联网授权」开启", category="web_auth_off", domain=dom)
+
+        if once_approved_urls and url in once_approved_urls:
+            return PolicyDecision(True, "allow", "once_approved", domain=dom)
+
         # 非 automated research 路径（web_fetch / web_search / mcp_http）：
-        # 若用户将 research.mode 设为 allowlist，同样收紧外网访问到 allow_domains
         if m == "allowlist" and not (allow_loopback and is_loopback_host(host)):
-            if not (_domain_matches(dom, allow_domains) or _domain_matches(host, allow_domains)):
+            appr = approved_domains or set()
+            if not (_domain_matches(dom, allow_domains) or _domain_matches(host, allow_domains) or _domain_matches(dom, list(appr))):
                 return PolicyDecision(False, "deny", f"当前处于白名单模式 (allowlist)，域名 {dom} 未在允许列表内", category="allowlist", domain=dom)
         if m == "ask" and purpose in ("web_fetch", "mcp_http") and not (allow_loopback and is_loopback_host(host)):
             appr = approved_domains or set()
             if not (_domain_matches(dom, allow_domains) or _domain_matches(dom, list(appr))):
-                return PolicyDecision(False, "ask", f"策略为逐域确认 (ask)：访问新域名 {dom} 需确认", domain=dom)
+                return PolicyDecision(False, "ask", f"联网策略为逐域确认 (ask)：访问新域名 {dom} 需用户确认", domain=dom)
         return PolicyDecision(True, "allow", "ok", domain=dom)

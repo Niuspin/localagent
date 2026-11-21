@@ -569,7 +569,8 @@ class Policy:
 
     @staticmethod
     def decide(*, kind: str, name: str, mode: str, tainted: bool, allow_keys: set[str], sensitive: str | None = None,
-               command: str | None = None, sandboxed: bool = False, domain_ok: bool = True) -> Decision:
+               command: str | None = None, sandboxed: bool = False, domain_ok: bool = True,
+               policy_ask: bool = False) -> Decision:
         key = f"exec:{normalize_cmd(command)}" if (kind == "exec" and command) else name
         risk = {"write": "medium", "delete": "high", "exec": "high", "skill": "high", "mcp": "high", "net_fetch": "medium"}.get(kind, "low")
         if mode == "plan" and kind in ("write", "delete", "exec", "skill", "mcp"):
@@ -585,6 +586,8 @@ class Policy:
         if kind == "net_fetch":
             if tainted and not domain_ok:
                 return Decision("ask", "上下文含不可信内容，且该域名未出现在你的消息或搜索结果中——可能是提示注入试图外泄数据，请确认。", "high", key)
+            if policy_ask:
+                return Decision("ask", "当前联网策略为「逐域确认」，首次访问该域名需要你确认。", "medium", key)
             return Decision("allow", "", "medium", key)
         if kind == "mcp":      # 外部 MCP 工具：默认逐次确认；其结果会污染会话（除非该服务器被设为“信任结果”），所以“本会话允许”只对可信服务器有意义
             if key in allow_keys and not tainted:

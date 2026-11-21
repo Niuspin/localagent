@@ -95,6 +95,7 @@ def extract_html(
     headers: dict[str, str] | None = None,
     quote_max_chars: int = 400,
     do_redact_pii: bool = True,
+    output_format: str = "text",
 ) -> ExtractedDoc:
     from bs4 import Comment, NavigableString  # type: ignore
 
@@ -162,6 +163,34 @@ def extract_html(
             tables.append(rows)
 
     out: list[str] = []
+    md_mode = str(output_format or "text").lower() == "markdown"
+
+    def _code_lang(tag: Any) -> str:
+        cnode = tag.find("code") if tag.name == "pre" else tag
+        cls_list = (cnode.get("class") if cnode is not None else None) or []
+        if isinstance(cls_list, str):
+            cls_list = cls_list.split()
+        for c in cls_list:
+            m = re.match(r"^(?:language-|lang-)([A-Za-z0-9_+#.-]+)$", str(c).strip(), re.I)
+            if m:
+                return m.group(1).lower()
+        return ""
+
+    def _render_md_table(tbl: Any) -> str:
+        rows: list[list[str]] = []
+        for tr in tbl.find_all("tr")[:40]:
+            cells = [re.sub(r"\s+", " ", td.get_text(" ", strip=True)).replace("|", "\\|")[:120] for td in tr.find_all(["th", "td"])[:12]]
+            if any(cells):
+                rows.append(cells)
+        if not rows:
+            return ""
+        ncol = max(len(r) for r in rows)
+        pad = lambda r: r + [""] * (ncol - len(r))
+        hdr = pad(rows[0])
+        lines = ["| " + " | ".join(hdr) + " |", "| " + " | ".join(["---"] * ncol) + " |"]
+        for r in rows[1:]:
+            lines.append("| " + " | ".join(pad(r)) + " |")
+        return "\n\n" + "\n".join(lines) + "\n\n"
 
     def walk(node: Any) -> None:
         for ch in node.children:
@@ -173,6 +202,20 @@ def extract_html(
             n = getattr(ch, "name", "")
             if n in ("h1", "h2", "h3", "h4", "h5", "h6"):
                 out.append("\n\n" + "#" * int(n[1]) + " " + re.sub(r"\s+", " ", ch.get_text()).strip() + "\n")
+            elif md_mode and n == "table":
+                out.append(_render_md_table(ch))
+            elif md_mode and n == "blockquote":
+                bq = re.sub(r"\s+", " ", ch.get_text(" ", strip=True)).strip()
+                if bq:
+                    out.append("\n\n> " + bq + "\n\n")
+            elif md_mode and n == "code" and getattr(ch.parent, "name", "") != "pre":
+                tx = re.sub(r"\s+", " ", ch.get_text()).strip()
+                if tx:
+                    out.append(f"`{tx}`")
+            elif md_mode and n in ("strong", "b"):
+                tx = re.sub(r"\s+", " ", ch.get_text()).strip()
+                if tx:
+                    out.append(f"**{tx}**")
             elif n in ("p", "div", "section", "tr", "dd", "dt", "figcaption", "blockquote"):
                 out.append("\n")
                 walk(ch)
@@ -186,16 +229,21 @@ def extract_html(
                 walk(ch)
                 out.append(" | ")
             elif n == "pre":
-                out.append("\n```\n" + ch.get_text() + "\n```\n")
+                lang = _code_lang(ch) if md_mode else ""
+                out.append(f"\n```{lang}\n" + ch.get_text() + "\n```\n")
             elif n == "a":
                 href = str(ch.get("href") or "")
                 txt = re.sub(r"\s+", " ", ch.get_text()).strip()
+                full = ""
                 if href and txt and not href.startswith(("#", "javascript:", "mailto:", "tel:")):
                     full = urljoin(canonical or url, href)
                     if full.startswith(("http://", "https://")) and len(links) < 80:
                         links.append((txt[:80], full))
                 if txt:
-                    out.append(txt)
+                    if md_mode and full and full.startswith(("http://", "https://")) and len(txt) <= 80:
+                        out.append(f"[{txt}]({full})")
+                    else:
+                        out.append(txt)
             elif n == "img":
                 alt = str(ch.get("alt") or "").strip()
                 if alt:
@@ -249,6 +297,7 @@ def extract_response(
     charset_text: str | None = None,
     quote_max_chars: int = 400,
     do_redact_pii: bool = True,
+    output_format: str = "text",
 ) -> ExtractedDoc:
     ct = (content_type or (headers or {}).get("content-type", "")).split(";")[0].strip().lower()
     directives = parse_directives(headers, "")
@@ -273,7 +322,7 @@ def extract_response(
 
     txt = charset_text if charset_text is not None else body.decode("utf-8", "replace")
     if ct in ("text/html", "application/xhtml+xml", "") or "<html" in txt[:600].lower():
-        return extract_html(txt, url, headers=headers, quote_max_chars=quote_max_chars, do_redact_pii=do_redact_pii)
+        return extract_html(txt, url, headers=headers, quote_max_chars=quote_max_chars, do_redact_pii=do_redact_pii, output_format=output_format)
 
     clean = sec.sanitize_untrusted(txt)
     if do_redact_pii:

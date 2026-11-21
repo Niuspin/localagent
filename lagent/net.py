@@ -24,6 +24,16 @@ class NetError(Exception):
     pass
 
 
+class CrossDomainRedirectError(NetError):
+    """跨域重定向拦截异常：记录来源与跳转目标以便二次授权。"""
+
+    def __init__(self, source_url: str, target_url: str, target_domain: str, msg: str = ""):
+        self.source_url = source_url
+        self.target_url = target_url
+        self.target_domain = target_domain
+        super().__init__(msg or f"页面跨域重定向至 {target_url}（新域名 {target_domain} 未获授权）")
+
+
 class HTTPStatusError(NetError):
     def __init__(self, status: int, body: str):
         super().__init__(f"HTTP {status}: {body[:300]}")

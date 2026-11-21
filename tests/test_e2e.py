@@ -356,7 +356,12 @@ def test_search_tool_degrades_gracefully(ready):
     sid = new_session(ready)
     evs = ready.chat(sid, "搜索一下最新的")
     r = ev(evs, "tool_result")[0]
-    assert end_status(evs) == "done" and r["status"] in ("ok", "error")
+    assert end_status(evs) == "done" and r["status"] == "denied" and "联网授权" in r["content"]
+    s, _ = ready.patch(f"/api/sessions/{sid}", {"web_auth": "ask"})
+    assert s == 200
+    evs2 = ready.chat(sid, "搜索一下最新的")
+    r2 = ev(evs2, "tool_result")[0]
+    assert end_status(evs2) == "done" and r2["status"] in ("ok", "error")
     s, t = ready.post("/api/search/test", {"query": "x", "provider": "searxng"})
     assert s == 200 and "searxng" in t["errors"]
 

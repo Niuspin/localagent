@@ -29,6 +29,9 @@ class SessionState:
     allowed_tools: set[str] | None = None               # Swarm 角色白名单（None 表示不限制）
     skill_allowed_tools: set[str] | None = None         # 当前技能工具白名单（只收窄，不放宽）
     model_tier: str = "standard"                        # 当前激活模型档位：compact / standard / large
+    web_auth: str | None = None                         # 会话生效联网授权档位（off/ask/allowlist/open）
+    approved_domains: set = field(default_factory=set)  # 用户显式信任的域名集合
+    once_approved_urls: set = field(default_factory=set)  # 单次审批通过的 URL（不落盘）
 
 
 @dataclass

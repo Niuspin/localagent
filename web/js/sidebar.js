@@ -36,6 +36,8 @@
   };
 
   LA.newSession = function () {
+    LA.S.draftWebAuth = null;
+    LA.S.draftApprovedDomains = [];
     LA.setSession(null);
     LA.composer.setText(''); LA.S.attachments = []; LA.S.chosen = []; LA.composer.refresh();
     LA.composer.focus();
@@ -45,8 +47,13 @@
   LA.ensureSession = function () {
     if (LA.S.cur) return Promise.resolve(LA.S.cur);
     if (LA._creating) return LA._creating;
-    LA._creating = LA.post('/api/sessions', {}).then(function (v) {
+    var body = {};
+    if (LA.S.draftWebAuth) body.web_auth = LA.S.draftWebAuth;
+    if (LA.S.draftApprovedDomains && LA.S.draftApprovedDomains.length) body.approved_domains = LA.S.draftApprovedDomains;
+    LA._creating = LA.post('/api/sessions', body).then(function (v) {
       LA._creating = null; v.messages = v.messages || [];
+      LA.S.draftWebAuth = null;
+      LA.S.draftApprovedDomains = [];
       LA.setSession(v, { noRender: true });
       return v;
     }, function (e) { LA._creating = null; throw e; });
