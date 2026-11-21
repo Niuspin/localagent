@@ -97,7 +97,7 @@
 .modal {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: 18px;
   box-shadow: var(--shadow-lg);
   width: min(var(--mw, 560px), 100%);
   max-height: min(86vh, 800px);
@@ -110,16 +110,16 @@
 }
 
 .modal-h { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px 10px; border-bottom: 1px solid var(--border); }
-.modal-h h3 { margin: 0; font-family: var(--serif); font-size: 1.25em; font-weight: 600; color: var(--text); }
+.modal-h h3 { margin: 0; font-family: var(--font-display); font-size: 1.18em; font-weight: 650; letter-spacing: var(--tracking-snug); color: var(--text); }
 .modal-b { padding: 12px 20px 18px; overflow-y: auto; min-height: 0; flex: 1; }
-.modal-f { padding: 12px 20px; display: flex; justify-content: flex-end; gap: var(--sp-2); border-top: 1px solid var(--border); background: var(--bg-soft); border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+.modal-f { padding: 12px 20px; display: flex; justify-content: flex-end; gap: var(--sp-2); border-top: 1px solid var(--border); background: var(--bg-soft); border-radius: 0 0 18px 18px; }
 
-.modal.settings { --mw: 920px; height: min(86vh, 720px); }
+.modal.settings { --mw: 940px; height: min(86vh, 740px); }
 .set-body { display: flex; gap: 0; flex: 1; min-height: 0; }
 .set-nav {
-  width: 172px;
+  width: 176px;
   flex: none;
-  padding: 8px 8px 14px 14px;
+  padding: 10px 8px 14px 12px;
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -129,16 +129,17 @@
 .set-nav button {
   text-align: left;
   padding: 8px 12px;
-  border-radius: var(--radius-sm);
+  border-radius: 9px;
   color: var(--muted);
-  font-size: .92em;
+  font-size: .9em;
+  font-weight: 500;
   transition: background-color var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
 }
 .set-nav button:hover { background: var(--bg-soft); color: var(--text); }
 .set-nav button.on { background: var(--bg-elev); color: var(--text); font-weight: 600; box-shadow: var(--shadow-sm); }
 .set-pane { flex: 1; overflow-y: auto; padding: 6px 24px 24px; min-width: 0; }
-.set-pane h4 { font-family: var(--serif); margin: 20px 0 8px; font-size: 1.1em; color: var(--text); }
-.set-pane h4:first-child { margin-top: 8px; }
+.set-pane h4 { font-family: var(--font-display); font-weight: 650; letter-spacing: var(--tracking-snug); margin: 22px 0 8px; font-size: 1.05em; color: var(--text); }
+.set-pane h4:first-child { margin-top: 10px; }
 
 .field {
   display: grid;
@@ -170,17 +171,98 @@ input[type=range] { accent-color: var(--accent); width: 220px; }
 input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
 .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 
-/* Accent Swatches in Settings */
+/* Accent Swatches & Personalization Controls in Settings */
 .swatch-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .swatch-btn {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   border: 2px solid var(--border-strong);
   transition: transform var(--dur-1) var(--ease-emphasized), box-shadow var(--dur-1) var(--ease-standard);
 }
 .swatch-btn:hover { transform: scale(1.1); }
 .swatch-btn.on { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text); }
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+}
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  text-align: left;
+  transition: border-color var(--dur-1) var(--ease-standard), box-shadow var(--dur-1) var(--ease-standard), transform var(--dur-1) var(--ease-emphasized);
+}
+.theme-card:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+.theme-card.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.theme-mini {
+  height: 36px;
+  border-radius: 7px;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  display: flex;
+  overflow: hidden;
+  padding: 4px;
+  gap: 4px;
+}
+.theme-mini-side { width: 28%; border-radius: 4px; }
+.theme-mini-main { flex: 1; border-radius: 4px; display: flex; align-items: flex-end; justify-content: flex-end; padding: 4px; }
+.theme-mini-dot { width: 10px; height: 10px; border-radius: 50%; }
+.theme-card-name { font-size: .78em; font-weight: 550; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.seg-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+}
+.seg-opt {
+  padding: 4px 11px;
+  border-radius: 7px;
+  font-size: .84em;
+  color: var(--muted);
+  font-weight: 500;
+  transition: background-color var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard), box-shadow var(--dur-1) var(--ease-standard);
+}
+.seg-opt:hover { color: var(--text); }
+.seg-opt.on { background: var(--bg-elev); color: var(--text); font-weight: 600; box-shadow: var(--shadow-sm); }
+
+.brand-preview-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  width: 100%;
+  margin-bottom: 8px;
+}
+.brand-preview-ic {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--avatar-bg);
+  border: 1px solid var(--avatar-ring);
+  overflow: hidden;
+  flex: none;
+  box-shadow: var(--shadow-sm);
+}
+:root[data-avatar-shape="circle"] .brand-preview-ic { border-radius: 50%; }
+:root[data-avatar-shape="soft"] .brand-preview-ic { border-color: transparent; box-shadow: var(--shadow); }
+.brand-preview-meta { min-width: 0; flex: 1; }
+.brand-preview-meta b { display: block; font-family: var(--font-display); font-size: .96em; }
+.brand-preview-meta small { display: block; color: var(--muted); font-size: .8em; margin-top: 2px; }
 
 /* Lists / Hub / MCP / Command Palette */
 .plist { display: flex; flex-direction: column; gap: 5px; width: 100%; }

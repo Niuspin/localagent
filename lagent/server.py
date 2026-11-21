@@ -61,6 +61,8 @@ from .tools.files import SKIP_DIRS, rewind_to_turn
 
 mimetypes.add_type("font/woff2", ".woff2")
 mimetypes.add_type("image/svg+xml", ".svg")
+mimetypes.add_type("image/png", ".png")
+mimetypes.add_type("image/x-icon", ".ico")
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; "
        "font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -1730,6 +1732,10 @@ def make_app(st: State) -> Starlette:
     # ------------------------------------------------------------ 静态文件
     async def static(req: Request) -> Response:
         rel = req.path_params.get("p", "") or "index.html"
+        if rel == "favicon.ico":
+            ico = WEB_DIR / "icons" / "app-icon.ico"
+            if ico.is_file():
+                return FileResponse(ico, media_type="image/x-icon", headers={"Cache-Control": "no-cache"})
         p = (WEB_DIR / rel).resolve()
         if WEB_DIR.resolve() not in p.parents or not p.is_file():
             return PlainTextResponse("Not found", 404)

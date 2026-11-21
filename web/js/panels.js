@@ -121,14 +121,12 @@
     if (LA.artifacts && LA.artifacts.close && dtab !== 'artifacts') LA.artifacts.close();
     LA.clear(drawer);
     var tabs = el('div', { class: 'dr-tabs' });
-    [['files', LA.t('drawer.tab.files', '文件')], ['changes', LA.t('drawer.tab.changes', '变更')], ['artifacts', LA.t('drawer.tab.artifacts', '产物')], ['tasks', LA.t('drawer.tab.tasks', '任务')], ['swarm', LA.t('drawer.tab.swarm', '集群')], ['mission', LA.t('drawer.tab.mission', '任务线')], ['research', LA.t('drawer.tab.research', '调研')], ['net', LA.t('drawer.tab.net', '网络账本')]].forEach(function (t) {
+    var drawerTabs = [['files', LA.t('drawer.tab.files', '文件')], ['changes', LA.t('drawer.tab.changes', '变更')], ['artifacts', LA.t('drawer.tab.artifacts', '产物')], ['tasks', LA.t('drawer.tab.tasks', '任务')], ['swarm', LA.t('drawer.tab.swarm', '集群')], ['mission', LA.t('drawer.tab.mission', '任务线')], ['research', LA.t('drawer.tab.research', '调研')], ['net', LA.t('drawer.tab.net', '网络账本')]];
+    drawerTabs.forEach(function (t) {
       tabs.appendChild(el('button', { class: 'dr-tab' + (dtab === t[0] ? ' on' : ''), type: 'button', text: t[1], on: { click: function () {
-        var go = function () {
-          dtab = t[0]; previewing = null;
-          if (t[0] === 'artifacts' && LA.artifacts && LA.artifacts.resetPreview) LA.artifacts.resetPreview();
-          renderDrawer();
-        };
-        if (LA.viewTransition) LA.viewTransition(go); else go();
+        dtab = t[0]; previewing = null;
+        if (t[0] === 'artifacts' && LA.artifacts && LA.artifacts.resetPreview) LA.artifacts.resetPreview();
+        renderDrawer();
       } } }));
     });
     tabs.appendChild(el('span', { style: { flex: 1 } }));

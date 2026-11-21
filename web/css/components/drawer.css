@@ -32,7 +32,22 @@
   transition: color var(--dur-1) var(--ease-standard), background-color var(--dur-1) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
 }
 .dr-tab.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; background: var(--bg); }
-.dr-body { flex: 1; overflow-y: auto; padding: 10px 8px 16px; min-height: 0; }
+/* Research & Net Ledger Toolbar Isolation */
+.res-mode-bar, .res-form, .net-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.res-form .inp { flex: 1 1 180px; min-width: 0; }
+.res-summary, .net-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.dr-body { flex: 1; overflow-y: auto; padding: 10px 10px 16px; min-height: 0; }
 
 .tree-container { margin-top: 4px; }
 .tree-row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: .88em; transition: background-color var(--dur-1) var(--ease-standard); }

@@ -87,21 +87,25 @@
 
     var welcomeWrap = el('div', { class: 'empty' });
 
+    var pers = LA.getPersonalization ? LA.getPersonalization() : { assistantName: 'LocalAgent', userNickname: '', welcomeSub: '' };
+
     // 品牌与硬件状态徽章
     var st = LA.S.state || {}, e = (st && st.engine) || {};
     var modelName = e.model ? String(e.model).replace(/\.gguf$/i, '') : '';
     var statusText = e.status === 'ready' ? ('已就绪 · ' + (modelName || '本地模型')) : (e.status === 'starting' ? '正在启动模型…' : '模型待加载');
 
     var emblem = el('div', { class: 'welcome-emblem' },
-      el('span', { class: 'welcome-spark', html: LA.SPARK }),
+      el('span', { class: 'welcome-avatar', html: LA.appIconHtml ? LA.appIconHtml(72, 'hero-icon-img') : LA.SPARK }),
       el('span', { class: 'welcome-status-pill' + (e.status === 'ready' ? ' ready' : '') },
         el('span', { class: 'dot ' + (e.status || 'stopped') }),
         el('span', { text: statusText })
       )
     );
 
-    var h1 = el('h1', null, el('span', { class: 'g', html: LA.SPARK.replace('<svg', '<svg style="width:.75em;height:.75em;fill:currentColor;vertical-align:-.02em"') }), greeting());
-    var pSub = el('p', { class: 'welcome-sub', text: '本地运行，数据不出设备。你的私有 AI 协作工作台。' });
+    var greetText = greeting() + (pers.userNickname ? '，' + pers.userNickname : '');
+    var h1 = el('h1', { text: greetText });
+    var subText = pers.welcomeSub || '本地运行，数据不出设备。你的私有 AI 协作工作台。';
+    var pSub = el('p', { class: 'welcome-sub', text: subText });
 
     // 引导卡片容器（ui_smoke 依赖 #emptyCards）
     var emptyCards = el('div', { class: 'cards', id: 'emptyCards' });
@@ -284,8 +288,12 @@
     this.body = el('div', { class: 'ast-body' });
     this.usageEl = el('div', { class: 'usage' });
     this.acts = el('div', { class: 'msg-acts' });
-    this.el = el('div', { class: 'msg assistant', dataset: { idx: idx } },
-      el('div', { class: 'ast-head' }, el('span', { class: 'avatar', html: LA.SPARK })), this.body, this.usageEl, this.acts);
+    var pers = LA.getPersonalization ? LA.getPersonalization() : { assistantName: 'LocalAgent' };
+    this.el = el('div', { class: 'msg assistant' + (model.status === 'running' ? ' streaming' : ''), dataset: { idx: idx } },
+      el('div', { class: 'ast-head' },
+        el('span', { class: 'avatar', html: LA.appIconHtml ? LA.appIconHtml(26, 'ast-icon-img') : LA.SPARK }),
+        el('span', { class: 'ast-name', text: pers.assistantName || 'LocalAgent' })
+      ), this.body, this.usageEl, this.acts);
     var self = this;
     (model.blocks || []).forEach(function (b) { self.addBlock(b); });
     if (model.error) this.showError(model.error);
@@ -337,6 +345,7 @@
       }
     }
     LA.clear(this.acts);
+    this.el.classList.toggle('streaming', m.status === 'running');
     if (m.status === 'running') return;
     this.acts.appendChild(el('button', { class: 'act', html: icon('copy', 14) + ' 复制回答', on: { click: function () {
       LA.copyText((m.blocks || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('\n\n')); } } }));

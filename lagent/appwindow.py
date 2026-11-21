@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
 import subprocess
@@ -11,7 +12,15 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from .config import CODE_DIR
+
 _active_window: Any = None
+
+
+def _app_icon_path() -> str | None:
+    name = "app-icon.ico" if os.name == "nt" else "app-icon.png"
+    p = CODE_DIR / "web" / "icons" / name
+    return str(p) if p.is_file() else None
 
 
 def has_native_window() -> bool:
@@ -63,7 +72,11 @@ def run_native_window(
         _active_window = window
         if on_close:
             window.events.closed += on_close
-        webview.start(private_mode=False, storage_path=str(profile_dir))
+        start_kw: dict[str, Any] = {"private_mode": False, "storage_path": str(profile_dir)}
+        icon_path = _app_icon_path()
+        if icon_path and "icon" in inspect.signature(webview.start).parameters:
+            start_kw["icon"] = icon_path
+        webview.start(**start_kw)
         return True
     except Exception:
         return False

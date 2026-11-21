@@ -7,6 +7,100 @@
   /* ------------------------------------------------------------ 外观与布局持久化 */
   var THEMES = ['auto', 'light', 'dark', 'paper', 'midnight', 'hc', 'colorblind'];
   var MOTIONS = ['auto', 'full', 'reduced', 'off'];
+  var DARK_THEMES = { dark: 1, midnight: 1, hc: 1 };
+
+  LA.ACCENT_PRESETS = {
+    '': { name: '主题默认', swatch: null },
+    ink: {
+      name: '墨韵',
+      light: { c: '#27272A', h: '#18181B', s: 'rgba(39, 39, 42, 0.10)', sh: 'rgba(39, 39, 42, 0.17)', fg: '#FFFFFF' },
+      dark: { c: '#E4E4E7', h: '#F4F4F5', s: 'rgba(228, 228, 231, 0.14)', sh: 'rgba(228, 228, 231, 0.22)', fg: '#111113' }
+    },
+    terracotta: {
+      name: '赤陶',
+      light: { c: '#B4532E', h: '#9A4322', s: 'rgba(180, 83, 46, 0.10)', sh: 'rgba(180, 83, 46, 0.18)', fg: '#FFFFFF' },
+      dark: { c: '#E88B6A', h: '#F2A083', s: 'rgba(232, 139, 106, 0.15)', sh: 'rgba(232, 139, 106, 0.24)', fg: '#111113' }
+    },
+    indigo: {
+      name: '靛蓝',
+      light: { c: '#2554C7', h: '#1D43A6', s: 'rgba(37, 84, 199, 0.10)', sh: 'rgba(37, 84, 199, 0.17)', fg: '#FFFFFF' },
+      dark: { c: '#7AA7FF', h: '#98BCFF', s: 'rgba(122, 167, 255, 0.16)', sh: 'rgba(122, 167, 255, 0.25)', fg: '#0C1017' }
+    },
+    emerald: {
+      name: '苍松',
+      light: { c: '#1E6B43', h: '#165434', s: 'rgba(30, 107, 67, 0.10)', sh: 'rgba(30, 107, 67, 0.18)', fg: '#FFFFFF' },
+      dark: { c: '#5CC489', h: '#78D39F', s: 'rgba(92, 196, 137, 0.16)', sh: 'rgba(92, 196, 137, 0.25)', fg: '#111113' }
+    },
+    violet: {
+      name: '暮紫',
+      light: { c: '#6D35C9', h: '#5926AD', s: 'rgba(109, 53, 201, 0.10)', sh: 'rgba(109, 53, 201, 0.18)', fg: '#FFFFFF' },
+      dark: { c: '#B58BFF', h: '#C8A7FF', s: 'rgba(181, 139, 255, 0.16)', sh: 'rgba(181, 139, 255, 0.25)', fg: '#111113' }
+    },
+    rose: {
+      name: '绯樱',
+      light: { c: '#B8295A', h: '#981D47', s: 'rgba(184, 41, 90, 0.10)', sh: 'rgba(184, 41, 90, 0.18)', fg: '#FFFFFF' },
+      dark: { c: '#F484A8', h: '#F9A2BE', s: 'rgba(244, 132, 168, 0.16)', sh: 'rgba(244, 132, 168, 0.25)', fg: '#111113' }
+    }
+  };
+
+  function isDarkResolved(theme) {
+    if (DARK_THEMES[theme]) return true;
+    if (theme === 'auto') {
+      return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+    return false;
+  }
+
+  function applyAccentTokens(root, targetTheme) {
+    var acc = '';
+    try { acc = localStorage.getItem('la.accent') || ''; } catch (e) {}
+    var props = ['--accent', '--accent-h', '--accent-soft', '--accent-soft-h', '--accent-fg'];
+    if (!acc) {
+      props.forEach(function (p) { root.style.removeProperty(p); });
+      return;
+    }
+    var preset = LA.ACCENT_PRESETS[acc];
+    if (preset && preset.light) {
+      var pal = isDarkResolved(targetTheme) ? preset.dark : preset.light;
+      root.style.setProperty('--accent', pal.c);
+      root.style.setProperty('--accent-h', pal.h);
+      root.style.setProperty('--accent-soft', pal.s);
+      root.style.setProperty('--accent-soft-h', pal.sh);
+      root.style.setProperty('--accent-fg', pal.fg);
+      return;
+    }
+    // Backward compatibility with legacy raw hex values stored in la.accent
+    props.forEach(function (p) { root.style.removeProperty(p); });
+    if (/^#[0-9a-fA-F]{6}$/.test(acc)) root.style.setProperty('--accent', acc);
+  }
+
+  LA.getPersonalization = function () {
+    var g = function (k, d) { try { return localStorage.getItem(k) || d; } catch (e) { return d; } };
+    return {
+      accent: g('la.accent', ''),
+      fontStyle: g('la.fontStyle', 'sans'),
+      bubbleStyle: g('la.bubbleStyle', 'minimal'),
+      avatarShape: g('la.avatarShape', 'squircle'),
+      canvasPattern: g('la.canvasPattern', 'glow'),
+      assistantName: g('la.assistantName', '').trim() || 'LocalAgent',
+      userNickname: g('la.userNickname', '').trim(),
+      welcomeSub: g('la.welcomeSub', '').trim()
+    };
+  };
+
+  function syncBrandChrome() {
+    var p = LA.getPersonalization();
+    var bn = LA.$('.brand-name');
+    if (bn) bn.textContent = p.assistantName;
+    LA.$$('.ast-name').forEach(function (n) { n.textContent = p.assistantName; });
+    var inp = LA.$('#input');
+    if (inp) {
+      inp.placeholder = '给 ' + p.assistantName + ' 布置任务…（Enter 发送，Shift+Enter 换行，输入 / 选择技能）';
+    }
+    if (LA.chat && LA.chat.isEmpty && LA.chat.isEmpty() && LA.chat.renderEmpty) {
+      LA.chat.renderEmpty();
+    }
+  }
 
   LA.viewTransition = function (fn) {
     var m = document.documentElement.dataset.motion || 'auto';
@@ -30,18 +124,20 @@
     var motion = LA.cfg('ui.motion', 'auto');
     var density = LA.cfg('ui.density', 'comfortable');
     var lig = !!LA.cfg('ui.code_ligatures', false);
+    var p = LA.getPersonalization();
 
     var apply = function () {
       root.dataset.theme = targetTheme;
       root.dataset.motion = MOTIONS.indexOf(motion) >= 0 ? motion : 'auto';
       root.dataset.density = density === 'compact' ? 'compact' : 'comfortable';
       root.dataset.ligatures = lig ? '1' : '0';
+      root.dataset.fontStyle = ({ sans: 'sans', serif: 'serif', 'mono-head': 'mono-head' })[p.fontStyle] || 'sans';
+      root.dataset.bubble = ({ minimal: 'minimal', card: 'card', compact: 'compact' })[p.bubbleStyle] || 'minimal';
+      root.dataset.avatarShape = ({ squircle: 'squircle', circle: 'circle', soft: 'soft' })[p.avatarShape] || 'squircle';
+      root.dataset.canvas = ({ none: 'none', dots: 'dots', glow: 'glow' })[p.canvasPattern] || 'glow';
       root.style.setProperty('--fs', Math.max(12, Math.min(22, fs)) + 'px');
+      applyAccentTokens(root, targetTheme);
       try {
-        var acc = localStorage.getItem('la.accent');
-        if (acc) root.style.setProperty('--accent', acc);
-        else root.style.removeProperty('--accent');
-
         var cw = localStorage.getItem('la.colWidth') || 'auto';
         root.dataset.colWidth = cw;
         if (cw && cw !== 'auto') root.style.setProperty('--col-w', cw);
@@ -52,11 +148,13 @@
         var dw = parseInt(localStorage.getItem('la.drawerW') || '', 10);
         if (dw >= 280 && dw <= 520) root.style.setProperty('--drawer-w', dw + 'px');
       } catch (e) {}
+      syncBrandChrome();
     };
 
     if (root.dataset.theme && root.dataset.theme !== targetTheme) LA.viewTransition(apply);
     else apply();
   }
+  LA.applyPersonalization = applyUi;
 
   function wireSplitter(elId, varName, storeKey, minW, maxW, invert) {
     var sp = LA.$(elId); if (!sp) return;
@@ -308,6 +406,14 @@
       else if (mod && !e.shiftKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); toggleSide(); }
       else if (e.key === 'Escape' && !e.defaultPrevented) { if (LA.closeTopModal()) e.preventDefault(); else appEl.classList.remove('menu-open'); }
     });
+    if (window.matchMedia) {
+      var mq = window.matchMedia('(prefers-color-scheme: dark)');
+      if (mq && mq.addEventListener) {
+        mq.addEventListener('change', function () {
+          if (LA.cfg('ui.theme', 'auto') === 'auto') applyUi();
+        });
+      }
+    }
     window.addEventListener('beforeunload', function () {
       clearTimeout(pollTimer);
       if (LA.flushConfig) LA.flushConfig();

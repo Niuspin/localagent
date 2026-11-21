@@ -211,7 +211,10 @@
         });
       }
 
-      LA.$('#brandGlyph').innerHTML = LA.SPARK;
+      var pers = LA.getPersonalization ? LA.getPersonalization() : { assistantName: 'LocalAgent' };
+      var bn = LA.$('.brand-name');
+      if (bn) bn.textContent = pers.assistantName;
+      LA.$('#brandGlyph').innerHTML = LA.appIconHtml ? LA.appIconHtml(30, 'brand-icon-img') : LA.SPARK;
       LA.$('#btnCollapse').innerHTML = icon('sidebar', 18);
       LA.$('#btnExpand').innerHTML = icon('sidebar', 18);
       LA.$('#btnMenu').innerHTML = icon('menu', 20);

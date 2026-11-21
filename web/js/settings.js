@@ -569,46 +569,128 @@
   /* ------------------------------------------------------------ 外观 */
   function tabMcp() { LA.mcpTab(pane, { F: F, btn: btn, sec: sec, banner: banner }); }
 
-  function tabUi() {
-    pane.appendChild(sec(LA.t('ui.appearance', '外观与排版')));
-    pane.appendChild(F(LA.t('ui.theme', '主题'), sel('ui.theme', [
-      ['auto', '跟随系统'],
-      ['light', '浅色 (Warm Alabaster)'],
-      ['dark', '深色 (Obsidian)'],
-      ['paper', '纸质阅读 (Paper)'],
-      ['midnight', '午夜深蓝 (Midnight)'],
-      ['hc', '高对比度 (HC)'],
-      ['colorblind', '色盲友好 (Okabe-Ito)']
-    ])));
-    var fs = el('input', { type: 'range', min: 12, max: 22, step: 1, value: LA.cfg('ui.font_size', 15) });
-    var fv = el('span', { text: fs.value + 'px' });
-    fs.addEventListener('input', function () { fv.textContent = fs.value + 'px'; LA.cfgSet('ui.font_size', parseInt(fs.value, 10)); });
-    pane.appendChild(F('字号', [fs, fv]));
-    pane.appendChild(F(LA.t('ui.density', '界面密度'), sel('ui.density', [['comfortable', '舒适 (默认)'], ['compact', '紧凑']]) ));
-    pane.appendChild(F(LA.t('ui.motion', '动效强度'), sel('ui.motion', [['auto', '跟随系统'], ['full', '完整动效'], ['reduced', '仅淡入（无位移）'], ['off', '关闭动画']]) ));
-    pane.appendChild(F(LA.t('ui.ligatures', '代码连字'), sw('ui.code_ligatures', '启用等宽代码块连字 (JetBrains Mono / Cascadia Code)')));
-
-    // Accent swatches
-    var curAcc = '';
-    try { curAcc = localStorage.getItem('la.accent') || ''; } catch (e) {}
-    var swatches = [['', '默认'], ['#AC4E2F', '赤陶'], ['#1D4ED8', '钴蓝'], ['#1F6E40', '松绿'], ['#6B28C8', '深紫'], ['#005A9C', '海洋']];
-    var swWrap = el('div', { class: 'swatch-row' });
-    swatches.forEach(function (swItem) {
+  function segChoice(storeKey, defVal, opts, onChange) {
+    var cur = defVal;
+    try { cur = localStorage.getItem(storeKey) || defVal; } catch (e) {}
+    var wrap = el('div', { class: 'seg-group' });
+    opts.forEach(function (o) {
       var b = el('button', {
         type: 'button',
-        class: 'swatch-btn' + (curAcc === swItem[0] ? ' on' : ''),
-        title: swItem[1],
-        'aria-label': swItem[1],
-        style: { background: swItem[0] || 'var(--accent)' },
+        class: 'seg-opt' + (cur === o[0] ? ' on' : ''),
+        text: o[1],
+        on: {
+          click: function () {
+            try { localStorage.setItem(storeKey, o[0]); } catch (e) {}
+            LA.$$('.seg-opt', wrap).forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            if (LA.applyPersonalization) LA.applyPersonalization();
+            if (onChange) onChange(o[0]);
+          }
+        }
+      });
+      wrap.appendChild(b);
+    });
+    return wrap;
+  }
+
+  function tabUi() {
+    pane.appendChild(sec('主题与配色'));
+    var themeOpts = [
+      ['auto', '跟随系统'],
+      ['light', '暖白 (Alabaster)'],
+      ['dark', '石墨 (Obsidian)'],
+      ['paper', '画册白 (Paper)'],
+      ['midnight', '夜蓝 (Midnight)'],
+      ['hc', '高对比度 (HC)'],
+      ['colorblind', '色盲友好 (Okabe-Ito)']
+    ];
+    var themeSel = sel('ui.theme', themeOpts);
+    pane.appendChild(F(LA.t('ui.theme', '主题'), themeSel));
+
+    var cardsMeta = [
+      ['auto', '跟随系统', '#FAF9F7', '#F3F2EE', '#B4532E'],
+      ['light', '暖白', '#FAF9F7', '#F3F2EE', '#B4532E'],
+      ['dark', '石墨暗', '#111113', '#17171A', '#E88B6A'],
+      ['paper', '画册白', '#FFFFFF', '#F7F7F5', '#2554C7'],
+      ['midnight', '夜蓝', '#0C1017', '#111620', '#66A8FF'],
+      ['hc', '高对比', '#000000', '#0A0A0A', '#FFD447'],
+      ['colorblind', '色盲友好', '#FAFAFA', '#F2F3F5', '#005A9C']
+    ];
+    var curTheme = LA.cfg('ui.theme', 'auto');
+    var themeGrid = el('div', { class: 'theme-grid' });
+    cardsMeta.forEach(function (tm) {
+      var card = el('button', {
+        type: 'button',
+        class: 'theme-card' + (curTheme === tm[0] ? ' on' : ''),
+        on: {
+          click: function () {
+            themeSel.value = tm[0];
+            LA.cfgSet('ui.theme', tm[0], { immediate: true });
+            LA.$$('.theme-card', themeGrid).forEach(function (x) { x.classList.remove('on'); });
+            card.classList.add('on');
+          }
+        }
+      },
+      el('div', { class: 'theme-mini', style: { background: tm[2] } },
+        el('div', { class: 'theme-mini-side', style: { background: tm[3] } }),
+        el('div', { class: 'theme-mini-main', style: { background: tm[2] } },
+          el('span', { class: 'theme-mini-dot', style: { background: tm[4] } })
+        )
+      ),
+      el('span', { class: 'theme-card-name', text: tm[1] }));
+      themeGrid.appendChild(card);
+    });
+    themeSel.addEventListener('change', function () {
+      LA.$$('.theme-card', themeGrid).forEach(function (x, i) {
+        x.classList.toggle('on', cardsMeta[i] && cardsMeta[i][0] === themeSel.value);
+      });
+    });
+    pane.appendChild(F('快速预览切换', themeGrid));
+
+    // Full-token Accent presets
+    var curAcc = '';
+    try { curAcc = localStorage.getItem('la.accent') || ''; } catch (e) {}
+    var presets = LA.ACCENT_PRESETS || {};
+    var accOrder = ['', 'ink', 'terracotta', 'indigo', 'emerald', 'violet', 'rose'];
+    var swWrap = el('div', { class: 'swatch-row' });
+    accOrder.forEach(function (key) {
+      var item = presets[key] || { name: key || '默认' };
+      var bgCol = !key ? 'linear-gradient(135deg, var(--accent) 50%, var(--bg-soft) 50%)' : (item.light ? item.light.c : 'var(--accent)');
+      var b = el('button', {
+        type: 'button',
+        class: 'swatch-btn' + (curAcc === key ? ' on' : ''),
+        title: item.name,
+        'aria-label': item.name,
+        style: { background: bgCol },
         on: { click: function () {
-          try { if (swItem[0]) localStorage.setItem('la.accent', swItem[0]); else localStorage.removeItem('la.accent'); } catch (e) {}
+          try { if (key) localStorage.setItem('la.accent', key); else localStorage.removeItem('la.accent'); } catch (e) {}
+          if (LA.applyPersonalization) LA.applyPersonalization();
           LA.bus.emit('config', LA.S.config || {});
           show('ui');
         } }
       });
       swWrap.appendChild(b);
     });
-    pane.appendChild(F(LA.t('ui.accent', '强调色预设'), swWrap, '经 WCAG AA 对比度校准的强调色预设。'));
+    pane.appendChild(F(LA.t('ui.accent', '强调色预设'), swWrap, '包含与黑白线稿高度契合的「墨韵」等 7 组明暗双模式 WCAG AA 校准配色。'));
+    pane.appendChild(F(LA.t('ui.canvas', '背景纹理'), segChoice('la.canvasPattern', 'glow', [
+      ['none', '纯净留白'],
+      ['glow', '柔和环境光'],
+      ['dots', '微距点阵']
+    ])));
+
+    pane.appendChild(sec('字体与排版'));
+    var fs = el('input', { type: 'range', min: 12, max: 22, step: 1, value: LA.cfg('ui.font_size', 15) });
+    var fv = el('span', { text: fs.value + 'px' });
+    fs.addEventListener('input', function () { fv.textContent = fs.value + 'px'; LA.cfgSet('ui.font_size', parseInt(fs.value, 10)); });
+    pane.appendChild(F('字号', [fs, fv]));
+    pane.appendChild(F(LA.t('ui.fontstyle', '字体风格'), segChoice('la.fontStyle', 'sans', [
+      ['sans', '现代无衬线'],
+      ['serif', '编辑衬线'],
+      ['mono-head', '极客等宽']
+    ])));
+    pane.appendChild(F(LA.t('ui.density', '界面密度'), sel('ui.density', [['comfortable', '舒适 (默认)'], ['compact', '紧凑']]) ));
+    pane.appendChild(F(LA.t('ui.motion', '动效强度'), sel('ui.motion', [['auto', '跟随系统'], ['full', '完整动效'], ['reduced', '仅淡入（无位移）'], ['off', '关闭动画']]) ));
+    pane.appendChild(F(LA.t('ui.ligatures', '代码连字'), sw('ui.code_ligatures', '启用等宽代码块连字 (JetBrains Mono / Cascadia Code)')));
 
     // Reading column width & locale
     var colSel = el('select', { class: 'inp' });
@@ -629,6 +711,64 @@
       LA.toast('语言偏好已更新（新打开面板立即生效）', 'ok');
     });
     pane.appendChild(F(LA.t('ui.locale', '界面语言'), locSel));
+
+    pane.appendChild(sec('品牌与个性化'));
+    var pers = LA.getPersonalization ? LA.getPersonalization() : { assistantName: 'LocalAgent', userNickname: '', welcomeSub: '' };
+    var previewTitle = el('b', { text: pers.assistantName });
+    var previewSub = el('small', { text: pers.welcomeSub || '本地运行，数据不出设备。你的私有 AI 协作工作台。' });
+    pane.appendChild(el('div', { class: 'brand-preview-card' },
+      el('div', { class: 'brand-preview-ic', html: LA.appIconHtml ? LA.appIconHtml(42) : '' }),
+      el('div', { class: 'brand-preview-meta' }, previewTitle, previewSub)
+    ));
+    pane.appendChild(F(LA.t('ui.avatar_shape', '图标形态'), segChoice('la.avatarShape', 'squircle', [
+      ['squircle', '圆角方框'],
+      ['circle', '圆形徽章'],
+      ['soft', '柔和无框']
+    ])));
+    pane.appendChild(F(LA.t('ui.bubble_style', '消息排版'), segChoice('la.bubbleStyle', 'minimal', [
+      ['minimal', '极简通透'],
+      ['card', '柔和卡片'],
+      ['compact', '紧凑高密']
+    ])));
+
+    var astInp = el('input', { class: 'inp wide', placeholder: 'LocalAgent', maxlength: 32, value: pers.assistantName === 'LocalAgent' ? '' : pers.assistantName });
+    astInp.addEventListener('input', function () {
+      var v = astInp.value.trim();
+      try { if (v) localStorage.setItem('la.assistantName', v); else localStorage.removeItem('la.assistantName'); } catch (e) {}
+      previewTitle.textContent = v || 'LocalAgent';
+      if (LA.applyPersonalization) LA.applyPersonalization();
+    });
+    pane.appendChild(F(LA.t('ui.assistant_name', '助手名称'), astInp, '自定义侧栏品牌名、对话头像署名与输入框提示名称。'));
+
+    var nickInp = el('input', { class: 'inp wide', placeholder: '选填，例如：Alex', maxlength: 24, value: pers.userNickname || '' });
+    nickInp.addEventListener('input', function () {
+      var v = nickInp.value.trim();
+      try { if (v) localStorage.setItem('la.userNickname', v); else localStorage.removeItem('la.userNickname'); } catch (e) {}
+      if (LA.applyPersonalization) LA.applyPersonalization();
+    });
+    pane.appendChild(F(LA.t('ui.user_nickname', '个人称呼'), nickInp, '填写后欢迎页问候语将显示为「晚上好，你的称呼」。'));
+
+    var subInp = el('input', { class: 'inp wide', placeholder: '本地运行，数据不出设备。你的私有 AI 协作工作台。', maxlength: 100, value: pers.welcomeSub || '' });
+    subInp.addEventListener('input', function () {
+      var v = subInp.value.trim();
+      try { if (v) localStorage.setItem('la.welcomeSub', v); else localStorage.removeItem('la.welcomeSub'); } catch (e) {}
+      previewSub.textContent = v || '本地运行，数据不出设备。你的私有 AI 协作工作台。';
+      if (LA.applyPersonalization) LA.applyPersonalization();
+    });
+    pane.appendChild(F(LA.t('ui.welcome_sub', '欢迎副标题'), subInp));
+
+    pane.appendChild(el('div', { class: 'toolbar', style: { marginTop: '10px' } }, btn(LA.t('ui.reset', '恢复默认外观'), function () {
+      ['la.accent', 'la.fontStyle', 'la.bubbleStyle', 'la.avatarShape', 'la.canvasPattern', 'la.assistantName', 'la.userNickname', 'la.welcomeSub', 'la.colWidth'].forEach(function (k) {
+        try { localStorage.removeItem(k); } catch (e) {}
+      });
+      LA.cfgSet('ui.theme', 'auto', { immediate: true });
+      LA.cfgSet('ui.font_size', 15, { immediate: true });
+      LA.cfgSet('ui.density', 'comfortable', { immediate: true });
+      LA.cfgSet('ui.motion', 'auto', { immediate: true });
+      if (LA.applyPersonalization) LA.applyPersonalization();
+      LA.toast('已恢复默认外观设置', 'ok');
+      show('ui');
+    })));
 
     pane.appendChild(sec('快捷键'));
     var keys = [['Enter', '发送'], ['Shift + Enter', '换行'], ['/', '命令或技能'], ['@', '引用工作区文件'], ['Ctrl/⌘ + K', '全局命令面板'], ['Ctrl/⌘ + Shift + F', '切换专注模式'], ['Ctrl/⌘ + Shift + O', '新对话'], ['Ctrl/⌘ + B', '收起/展开侧栏'], ['Esc', '关闭弹窗 / 拒绝当前审批']];

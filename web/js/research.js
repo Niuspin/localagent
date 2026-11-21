@@ -80,6 +80,7 @@
     var form = el('div', { class: 'toolbar' }, qInp, depthSel, goBtn);
 
     var body = el('div', { class: 'res-body' }, el('div', { class: 'hint2', text: '加载中…' }));
+    LA.clear(host);
     host.append(head, form, body);
 
     if (offline || mode === 'off') {
@@ -216,6 +217,7 @@
     var expBtn = el('button', { class: 'btn sm ghost', type: 'button', text: '导出 CSV' });
     var sumBox = el('div', { class: 'net-summary' });
     var listBox = el('div', { class: 'net-list' }, el('div', { class: 'hint2', text: '加载中…' }));
+    LA.clear(host);
     host.append(el('div', { class: 'toolbar' }, domInp, decSel, refBtn, expBtn), sumBox, listBox);
 
     function load() {

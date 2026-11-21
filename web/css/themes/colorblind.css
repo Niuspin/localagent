@@ -23,6 +23,13 @@
   --accent-soft-h: rgba(0, 90, 156, 0.18);
   --accent-fg: #FFFFFF;
 
+  --avatar-bg: #FFFFFF;
+  --avatar-ring: rgba(0, 90, 156, 0.28);
+  --border-subtle: rgba(17, 20, 24, 0.06);
+  --border-highlight: rgba(255, 255, 255, 0.85);
+  --glow-a: rgba(0, 90, 156, 0.06);
+  --glow-b: rgba(0, 107, 104, 0.04);
+
   --ok: #006B68;
   --ok-soft: rgba(0, 107, 104, 0.12);
   --warn: #A85500;

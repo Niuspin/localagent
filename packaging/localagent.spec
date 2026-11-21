@@ -21,5 +21,6 @@ a = Analysis(
     excludes=["tkinter", "pytest", "playwright", "IPython", "matplotlib", "numpy.tests"],
 )
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="LocalAgent", console=False, icon=None)
+_ico = ROOT / "web" / "icons" / "app-icon.ico"
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="LocalAgent", console=False, icon=str(_ico) if _ico.is_file() else None)
 coll = COLLECT(exe, a.binaries, a.datas, name="LocalAgent")

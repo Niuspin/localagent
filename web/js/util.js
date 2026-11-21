@@ -98,6 +98,14 @@
   };
   LA.iconEl = function (name, size) { var s = document.createElement('span'); s.style.display = 'inline-flex'; s.innerHTML = LA.icon(name, size); return s; };
   LA.SPARK = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 5l2.4 8.6L27 16l-8.6 2.4L16 27l-2.4-8.6L5 16l8.6-2.4z"/></svg>';
+  LA.APP_ICON = '/icons/app-icon-64.png';
+  LA.APP_ICON_LG = '/icons/app-icon.png';
+  LA.appIconHtml = function (size, cls) {
+    var px = +size || 32;
+    var src = px >= 72 ? LA.APP_ICON_LG : LA.APP_ICON;
+    var c = 'app-icon-img' + (cls ? ' ' + cls : '');
+    return '<img class="' + c + '" src="' + src + '" alt="LocalAgent" width="' + px + '" height="' + px + '" draggable="false">';
+  };
 
   /** 根据文件扩展名返回最佳图标 */
   LA.fileIcon = function (p) {
